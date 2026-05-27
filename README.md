@@ -54,6 +54,16 @@ Send a message to the bot in Feishu.
 
 If the Feishu chat is not bound to a Codex thread yet, the bot first sends a selection card so you can create a new thread or resume an existing one. After selection, the chat is bridged to that Codex thread.
 
+## Community And Support
+
+The WeChat public account is recommended for technical notes, implementation write-ups, and project updates.
+
+<img src="docs/assets/wechat-public-account.jpg" alt="WeChat public account" width="220">
+
+The WeChat group is for issue feedback, usage discussion, and feature suggestions.
+
+<img src="docs/assets/wechat-group.jpg" alt="AI-Agent technical discussion group" width="260">
+
 ## Feishu Commands
 
 ```text
