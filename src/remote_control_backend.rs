@@ -150,6 +150,11 @@ pub fn router() -> Router<SharedState> {
         .route("/backend-api/usage", get(usage))
         .route("/backend-api/wham/tasks/list", get(tasks_list))
         .route("/backend-api/wham/environments", get(wham_environments))
+        .route("/backend-api/wham/apps", post(wham_apps))
+        .route(
+            "/backend-api/codex/analytics-events/events",
+            post(analytics_events),
+        )
         .route("/backend-api/beacons/home", get(beacons_home))
         .route("/backend-api/beacons/event", post(beacons_event))
         .route(
@@ -302,6 +307,17 @@ async fn wham_environments() -> Json<Value> {
         "items": [],
         "cursor": Value::Null,
     }))
+}
+
+async fn wham_apps() -> Json<Value> {
+    Json(json!({
+        "items": [],
+        "cursor": Value::Null,
+    }))
+}
+
+async fn analytics_events() -> StatusCode {
+    StatusCode::NO_CONTENT
 }
 
 async fn accounts_mfa_info() -> Json<Value> {
