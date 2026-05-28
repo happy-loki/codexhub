@@ -4,7 +4,7 @@
 
 `codex-remote` 是一个本地 Codex App remote-control backend，用来把 Codex App 的远程控制能力接到飞书 / Lark。
 
-它只做一件事：用户明确启动本地服务后，让 Codex App 连接本机 backend，再把远程控制消息桥接到飞书。
+它只做一件事：用户明确启动本地服务后，让 Codex App 连接本机 backend，再把远程控制消息桥接到飞书[tg和微信待续]。
 
 ## 快速使用
 

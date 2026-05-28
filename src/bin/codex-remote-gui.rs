@@ -260,7 +260,7 @@ fn build_ui() {
         StaticBoxSizerBuilder::new_with_label(Orientation::Vertical, &system_page, "本地服务")
             .build();
     let service_text = StaticText::builder(&system_page)
-        .with_label("Codex Remote 会在 GUI 打开时接管并重启本地 backend，避免旧版本服务残留；GUI 退出时会关闭本地 backend。不会安装开机启动项，也不会修改系统常驻服务。")
+        .with_label("Codex Remote 会在 GUI 打开时接管并重启本地 backend，避免旧版本服务残留；GUI 退出时会关闭本地 backend，并清除本次写入的 Codex App 环境变量。不会安装开机启动项，也不会修改系统常驻服务。")
         .build();
     service_text.set_foreground_color(Colour::rgb(82, 91, 105));
     service_text.wrap(760);
@@ -479,12 +479,49 @@ fn stop_managed_daemon(daemon_child: &Rc<RefCell<Option<Child>>>) {
 }
 
 fn stop_daemon_on_exit(api: &ApiClient, daemon_child: &Rc<RefCell<Option<Child>>>) {
+    clear_codex_app_gui_environment(&api.url("/backend-api"));
     let _ = api.shutdown();
     wait_for_daemon_offline(api, 10);
     stop_managed_daemon(daemon_child);
     if api.is_online() {
         stop_daemon_by_port(api);
         wait_for_daemon_offline(api, 10);
+    }
+}
+
+fn clear_codex_app_gui_environment(backend_url: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let login_issuer = oauth_issuer_url(backend_url);
+        unset_launchctl_env_if_matches("CODEX_API_BASE_URL", backend_url);
+        unset_launchctl_env_if_matches("CODEX_APP_SERVER_LOGIN_ISSUER", &login_issuer);
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = backend_url;
+    }
+}
+
+fn oauth_issuer_url(backend_url: &str) -> String {
+    backend_url
+        .trim_end_matches('/')
+        .strip_suffix("/backend-api")
+        .unwrap_or_else(|| backend_url.trim_end_matches('/'))
+        .to_string()
+}
+
+#[cfg(target_os = "macos")]
+fn unset_launchctl_env_if_matches(name: &str, expected: &str) {
+    let Ok(output) = Command::new("launchctl").arg("getenv").arg(name).output() else {
+        return;
+    };
+    if !output.status.success() {
+        return;
+    }
+    let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if value == expected {
+        let _ = Command::new("launchctl").arg("unsetenv").arg(name).output();
     }
 }
 
