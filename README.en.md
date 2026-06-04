@@ -2,9 +2,9 @@
 
 [中文说明](README.md)
 
-`codex-remote` is a local Codex App remote-control backend with Feishu/Lark, Telegram Bot, and WeChat bot bridges.
+`codex-remote` is a local Codex remote-control backend for Codex App, the Codex VS Code extension, and Codex CLI app-server, with Feishu/Lark, Telegram Bot, and WeChat bot bridges.
 
-It has one job: after the user opens the GUI, Codex App connects to the local backend, and remote-control messages are bridged to IM channels.
+It has one job: after the user opens the GUI, a Codex client connects to the local backend, and remote-control messages are bridged to IM channels.
 
 ## Quick Start
 
@@ -46,7 +46,7 @@ Provider name can be empty. If it is empty but Base URL or API Key is filled, th
 
 Click `保存` to save the current provider only. Click `启用` to save the current provider and make Codex App use it.
 
-Enabling a provider backs up the old config, points Codex App remote control to local `codex-remote`, and writes local auth plus the current model provider.
+Enabling a provider backs up the old config, points Codex remote control to local `codex-remote`, and writes local auth plus the current model provider.
 
 ### 6. Open Codex App
 
@@ -54,7 +54,57 @@ Open Codex App normally, then enable remote control in Codex App.
 
 When connected, `Codex Remote` shows Codex App as connected.
 
-### 7. Use IM
+### 7. Use Codex CLI
+
+Codex CLI does not need a replaced `codex` command or an installed wrapper. First make sure the previous step has pointed `~/.codex/config.toml` at the local backend:
+
+```toml
+chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+```
+
+If you only want to use Codex remotely from IM, start a headless Codex app-server.
+
+macOS / Linux:
+
+```bash
+codex remote-control
+```
+
+Windows:
+
+```powershell
+codex app-server --listen off --remote-control
+```
+
+If you want the local TUI and IM remote control to share the same Codex app-server, first start an app-server with remote control enabled, then connect the TUI to it.
+
+Terminal 1:
+
+```bash
+codex app-server --listen ws://127.0.0.1:3849 --remote-control
+```
+
+Terminal 2:
+
+```bash
+codex --remote ws://127.0.0.1:3849 -C /path/to/project
+```
+
+Windows uses the same websocket form; replace the project path with a Windows path:
+
+```powershell
+codex --remote ws://127.0.0.1:3849 -C D:\path\to\project
+```
+
+If port `3849` is already in use, choose another local port, but keep the two addresses identical. To verify the connection:
+
+```text
+GET http://127.0.0.1:3847/api/remote-control/status
+```
+
+`connected=true` and `initialized=true` mean the Codex CLI app-server is connected to `codex-remote`.
+
+### 8. Use IM
 
 Send a message to the bot in Feishu, a Telegram private chat, or WeChat.
 
@@ -89,7 +139,7 @@ Click `清除 Codex 接入` in the GUI to remove this project's root Codex routi
 
 ## Project Boundary
 
-`codex-remote` only supports the clean Codex App remote-control path.
+`codex-remote` only supports the clean official Codex remote-control path.
 
 It does not:
 
@@ -107,10 +157,10 @@ The local backend starts only when the user opens the GUI or explicitly starts i
 Runtime path:
 
 ```text
-Codex App
+Codex App / Codex VS Code extension / Codex CLI app-server
   |
   | chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
-  | user enables remote control in the app
+  | user enables remote control, or starts codex app-server --remote-control
   v
 official Codex app-server
   |
@@ -197,7 +247,7 @@ Telegram is for the simple private-chat flow: create your own bot with BotFather
 
 WeChat config is normally written by GUI QR onboarding. `botType = "3"` follows the current OpenClaw WeChat bot path. Do not commit real `botToken` values.
 
-Codex App config is separate and usually lives at `~/.codex/config.toml`.
+Codex client config is separate and usually lives at `~/.codex/config.toml`.
 
 See [config.example.toml](config.example.toml) and [docs/configuration.md](docs/configuration.md).
 
