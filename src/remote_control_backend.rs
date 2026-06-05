@@ -4220,16 +4220,6 @@ async fn should_track_notification_thread_for_client(
     if is_bound_thread {
         return true;
     }
-    let is_persisted_thread = {
-        let persisted = state.persisted.lock().await;
-        persisted
-            .sessions
-            .get(&client_key)
-            .is_some_and(|persisted_thread_id| persisted_thread_id == thread_id)
-    };
-    if is_persisted_thread {
-        return true;
-    }
     let is_pending_request_thread = {
         let remote = state.remote_control.inner.lock().await;
         remote

@@ -895,20 +895,6 @@ async fn route_for_codex_output(
         });
         return Some(route);
     }
-    if let Some(route) =
-        crate::im::core::routing::route_for_persisted_thread(state, thread_id).await
-    {
-        chain_log::write_line(format!(
-            "[im_route] level=warn event=codex_route_restored method={} thread={} platform={} account={} chat={} conversation={}",
-            method,
-            thread_id,
-            route.platform.key(),
-            route.account_id,
-            route.chat_id,
-            route.conversation_key
-        ));
-        return Some(route);
-    }
     chain_log::write_line(format!(
         "[im_route] level=warn event=codex_route_missing method={} thread={}",
         method, thread_id

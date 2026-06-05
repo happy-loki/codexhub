@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct PersistedState {
-    pub sessions: HashMap<String, String>,
     pub wechat: WechatPersistedState,
 }
 

@@ -1,9 +1,6 @@
 use anyhow::Result;
 
-use crate::{
-    app_state::SharedState, im::core::routing::persist_thread_binding, im_runtime::RouteTarget,
-    remote_control_backend,
-};
+use crate::{app_state::SharedState, im_runtime::RouteTarget, remote_control_backend};
 
 pub(crate) async fn create_and_bind_thread(
     state: &SharedState,
@@ -55,5 +52,5 @@ pub(crate) async fn bind_thread_to_route(
             runtime.clear_thread_routing_request(request_id);
         }
     }
-    persist_thread_binding(state, route, thread_id).await
+    Ok(())
 }

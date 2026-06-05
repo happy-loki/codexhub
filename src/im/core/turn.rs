@@ -4,7 +4,6 @@ use crate::{
     app_state::SharedState,
     im::core::routing::{
         clear_thread_binding_with_reason, is_stale_thread_error, live_thread_for_route,
-        persist_thread_binding,
     },
     im_runtime::{RouteTarget, ThreadTurnState, TurnOrigin},
     remote_control_backend,
@@ -51,9 +50,6 @@ pub(crate) async fn start_turn_for_route(
     let Some(thread_id) = live_thread_for_route(state, route).await else {
         return TurnStartOutcome::NoThread;
     };
-    if let Err(error) = persist_thread_binding(state, route, &thread_id).await {
-        return TurnStartOutcome::Failed { error };
-    }
     let blocked = {
         let mut runtime = state.runtime.lock().await;
         match runtime.try_mark_turn_starting(&thread_id) {

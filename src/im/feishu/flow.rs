@@ -193,10 +193,6 @@ async fn handle_control_message(
                     "feishu_new_command",
                 );
             }
-            let mut persisted = state.persisted.lock().await;
-            persisted.sessions.remove(&message.conversation_key());
-            let config = state.config.lock().await.clone();
-            persisted.save(&config.state_path)?;
             send_text_to_message(
                 api,
                 message,
@@ -279,10 +275,6 @@ async fn handle_control_message(
                     "feishu_quit_command",
                 );
             }
-            let mut persisted = state.persisted.lock().await;
-            persisted.sessions.remove(&message.conversation_key());
-            let config = state.config.lock().await.clone();
-            persisted.save(&config.state_path)?;
             send_text_to_message(api, message, "已退出当前会话。").await?;
             return Ok(true);
         }

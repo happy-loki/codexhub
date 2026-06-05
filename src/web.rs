@@ -1124,7 +1124,6 @@ fn clear_legacy_im_account(config: &mut AppConfig, platform: &str, account_id: &
 }
 
 async fn clear_im_account_bindings(state: &SharedState, platform: &str, account_id: &str) {
-    let prefix = format!("{platform}:{account_id}:");
     {
         let mut runtime = state.runtime.lock().await;
         let removed = runtime
@@ -1156,12 +1155,6 @@ async fn clear_im_account_bindings(state: &SharedState, platform: &str, account_
             .await
             .remove(&im_account_key(kind, account_id));
     }
-    let mut persisted = state.persisted.lock().await;
-    persisted
-        .sessions
-        .retain(|conversation_key, _| !conversation_key.starts_with(&prefix));
-    let config = state.config.lock().await.clone();
-    let _ = persisted.save(&config.state_path);
 }
 
 fn im_platform_from_key(platform: &str) -> Option<ImPlatformKind> {
