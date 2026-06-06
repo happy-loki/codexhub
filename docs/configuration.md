@@ -50,7 +50,7 @@ Paths relative to the config file are normalized at startup.
 
 ### `bind`
 
-HTTP bind address for the local web console, local backend API, and remote-control websocket.
+HTTP bind address for the local backend API and remote-control websocket.
 
 Default:
 
@@ -79,7 +79,7 @@ allowedChatIds = []
 
 ### `appId` / `appSecret`
 
-Feishu app credentials. The web onboarding flow can populate these automatically.
+Feishu app credentials. The desktop GUI onboarding flow can populate these automatically.
 
 Do not commit real credentials.
 
@@ -268,7 +268,7 @@ The local JWT needs to parse as a JWT and include the ChatGPT-shaped auth metada
 
 This identity is local bridge identity only. The model provider key controls the actual model provider.
 
-After starting the daemon, the web console provides a `Configure Codex App` button that writes the local Codex App config for you.
+The desktop GUI provides Codex App configuration controls that write the local Codex App config for you.
 
 The CLI equivalent is:
 
@@ -284,7 +284,7 @@ codex-remote --config config.toml configure-codex-app --provider-name llmx --pro
 
 When provider fields are supplied without `--provider-name`, `llmx` is used as the provider name.
 
-The daemon does not modify Codex App config on startup. It writes these files only when the web button or CLI command is used.
+The daemon does not modify Codex App config on startup. It writes these files only when the desktop GUI or CLI command is used.
 
 ## Feishu App Requirements
 

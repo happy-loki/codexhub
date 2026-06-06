@@ -8,7 +8,7 @@ use axum::{
         header::{CACHE_CONTROL, EXPIRES, HeaderValue, PRAGMA},
     },
     middleware::{self, Next},
-    response::{Html, IntoResponse, Redirect},
+    response::{IntoResponse, Redirect},
     routing::{get, post},
 };
 use base64::Engine;
@@ -46,7 +46,6 @@ pub async fn start_bridge_if_ready(state: &SharedState, event_message: &'static 
 
 pub fn router(state: SharedState) -> Router {
     Router::new()
-        .route("/", get(index))
         .route("/oauth/authorize", get(oauth_authorize))
         .route("/oauth/token", post(oauth_token))
         .route("/api/status", get(status))
@@ -105,10 +104,6 @@ pub fn router(state: SharedState) -> Router {
         .merge(remote_control_backend::router())
         .layer(middleware::from_fn(access_log))
         .with_state(state)
-}
-
-async fn index() -> Html<&'static str> {
-    Html(include_str!("web/index.html"))
 }
 
 #[derive(Deserialize)]

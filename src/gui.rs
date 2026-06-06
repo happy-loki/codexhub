@@ -51,6 +51,8 @@ const CREATE_NO_WINDOW: u32 = 0x08000000;
 const ID_MENU_CLOSE_WINDOW: i32 = 10_001;
 const ID_MENU_MINIMIZE: i32 = 10_002;
 const ID_MENU_CHECK_UPDATE: i32 = 10_003;
+const ID_MENU_LANGUAGE_ZH_CN: i32 = 10_004;
+const ID_MENU_LANGUAGE_EN_US: i32 = 10_005;
 
 type ImAccountRows = Rc<RefCell<Vec<[String; 5]>>>;
 type ImAccountModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
@@ -59,6 +61,915 @@ type PendingImToggle = Rc<RefCell<Option<(String, String, bool)>>>;
 type FrameTimerStore = Rc<RefCell<Option<Timer<Frame>>>>;
 type ConfigActionResultStore = Arc<Mutex<Option<ConfigActionResult>>>;
 type ImActionResultStore = Arc<Mutex<Option<ImActionResult>>>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GuiLocale {
+    ZhCn,
+    EnUs,
+}
+
+impl GuiLocale {
+    fn from_code(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "zh-cn" | "zh_cn" | "zh" | "cn" => Some(Self::ZhCn),
+            "en-us" | "en_us" | "en" => Some(Self::EnUs),
+            _ => None,
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::ZhCn => "zh-CN",
+            Self::EnUs => "en-US",
+        }
+    }
+}
+
+impl Default for GuiLocale {
+    fn default() -> Self {
+        Self::ZhCn
+    }
+}
+
+#[derive(Default, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+struct GuiSettings {
+    language: Option<String>,
+}
+
+#[derive(Clone, Copy)]
+struct GuiText {
+    locale: GuiLocale,
+}
+
+impl GuiText {
+    fn new(locale: GuiLocale) -> Self {
+        Self { locale }
+    }
+
+    fn version(self) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("版本 {}", env!("CARGO_PKG_VERSION")),
+            GuiLocale::EnUs => format!("Version {}", env!("CARGO_PKG_VERSION")),
+        }
+    }
+
+    fn file_menu(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "文件",
+            GuiLocale::EnUs => "&File",
+        }
+    }
+
+    fn close_window(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "关闭窗口\tCtrl+W",
+            GuiLocale::EnUs => "&Close Window\tCtrl+W",
+        }
+    }
+
+    fn close_window_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "关闭这个窗口",
+            GuiLocale::EnUs => "Close this window",
+        }
+    }
+
+    fn minimize(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "最小化\tCtrl+M",
+            GuiLocale::EnUs => "Mi&nimize\tCtrl+M",
+        }
+    }
+
+    fn minimize_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "最小化窗口",
+            GuiLocale::EnUs => "Minimize this window",
+        }
+    }
+
+    fn quit(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "退出 Codex Remote\tCtrl+Q",
+            GuiLocale::EnUs => "&Quit Codex Remote\tCtrl+Q",
+        }
+    }
+
+    fn language_menu(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "语言",
+            GuiLocale::EnUs => "&Language",
+        }
+    }
+
+    fn language_zh_cn(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "中文（简体）",
+            GuiLocale::EnUs => "Simplified Chinese",
+        }
+    }
+
+    fn language_en_us(self) -> &'static str {
+        "English"
+    }
+
+    fn language_restart_message(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "语言设置已保存，重启 Codex Remote 后生效。",
+            GuiLocale::EnUs => "Language saved. Restart Codex Remote to apply it.",
+        }
+    }
+
+    fn language_save_failed(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "语言设置保存失败",
+            GuiLocale::EnUs => "Failed to save language setting",
+        }
+    }
+
+    fn help_menu(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "帮助",
+            GuiLocale::EnUs => "&Help",
+        }
+    }
+
+    fn check_updates(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "检查更新",
+            GuiLocale::EnUs => "&Check for Updates",
+        }
+    }
+
+    fn check_updates_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "检查 GitHub Releases 是否有新版本",
+            GuiLocale::EnUs => "Check GitHub Releases for a newer Codex Remote version",
+        }
+    }
+
+    fn about(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "关于 Codex Remote",
+            GuiLocale::EnUs => "&About Codex Remote",
+        }
+    }
+
+    fn status_overview(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "状态概览",
+            GuiLocale::EnUs => "Status",
+        }
+    }
+
+    fn codex_control_channel(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Codex App 控制通道",
+            GuiLocale::EnUs => "Codex App Control",
+        }
+    }
+
+    fn vscode_extension(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "VS Code 插件",
+            GuiLocale::EnUs => "VS Code Extension",
+        }
+    }
+
+    fn local_service(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "本地服务",
+            GuiLocale::EnUs => "Local Service",
+        }
+    }
+
+    fn detecting(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "检测中",
+            GuiLocale::EnUs => "Checking",
+        }
+    }
+
+    fn unavailable(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "暂不可用",
+            GuiLocale::EnUs => "Unavailable",
+        }
+    }
+
+    fn app_gui_unsupported(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "当前平台暂不支持 App GUI",
+            GuiLocale::EnUs => "App GUI is not supported on this platform.",
+        }
+    }
+
+    fn provider_management(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Provider 管理",
+            GuiLocale::EnUs => "Provider Management",
+        }
+    }
+
+    fn provider_hint(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "选择或填写第三方模型服务，然后写入 Codex App。",
+            GuiLocale::EnUs => "Select or enter a model provider, then write it into Codex App.",
+        }
+    }
+
+    fn add(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "新增",
+            GuiLocale::EnUs => "Add",
+        }
+    }
+
+    fn save(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "保存",
+            GuiLocale::EnUs => "Save",
+        }
+    }
+
+    fn delete(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "删除",
+            GuiLocale::EnUs => "Delete",
+        }
+    }
+
+    fn enable(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "启用",
+            GuiLocale::EnUs => "Enable",
+        }
+    }
+
+    fn new_provider_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "清空表单，新增一个 provider",
+            GuiLocale::EnUs => "Clear the form and add a provider",
+        }
+    }
+
+    fn save_provider_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "保存或更新当前表单里的 provider",
+            GuiLocale::EnUs => "Save or update the provider in the form",
+        }
+    }
+
+    fn delete_provider_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "删除当前选中的 provider",
+            GuiLocale::EnUs => "Delete the selected provider",
+        }
+    }
+
+    fn configure_provider_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "保存并使用这个模型服务",
+            GuiLocale::EnUs => "Save and use this model provider",
+        }
+    }
+
+    fn provider_catalog_loading(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "正在匹配 ~/.codex/config.toml 里的 provider",
+            GuiLocale::EnUs => "Reading providers from ~/.codex/config.toml",
+        }
+    }
+
+    fn provider_name(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Provider 名称",
+            GuiLocale::EnUs => "Provider Name",
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "名称",
+            GuiLocale::EnUs => "Name",
+        }
+    }
+
+    fn current(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "当前",
+            GuiLocale::EnUs => "Current",
+        }
+    }
+
+    fn api_key_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "API Key 已保存时会用星号显示；需要更换时直接输入新 key。",
+            GuiLocale::EnUs => "Saved API keys are masked. Enter a new key to replace it.",
+        }
+    }
+
+    fn clear_codex_access(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "清除 Codex 接入",
+            GuiLocale::EnUs => "Clear Codex Access",
+        }
+    }
+
+    fn clear_codex_access_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "移除本工具写入的 Codex App 本地接入配置",
+            GuiLocale::EnUs => "Remove local Codex App access settings written by this tool",
+        }
+    }
+
+    fn codex_tab(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Codex 接入",
+            GuiLocale::EnUs => "Codex",
+        }
+    }
+
+    fn chat_tab(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "聊天工具接入",
+            GuiLocale::EnUs => "Chat Integrations",
+        }
+    }
+
+    fn im_access_hint(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "多个机器人/agent 可以分别管理多个 Codex 会话；暂不支持多个机器人管理同一个会话。例如飞书 1 管理会话 1、飞书 2 管理会话 2、Telegram 1 管理会话 3；并行数量取决于本机能同时承载多少 Codex 任务。"
+            }
+            GuiLocale::EnUs => {
+                "Multiple bots/agents can manage separate Codex sessions. Multiple bots managing the same session is not supported yet. Parallel capacity depends on how many Codex tasks this machine can run."
+            }
+        }
+    }
+
+    fn bot_pool(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "聊天工具机器人池",
+            GuiLocale::EnUs => "Bot Pool",
+        }
+    }
+
+    fn bot(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "机器人",
+            GuiLocale::EnUs => "Bot",
+        }
+    }
+
+    fn platform(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "平台",
+            GuiLocale::EnUs => "Platform",
+        }
+    }
+
+    fn state(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "状态",
+            GuiLocale::EnUs => "State",
+        }
+    }
+
+    fn account(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "账号",
+            GuiLocale::EnUs => "Account",
+        }
+    }
+
+    fn access(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "接入",
+            GuiLocale::EnUs => "Access",
+        }
+    }
+
+    fn delete_selected(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "删除选中",
+            GuiLocale::EnUs => "Delete Selected",
+        }
+    }
+
+    fn delete_im_account_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "删除当前选中的机器人接入配置",
+            GuiLocale::EnUs => "Delete the selected bot integration",
+        }
+    }
+
+    fn add_bot(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "新增机器人",
+            GuiLocale::EnUs => "Add Bot",
+        }
+    }
+
+    fn add_feishu_bot(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "添加飞书机器人",
+            GuiLocale::EnUs => "Add Feishu Bot",
+        }
+    }
+
+    fn add_feishu_bot_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "扫码接入一个新的飞书机器人",
+            GuiLocale::EnUs => "Scan to connect a new Feishu bot",
+        }
+    }
+
+    fn add_telegram_bot(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "添加 Telegram 机器人",
+            GuiLocale::EnUs => "Add Telegram Bot",
+        }
+    }
+
+    fn add_telegram_bot_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "填写 Telegram Bot Token 并接入",
+            GuiLocale::EnUs => "Enter a Telegram Bot Token and connect it",
+        }
+    }
+
+    fn add_wechat_bot(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "添加微信机器人",
+            GuiLocale::EnUs => "Add WeChat Bot",
+        }
+    }
+
+    fn add_wechat_bot_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "使用微信扫码接入机器人",
+            GuiLocale::EnUs => "Scan with WeChat to connect the bot",
+        }
+    }
+
+    fn new_provider_prompt(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "填写新 provider 名称、Base URL 和 API Key，然后点击启用。",
+            GuiLocale::EnUs => "Enter a provider name, Base URL, and API key, then click Enable.",
+        }
+    }
+
+    fn saving_provider(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "正在保存 provider，请稍候...",
+            GuiLocale::EnUs => "Saving provider...",
+        }
+    }
+
+    fn deleting_provider(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "正在删除 provider，请稍候...",
+            GuiLocale::EnUs => "Deleting provider...",
+        }
+    }
+
+    fn enabling_provider(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "正在启用，请稍候...",
+            GuiLocale::EnUs => "Enabling provider...",
+        }
+    }
+
+    fn save_in_progress(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "保存中...",
+            GuiLocale::EnUs => "Saving...",
+        }
+    }
+
+    fn delete_in_progress(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "删除中...",
+            GuiLocale::EnUs => "Deleting...",
+        }
+    }
+
+    fn enable_in_progress(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "启用中...",
+            GuiLocale::EnUs => "Enabling...",
+        }
+    }
+
+    fn add_in_progress(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "添加中...",
+            GuiLocale::EnUs => "Adding...",
+        }
+    }
+
+    fn starting(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "启动中",
+            GuiLocale::EnUs => "Starting",
+        }
+    }
+
+    fn starting_backend(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "正在启动本地 backend。",
+            GuiLocale::EnUs => "Starting local backend.",
+        }
+    }
+
+    fn waiting_service(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "等待服务",
+            GuiLocale::EnUs => "Waiting",
+        }
+    }
+
+    fn service_reads_status(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "服务启动后读取状态",
+            GuiLocale::EnUs => "Status loads after service startup.",
+        }
+    }
+
+    fn service_reads_config(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "服务启动后读取配置",
+            GuiLocale::EnUs => "Config loads after service startup.",
+        }
+    }
+
+    fn service_vscode_connect(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "服务启动后可连接 VS Code 插件。",
+            GuiLocale::EnUs => "VS Code extension can connect after service startup.",
+        }
+    }
+
+    fn startup_failed(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "启动失败",
+            GuiLocale::EnUs => "Startup Failed",
+        }
+    }
+
+    fn not_running(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "未运行",
+            GuiLocale::EnUs => "Not Running",
+        }
+    }
+
+    fn gui_auto_start_service(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "GUI 会自动启动本地服务；如果一直未运行，请重启 Codex Remote。",
+            GuiLocale::EnUs => {
+                "The GUI starts the local service automatically. Restart Codex Remote if it stays offline."
+            }
+        }
+    }
+
+    fn local_service_not_running(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "本地服务未运行",
+            GuiLocale::EnUs => "Local service is not running.",
+        }
+    }
+
+    fn running(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "运行中",
+            GuiLocale::EnUs => "Running",
+        }
+    }
+
+    fn listening(self, bind: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("监听 {bind}"),
+            GuiLocale::EnUs => format!("Listening on {bind}"),
+        }
+    }
+
+    fn connected(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "已连接",
+            GuiLocale::EnUs => "Connected",
+        }
+    }
+
+    fn initializing(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "初始化中",
+            GuiLocale::EnUs => "Initializing",
+        }
+    }
+
+    fn codex_initializing(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Codex App 已打开控制通道，正在完成 remote-control 初始化。",
+            GuiLocale::EnUs => {
+                "Codex App opened the control channel and is finishing remote-control initialization."
+            }
+        }
+    }
+
+    fn control_not_open(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "未打开控制",
+            GuiLocale::EnUs => "Control Closed",
+        }
+    }
+
+    fn control_not_open_detail(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "配置已注入，请在 Codex App 里打开“控制这台 Mac”。",
+            GuiLocale::EnUs => "Config is injected. Open remote control in Codex App.",
+        }
+    }
+
+    fn not_injected(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "未注入",
+            GuiLocale::EnUs => "Not Injected",
+        }
+    }
+
+    fn fill_provider_then_enable(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "填写 Base URL 和 API Key 后点击启用。",
+            GuiLocale::EnUs => "Enter Base URL and API key, then click Enable.",
+        }
+    }
+
+    fn can_connect(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "可接入",
+            GuiLocale::EnUs => "Ready",
+        }
+    }
+
+    fn vscode_wrapper_detail(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "VS Code 插件可通过 chatgpt.cliExecutable 使用本地 wrapper。",
+            GuiLocale::EnUs => {
+                "VS Code extension can use the local wrapper through chatgpt.cliExecutable."
+            }
+        }
+    }
+
+    fn provider_waiting_service(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "等待本地服务",
+            GuiLocale::EnUs => "Waiting for local service",
+        }
+    }
+
+    fn provider_read_after_start(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "启动后读取 ~/.codex/config.toml",
+            GuiLocale::EnUs => "Reads ~/.codex/config.toml after startup",
+        }
+    }
+
+    fn not_configured(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "未配置",
+            GuiLocale::EnUs => "Not configured",
+        }
+    }
+
+    fn provider_create_on_write(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "未配置，写入时新建",
+            GuiLocale::EnUs => "Not configured; created when written",
+        }
+    }
+
+    fn in_use(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "使用中",
+            GuiLocale::EnUs => "Active",
+        }
+    }
+
+    fn key_configured(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "已配置",
+            GuiLocale::EnUs => "Configured",
+        }
+    }
+
+    fn provider_catalog_after_service(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "本地服务运行后会读取 ~/.codex/config.toml 里的 provider。",
+            GuiLocale::EnUs => {
+                "Providers are read from ~/.codex/config.toml after the local service starts."
+            }
+        }
+    }
+
+    fn no_provider(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "还没有 provider，填写后点击启用。",
+            GuiLocale::EnUs => "No providers yet. Fill the form and click Enable.",
+        }
+    }
+
+    fn current_provider(self, name: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("当前 provider: {name}"),
+            GuiLocale::EnUs => format!("Current provider: {name}"),
+        }
+    }
+
+    fn saved_providers(self, count: usize) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("已保存 {count} 个 provider，请选择一个使用。"),
+            GuiLocale::EnUs => format!("{count} providers saved. Select one to use."),
+        }
+    }
+
+    fn im_waiting_service_row(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "本地服务启动后读取",
+            GuiLocale::EnUs => "Loads after local service starts",
+        }
+    }
+
+    fn reading(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "读取中",
+            GuiLocale::EnUs => "Loading",
+        }
+    }
+
+    fn reading_bot_list(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "正在读取机器人列表",
+            GuiLocale::EnUs => "Loading bot list",
+        }
+    }
+
+    fn not_connected(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "未接入",
+            GuiLocale::EnUs => "Not Connected",
+        }
+    }
+
+    fn scan_or_token(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请扫码或填写 Bot Token",
+            GuiLocale::EnUs => "Scan or enter a Bot Token",
+        }
+    }
+
+    fn paused(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "已暂停",
+            GuiLocale::EnUs => "Paused",
+        }
+    }
+
+    fn im_connected(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "已接入",
+            GuiLocale::EnUs => "Connected",
+        }
+    }
+
+    fn error(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "异常",
+            GuiLocale::EnUs => "Error",
+        }
+    }
+
+    fn connecting(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "连接中",
+            GuiLocale::EnUs => "Connecting",
+        }
+    }
+
+    fn waiting_connection(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "等待连接",
+            GuiLocale::EnUs => "Waiting",
+        }
+    }
+
+    fn bot_saved(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "机器人已保存",
+            GuiLocale::EnUs => "Bot saved",
+        }
+    }
+
+    fn name_saved(self, name: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("{name} 已保存"),
+            GuiLocale::EnUs => format!("{name} saved"),
+        }
+    }
+
+    fn waiting_bot_connection(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "等待机器人连接",
+            GuiLocale::EnUs => "Waiting for bot connection",
+        }
+    }
+
+    fn im_empty_detail(self, platform: &str) -> String {
+        match (self.locale, platform) {
+            (GuiLocale::ZhCn, "feishu") => "扫码添加飞书机器人".to_string(),
+            (GuiLocale::ZhCn, "telegram") => "添加 Telegram Bot Token".to_string(),
+            (GuiLocale::ZhCn, "wechat") => "扫码添加微信机器人".to_string(),
+            (GuiLocale::ZhCn, _) => "添加机器人".to_string(),
+            (GuiLocale::EnUs, "feishu") => "Scan to add a Feishu bot".to_string(),
+            (GuiLocale::EnUs, "telegram") => "Add a Telegram Bot Token".to_string(),
+            (GuiLocale::EnUs, "wechat") => "Scan to add a WeChat bot".to_string(),
+            (GuiLocale::EnUs, _) => "Add a bot".to_string(),
+        }
+    }
+
+    fn bot_fallback(self, platform: &str) -> &'static str {
+        match (self.locale, platform) {
+            (GuiLocale::ZhCn, "feishu") => "飞书机器人",
+            (GuiLocale::ZhCn, "telegram") => "Telegram 机器人",
+            (GuiLocale::ZhCn, "wechat") => "微信机器人",
+            (GuiLocale::ZhCn, _) => "机器人",
+            (GuiLocale::EnUs, "feishu") => "Feishu bot",
+            (GuiLocale::EnUs, "telegram") => "Telegram bot",
+            (GuiLocale::EnUs, "wechat") => "WeChat bot",
+            (GuiLocale::EnUs, _) => "Bot",
+        }
+    }
+
+    fn bot_connecting(self, name: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("{name} 正在连接"),
+            GuiLocale::EnUs => format!("{name} connecting"),
+        }
+    }
+
+    fn bot_waiting(self, name: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("{name} 等待连接"),
+            GuiLocale::EnUs => format!("{name} waiting"),
+        }
+    }
+
+    fn bot_error(self, name: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("{name} 异常"),
+            GuiLocale::EnUs => format!("{name} error"),
+        }
+    }
+
+    fn remote_stale(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "remote-control 心跳失活，等待 Codex App 自动重连。",
+            GuiLocale::EnUs => {
+                "remote-control heartbeat is stale; waiting for Codex App to reconnect."
+            }
+        }
+    }
+
+    fn recent_error(self, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("最近错误: {err}"),
+            GuiLocale::EnUs => format!("Recent error: {err}"),
+        }
+    }
+
+    fn remote_heartbeat(self, status: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("remote-control 已连接，心跳 {status}。"),
+            GuiLocale::EnUs => format!("remote-control connected, heartbeat {status}."),
+        }
+    }
+
+    fn remote_connected_detail(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "remote-control 已连接。",
+            GuiLocale::EnUs => "remote-control connected.",
+        }
+    }
+
+    fn codex_remote_connected_detail(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Codex App remote-control 已连接。",
+            GuiLocale::EnUs => "Codex App remote-control connected.",
+        }
+    }
+}
 
 #[derive(Clone)]
 struct GuiTimers {
@@ -96,18 +1007,20 @@ pub fn run() {
 fn build_ui() {
     let api = ApiClient::new(default_base_url());
     let gui_timers = GuiTimers::new();
+    let locale = load_gui_locale();
+    let text = GuiText::new(locale);
 
     let frame = Frame::builder()
         .with_title("Codex Remote")
         .with_size(Size::new(1100, 760))
         .build();
     frame.set_icon(&app_icon_bitmap(48));
-    install_system_menu(&frame, &gui_timers);
+    install_system_menu(&frame, &gui_timers, text);
     frame.set_background_color(Colour::rgb(246, 247, 250));
     let _status_bar = StatusBar::builder(&frame)
         .with_fields_count(1)
         .with_status_widths(vec![-1])
-        .add_initial_text(0, &format!("版本 {}", env!("CARGO_PKG_VERSION")))
+        .add_initial_text(0, &text.version())
         .build();
 
     let root = Panel::builder(&frame).build();
@@ -115,17 +1028,38 @@ fn build_ui() {
 
     let root_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
-    let status_box = StaticBox::builder(&root).with_label("状态概览").build();
+    let status_box = StaticBox::builder(&root)
+        .with_label(text.status_overview())
+        .build();
     let status_section =
         StaticBoxSizerBuilder::new_with_box(&status_box, Orientation::Vertical).build();
     let status_row = BoxSizer::builder(Orientation::Horizontal).build();
-    let codex_status = status_panel(&status_box, "Codex App 控制通道", StatusIconKind::Codex);
-    let vscode_status = status_panel(&status_box, "VS Code 插件", StatusIconKind::VsCodeCodex);
+    let codex_status = status_panel(
+        &status_box,
+        text.codex_control_channel(),
+        StatusIconKind::Codex,
+        text,
+    );
+    let vscode_status = status_panel(
+        &status_box,
+        text.vscode_extension(),
+        StatusIconKind::VsCodeCodex,
+        text,
+    );
     if CODEX_APP_GUI_UNSUPPORTED {
-        set_disabled_status_panel(&codex_status, "暂不可用", "当前平台暂不支持 App GUI");
+        set_disabled_status_panel(
+            &codex_status,
+            text.unavailable(),
+            text.app_gui_unsupported(),
+        );
     }
-    let service_status = status_panel(&status_box, "本地服务", StatusIconKind::Service);
-    let im_status = im_status_panel(&status_box);
+    let service_status = status_panel(
+        &status_box,
+        text.local_service(),
+        StatusIconKind::Service,
+        text,
+    );
+    let im_status = im_status_panel(&status_box, text);
     let entry_connector = topology_connector(&status_box);
     let bridge_connector = topology_splitter(&status_box);
     let entry_column = BoxSizer::builder(Orientation::Vertical).build();
@@ -178,12 +1112,12 @@ fn build_ui() {
     let codex_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let config_static_box = StaticBox::builder(&codex_page)
-        .with_label("Provider 管理")
+        .with_label(text.provider_management())
         .build();
     let config_box =
         StaticBoxSizerBuilder::new_with_box(&config_static_box, Orientation::Vertical).build();
     let config_hint = StaticText::builder(&config_static_box)
-        .with_label("选择或填写第三方模型服务，然后写入 Codex App。")
+        .with_label(text.provider_hint())
         .build();
     config_hint.set_foreground_color(Colour::rgb(34, 39, 47));
     config_hint.wrap(760);
@@ -195,24 +1129,24 @@ fn build_ui() {
     );
 
     let new_provider_button = Button::builder(&config_static_box)
-        .with_label("新增")
+        .with_label(text.add())
         .build();
-    new_provider_button.set_tooltip("清空表单，新增一个 provider");
+    new_provider_button.set_tooltip(text.new_provider_help());
     let save_provider_button = Button::builder(&config_static_box)
-        .with_label("保存")
+        .with_label(text.save())
         .build();
-    save_provider_button.set_tooltip("保存或更新当前表单里的 provider");
+    save_provider_button.set_tooltip(text.save_provider_help());
     let delete_provider_button = Button::builder(&config_static_box)
-        .with_label("删除")
+        .with_label(text.delete())
         .build();
-    delete_provider_button.set_tooltip("删除当前选中的 provider");
+    delete_provider_button.set_tooltip(text.delete_provider_help());
     let configure_button = Button::builder(&config_static_box)
-        .with_label("启用")
+        .with_label(text.enable())
         .build();
-    configure_button.set_tooltip("保存并使用这个模型服务");
+    configure_button.set_tooltip(text.configure_provider_help());
 
     let provider_catalog = StaticText::builder(&config_static_box)
-        .with_label("正在匹配 ~/.codex/config.toml 里的 provider")
+        .with_label(text.provider_catalog_loading())
         .build();
     provider_catalog.set_foreground_color(Colour::rgb(103, 111, 124));
     provider_catalog.wrap(980);
@@ -227,9 +1161,9 @@ fn build_ui() {
         .with_style(ListCtrlStyle::Report | ListCtrlStyle::SingleSel | ListCtrlStyle::HRules)
         .with_size(Size::new(-1, 142))
         .build();
-    provider_list.insert_column(0, "名称", ListColumnFormat::Left, 160);
+    provider_list.insert_column(0, text.name(), ListColumnFormat::Left, 160);
     provider_list.insert_column(1, "Base URL", ListColumnFormat::Left, 420);
-    provider_list.insert_column(2, "当前", ListColumnFormat::Left, 90);
+    provider_list.insert_column(2, text.current(), ListColumnFormat::Left, 90);
     provider_list.insert_column(3, "API Key", ListColumnFormat::Left, 160);
     config_box.add(
         &provider_list,
@@ -251,7 +1185,7 @@ fn build_ui() {
     );
 
     let provider_help = StaticText::builder(&config_static_box)
-        .with_label("API Key 已保存时会用星号显示；需要更换时直接输入新 key。")
+        .with_label(text.api_key_help())
         .build();
     provider_help.set_foreground_color(Colour::rgb(91, 100, 114));
     provider_help.wrap(980);
@@ -269,7 +1203,7 @@ fn build_ui() {
     let provider_name = provider_combo_row(
         &config_static_box,
         &form,
-        "Provider 名称",
+        text.provider_name(),
         DEFAULT_PROVIDER_NAME,
     );
     let provider_base_url = text_field_row(&config_static_box, &form, "Base URL", "");
@@ -297,9 +1231,9 @@ fn build_ui() {
     );
 
     let uninstall_button = Button::builder(&codex_page)
-        .with_label("清除 Codex 接入")
+        .with_label(text.clear_codex_access())
         .build();
-    uninstall_button.set_tooltip("移除本工具写入的 Codex App 本地接入配置");
+    uninstall_button.set_tooltip(text.clear_codex_access_help());
     let codex_maintenance_actions = BoxSizer::builder(Orientation::Horizontal).build();
     codex_maintenance_actions.add_stretch_spacer(1);
     codex_maintenance_actions.add(&uninstall_button, 0, SizerFlag::Right, 0);
@@ -330,7 +1264,7 @@ fn build_ui() {
     let feishu_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let im_access_hint = StaticText::builder(&feishu_page)
-        .with_label("多个机器人/agent 可以分别管理多个 Codex 会话；暂不支持多个机器人管理同一个会话。例如飞书 1 管理会话 1、飞书 2 管理会话 2、Telegram 1 管理会话 3；并行数量取决于本机能同时承载多少 Codex 任务。")
+        .with_label(text.im_access_hint())
         .build();
     im_access_hint.set_foreground_color(Colour::rgb(64, 72, 86));
     im_access_hint.wrap(1180);
@@ -342,7 +1276,7 @@ fn build_ui() {
     );
 
     let im_accounts_static_box = StaticBox::builder(&feishu_page)
-        .with_label("聊天工具机器人池")
+        .with_label(text.bot_pool())
         .build();
     let im_accounts_box =
         StaticBoxSizerBuilder::new_with_box(&im_accounts_static_box, Orientation::Vertical).build();
@@ -405,35 +1339,35 @@ fn build_ui() {
         .with_size(Size::new(-1, 190))
         .build();
     im_account_list.append_text_column(
-        "机器人",
+        text.bot(),
         0,
         280,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
     );
     im_account_list.append_text_column(
-        "平台",
+        text.platform(),
         1,
         90,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
     );
     im_account_list.append_text_column(
-        "状态",
+        text.state(),
         2,
         120,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
     );
     im_account_list.append_text_column(
-        "账号",
+        text.account(),
         3,
         260,
         DataViewAlign::Left,
         DataViewColumnFlags::Resizable,
     );
     im_account_list.append_toggle_column(
-        "接入",
+        text.access(),
         4,
         70,
         DataViewAlign::Center,
@@ -449,9 +1383,9 @@ fn build_ui() {
     let im_account_actions = BoxSizer::builder(Orientation::Horizontal).build();
     im_account_actions.add_stretch_spacer(1);
     let delete_im_account_button = Button::builder(&im_accounts_static_box)
-        .with_label("删除选中")
+        .with_label(text.delete_selected())
         .build();
-    delete_im_account_button.set_tooltip("删除当前选中的机器人接入配置");
+    delete_im_account_button.set_tooltip(text.delete_im_account_help());
     im_account_actions.add(&delete_im_account_button, 0, SizerFlag::Right, 0);
     im_accounts_box.add_sizer(
         &im_account_actions,
@@ -460,23 +1394,23 @@ fn build_ui() {
         10,
     );
     let add_im_static_box = StaticBox::builder(&feishu_page)
-        .with_label("新增机器人")
+        .with_label(text.add_bot())
         .build();
     let add_im_box =
         StaticBoxSizerBuilder::new_with_box(&add_im_static_box, Orientation::Vertical).build();
     let add_im_actions = BoxSizer::builder(Orientation::Horizontal).build();
     let change_bot_button = Button::builder(&add_im_static_box)
-        .with_label("添加飞书机器人")
+        .with_label(text.add_feishu_bot())
         .build();
-    change_bot_button.set_tooltip("扫码接入一个新的飞书机器人");
+    change_bot_button.set_tooltip(text.add_feishu_bot_help());
     let save_telegram_button = Button::builder(&add_im_static_box)
-        .with_label("添加 Telegram 机器人")
+        .with_label(text.add_telegram_bot())
         .build();
-    save_telegram_button.set_tooltip("填写 Telegram Bot Token 并接入");
+    save_telegram_button.set_tooltip(text.add_telegram_bot_help());
     let connect_wechat_button = Button::builder(&add_im_static_box)
-        .with_label("添加微信机器人")
+        .with_label(text.add_wechat_bot())
         .build();
-    connect_wechat_button.set_tooltip("使用微信扫码接入机器人");
+    connect_wechat_button.set_tooltip(text.add_wechat_bot_help());
     add_im_actions.add(&change_bot_button, 0, SizerFlag::Right, 10);
     add_im_actions.add(&save_telegram_button, 0, SizerFlag::Right, 10);
     add_im_actions.add(&connect_wechat_button, 0, SizerFlag::Right, 0);
@@ -501,8 +1435,8 @@ fn build_ui() {
         no_refresh: true,
     });
 
-    notebook.add_page(&codex_page, "Codex 接入", true, None);
-    notebook.add_page(&feishu_page, "聊天工具接入", false, None);
+    notebook.add_page(&codex_page, text.codex_tab(), true, None);
+    notebook.add_page(&feishu_page, text.chat_tab(), false, None);
 
     root_sizer.add(
         &notebook,
@@ -517,6 +1451,7 @@ fn build_ui() {
     frame.set_sizer(frame_sizer, true);
 
     let handles = UiHandles {
+        text,
         service_status,
         im_status,
         codex_status,
@@ -557,7 +1492,7 @@ fn build_ui() {
             change_text_value_if_changed(&handles.provider_key, "");
             handles
                 .provider_catalog
-                .set_label("填写新 provider 名称、Base URL 和 API Key，然后点击启用。");
+                .set_label(handles.text.new_provider_prompt());
             handles.provider_catalog.wrap(980);
             handles.provider_catalog.layout();
         });
@@ -583,9 +1518,11 @@ fn build_ui() {
             }
             handles
                 .provider_catalog
-                .set_label("正在保存 provider，请稍候...");
+                .set_label(handles.text.saving_provider());
             handles.provider_catalog.wrap(980);
-            handles.save_provider_button.set_label("保存中...");
+            handles
+                .save_provider_button
+                .set_label(handles.text.save_in_progress());
             set_actions_enabled(&handles, false);
             frame.refresh(true, None);
             frame.update();
@@ -647,9 +1584,11 @@ fn build_ui() {
 
             handles
                 .provider_catalog
-                .set_label("正在删除 provider，请稍候...");
+                .set_label(handles.text.deleting_provider());
             handles.provider_catalog.wrap(980);
-            handles.delete_provider_button.set_label("删除中...");
+            handles
+                .delete_provider_button
+                .set_label(handles.text.delete_in_progress());
             set_actions_enabled(&handles, false);
             frame.refresh(true, None);
             frame.update();
@@ -686,9 +1625,13 @@ fn build_ui() {
                 config_action_in_flight.store(false, Ordering::SeqCst);
                 return;
             }
-            handles.provider_catalog.set_label("正在启用，请稍候...");
+            handles
+                .provider_catalog
+                .set_label(handles.text.enabling_provider());
             handles.provider_catalog.wrap(980);
-            handles.configure_button.set_label("启用中...");
+            handles
+                .configure_button
+                .set_label(handles.text.enable_in_progress());
             set_actions_enabled(&handles, false);
             frame.refresh(true, None);
             frame.update();
@@ -820,7 +1763,9 @@ fn build_ui() {
                 im_action_in_flight.store(false, Ordering::SeqCst);
                 return;
             }
-            handles.delete_im_account_button.set_label("删除中...");
+            handles
+                .delete_im_account_button
+                .set_label(handles.text.delete_in_progress());
             handles.delete_im_account_button.enable(false);
             let request = DeleteImAccountRequest {
                 platform: account.platform,
@@ -861,7 +1806,9 @@ fn build_ui() {
                 return;
             };
 
-            handles.save_telegram_button.set_label("添加中...");
+            handles
+                .save_telegram_button
+                .set_label(handles.text.add_in_progress());
             handles.save_telegram_button.enable(false);
             frame.refresh(true, None);
             frame.update();
@@ -1030,33 +1977,72 @@ fn default_base_url() -> String {
         .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
 }
 
-fn install_system_menu(frame: &Frame, gui_timers: &GuiTimers) {
+fn load_gui_locale() -> GuiLocale {
+    let path = gui_settings_path();
+    let Ok(raw) = std::fs::read_to_string(&path) else {
+        return GuiLocale::default();
+    };
+    toml::from_str::<GuiSettings>(&raw)
+        .ok()
+        .and_then(|settings| settings.language)
+        .and_then(|language| GuiLocale::from_code(&language))
+        .unwrap_or_default()
+}
+
+fn save_gui_locale(locale: GuiLocale) -> Result<(), String> {
+    let path = gui_settings_path();
+    if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).map_err(|err| format!("{}: {err}", parent.display()))?;
+    }
+    let settings = GuiSettings {
+        language: Some(locale.code().to_string()),
+    };
+    let raw = toml::to_string_pretty(&settings).map_err(|err| err.to_string())?;
+    std::fs::write(&path, raw).map_err(|err| format!("{}: {err}", path.display()))
+}
+
+fn gui_settings_path() -> PathBuf {
+    app_support_config_path().with_file_name("gui-settings.toml")
+}
+
+fn install_system_menu(frame: &Frame, gui_timers: &GuiTimers, text: GuiText) {
     let file_menu = Menu::builder()
         .append_item(
             ID_MENU_CLOSE_WINDOW,
-            "&Close Window\tCtrl+W",
-            "Close this window",
+            text.close_window(),
+            text.close_window_help(),
         )
-        .append_item(
-            ID_MENU_MINIMIZE,
-            "Mi&nimize\tCtrl+M",
-            "Minimize this window",
-        )
+        .append_item(ID_MENU_MINIMIZE, text.minimize(), text.minimize_help())
         .append_separator()
-        .append_item(ID_EXIT, "&Quit Codex Remote\tCtrl+Q", "Quit Codex Remote")
+        .append_item(ID_EXIT, text.quit(), "Quit Codex Remote")
         .build();
+    let language_menu = Menu::builder()
+        .append_radio_item(
+            ID_MENU_LANGUAGE_ZH_CN,
+            text.language_zh_cn(),
+            text.language_restart_message(),
+        )
+        .append_radio_item(
+            ID_MENU_LANGUAGE_EN_US,
+            text.language_en_us(),
+            text.language_restart_message(),
+        )
+        .build();
+    language_menu.check_item(ID_MENU_LANGUAGE_ZH_CN, text.locale == GuiLocale::ZhCn);
+    language_menu.check_item(ID_MENU_LANGUAGE_EN_US, text.locale == GuiLocale::EnUs);
     let help_menu = Menu::builder()
         .append_item(
             ID_MENU_CHECK_UPDATE,
-            "&Check for Updates",
-            "Check GitHub Releases for a newer Codex Remote version",
+            text.check_updates(),
+            text.check_updates_help(),
         )
         .append_separator()
-        .append_item(ID_ABOUT, "&About Codex Remote", "About Codex Remote")
+        .append_item(ID_ABOUT, text.about(), "About Codex Remote")
         .build();
     let menu_bar = MenuBar::builder()
-        .append(file_menu, "&File")
-        .append(help_menu, "&Help")
+        .append(file_menu, text.file_menu())
+        .append(language_menu, text.language_menu())
+        .append(help_menu, text.help_menu())
         .build();
     frame.set_menu_bar(menu_bar);
 
@@ -1069,9 +2055,26 @@ fn install_system_menu(frame: &Frame, gui_timers: &GuiTimers) {
         ID_MENU_CHECK_UPDATE => {
             check_for_updates_async(&frame, &gui_timers, &update_check_in_flight);
         }
+        ID_MENU_LANGUAGE_ZH_CN => {
+            handle_language_selected(&frame, text, GuiLocale::ZhCn);
+        }
+        ID_MENU_LANGUAGE_EN_US => {
+            handle_language_selected(&frame, text, GuiLocale::EnUs);
+        }
         ID_ABOUT => show_about_dialog(&frame),
         _ => event.skip(true),
     });
+}
+
+fn handle_language_selected(frame: &Frame, text: GuiText, locale: GuiLocale) {
+    if let Some(menu_bar) = frame.get_menu_bar() {
+        menu_bar.check_item(ID_MENU_LANGUAGE_ZH_CN, locale == GuiLocale::ZhCn);
+        menu_bar.check_item(ID_MENU_LANGUAGE_EN_US, locale == GuiLocale::EnUs);
+    }
+    match save_gui_locale(locale) {
+        Ok(()) => show_info(frame, text.language_restart_message()),
+        Err(err) => show_error(frame, &format!("{}: {err}", text.language_save_failed())),
+    }
 }
 
 #[derive(Debug)]
@@ -2061,6 +3064,7 @@ enum StatusIconKind {
 
 #[derive(Clone)]
 struct UiHandles {
+    text: GuiText,
     service_status: StatusPanel,
     im_status: ImStatusPanel,
     codex_status: StatusPanel,
@@ -2261,7 +3265,12 @@ struct WechatOnboardPoll {
     already_connected: Option<bool>,
 }
 
-fn status_panel<W: WxWidget>(parent: &W, title: &str, icon_kind: StatusIconKind) -> StatusPanel {
+fn status_panel<W: WxWidget>(
+    parent: &W,
+    title: &str,
+    icon_kind: StatusIconKind,
+    text: GuiText,
+) -> StatusPanel {
     let panel = Panel::builder(parent)
         .with_style(PanelStyle::BorderStatic)
         .build();
@@ -2294,7 +3303,9 @@ fn status_panel<W: WxWidget>(parent: &W, title: &str, icon_kind: StatusIconKind)
     title_row.add(&title_label, 0, SizerFlag::Bottom, 0);
     text_col.add_sizer(&title_row, 0, SizerFlag::Bottom, 4);
 
-    let state = StaticText::builder(&panel).with_label("检测中").build();
+    let state = StaticText::builder(&panel)
+        .with_label(text.detecting())
+        .build();
     state.set_foreground_color(Colour::rgb(34, 39, 47));
     text_col.add(&state, 0, SizerFlag::Bottom, 4);
 
@@ -2318,15 +3329,15 @@ fn status_panel<W: WxWidget>(parent: &W, title: &str, icon_kind: StatusIconKind)
     }
 }
 
-fn im_status_panel<W: WxWidget>(parent: &W) -> ImStatusPanel {
+fn im_status_panel<W: WxWidget>(parent: &W, text: GuiText) -> ImStatusPanel {
     let panel = Panel::builder(parent).build();
     panel.set_background_color(Colour::rgb(246, 247, 250));
     panel.set_min_size(Size::new(260, 190));
 
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
-    let feishu = im_channel_row(&panel, &sizer, ImChannelKind::Feishu, "飞书", 8);
-    let telegram = im_channel_row(&panel, &sizer, ImChannelKind::Telegram, "Telegram", 8);
-    let wechat = im_channel_row(&panel, &sizer, ImChannelKind::Wechat, "微信", 0);
+    let feishu = im_channel_row(&panel, &sizer, ImChannelKind::Feishu, "飞书", 8, text);
+    let telegram = im_channel_row(&panel, &sizer, ImChannelKind::Telegram, "Telegram", 8, text);
+    let wechat = im_channel_row(&panel, &sizer, ImChannelKind::Wechat, "微信", 0, text);
 
     panel.set_sizer(sizer, true);
     ImStatusPanel {
@@ -2343,6 +3354,7 @@ fn im_channel_row(
     kind: ImChannelKind,
     name: &str,
     bottom_margin: i32,
+    text: GuiText,
 ) -> ImChannelRow {
     let row_panel = Panel::builder(parent)
         .with_style(PanelStyle::BorderStatic)
@@ -2375,7 +3387,9 @@ fn im_channel_row(
     name_label.set_foreground_color(Colour::rgb(91, 100, 114));
     title_row.add(&name_label, 0, SizerFlag::Right, 8);
 
-    let state = StaticText::builder(&row_panel).with_label("检测中").build();
+    let state = StaticText::builder(&row_panel)
+        .with_label(text.detecting())
+        .build();
     state.set_foreground_color(Colour::rgb(102, 110, 122));
     title_row.add(&state, 0, SizerFlag::Right, 0);
     text_col.add_sizer(&title_row, 0, SizerFlag::Bottom, 2);
@@ -2965,9 +3979,11 @@ fn apply_pending_config_action(
         return false;
     };
 
-    handles.configure_button.set_label("启用");
-    handles.save_provider_button.set_label("保存");
-    handles.delete_provider_button.set_label("删除");
+    handles.configure_button.set_label(handles.text.enable());
+    handles.save_provider_button.set_label(handles.text.save());
+    handles
+        .delete_provider_button
+        .set_label(handles.text.delete());
     set_actions_enabled(handles, true);
 
     match result {
@@ -3041,9 +4057,11 @@ fn apply_pending_im_action(
 
     handles
         .save_telegram_button
-        .set_label("添加 Telegram 机器人");
+        .set_label(handles.text.add_telegram_bot());
     handles.save_telegram_button.enable(true);
-    handles.delete_im_account_button.set_label("删除选中");
+    handles
+        .delete_im_account_button
+        .set_label(handles.text.delete_selected());
     handles.delete_im_account_button.enable(true);
 
     match result {
@@ -3092,7 +4110,7 @@ fn apply_provider_action_status(
     if let Some(status) = snapshot.codex_app.as_ref() {
         handles
             .provider_catalog
-            .set_label(&provider_catalog_label(status));
+            .set_label(&provider_catalog_label(handles.text, status));
         handles.provider_catalog.wrap(980);
         handles.provider_catalog.layout();
         refresh_provider_choices(&handles.provider_name, &status.providers);
@@ -3107,43 +4125,44 @@ fn apply_provider_action_status(
 }
 
 fn show_dashboard_starting(handles: &UiHandles) {
+    let text = handles.text;
     set_status_panel(
         &handles.service_status,
-        "启动中",
-        "正在启动本地 backend。",
+        text.starting(),
+        text.starting_backend(),
         StateTone::Warn,
     );
     set_im_channel_row(
         &handles.im_status.feishu,
-        "等待服务",
-        "服务启动后读取状态",
+        text.waiting_service(),
+        text.service_reads_status(),
         StateTone::Muted,
     );
     set_im_channel_row(
         &handles.im_status.telegram,
-        "等待服务",
-        "服务启动后读取状态",
+        text.waiting_service(),
+        text.service_reads_status(),
         StateTone::Muted,
     );
     set_im_channel_row(
         &handles.im_status.wechat,
-        "等待服务",
-        "服务启动后读取状态",
+        text.waiting_service(),
+        text.service_reads_status(),
         StateTone::Muted,
     );
     set_disabled_status_panel(
         &handles.codex_status,
-        "等待服务",
+        text.waiting_service(),
         if CODEX_APP_GUI_UNSUPPORTED {
-            "当前平台暂不支持 App GUI"
+            text.app_gui_unsupported()
         } else {
-            "服务启动后读取配置"
+            text.service_reads_config()
         },
     );
     set_status_panel(
         &handles.vscode_status,
-        "等待服务",
-        "服务启动后可连接 VS Code 插件。",
+        text.waiting_service(),
+        text.service_vscode_connect(),
         StateTone::Muted,
     );
     set_actions_enabled(handles, false);
@@ -3152,26 +4171,26 @@ fn show_dashboard_starting(handles: &UiHandles) {
 fn show_dashboard_startup_error(handles: &UiHandles, detail: &str) {
     set_status_panel(
         &handles.service_status,
-        "启动失败",
+        handles.text.startup_failed(),
         detail,
         StateTone::Error,
     );
     set_im_channel_row(
         &handles.im_status.feishu,
-        "等待服务",
-        "服务启动后读取状态",
+        handles.text.waiting_service(),
+        handles.text.service_reads_status(),
         StateTone::Muted,
     );
     set_im_channel_row(
         &handles.im_status.telegram,
-        "等待服务",
-        "服务启动后读取状态",
+        handles.text.waiting_service(),
+        handles.text.service_reads_status(),
         StateTone::Muted,
     );
     set_im_channel_row(
         &handles.im_status.wechat,
-        "等待服务",
-        "服务启动后读取状态",
+        handles.text.waiting_service(),
+        handles.text.service_reads_status(),
         StateTone::Muted,
     );
     set_actions_enabled(handles, false);
@@ -3220,6 +4239,7 @@ fn local_codex_app_provider_status(
 }
 
 fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_starting: bool) {
+    let text = handles.text;
     if !snapshot.service_online {
         if daemon_starting {
             show_dashboard_starting(handles);
@@ -3227,41 +4247,41 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         }
         set_status_panel(
             &handles.service_status,
-            "未运行",
-            "GUI 会自动启动本地服务；如果一直未运行，请重启 Codex Remote。",
+            text.not_running(),
+            text.gui_auto_start_service(),
             StateTone::Error,
         );
         set_im_channel_row(
             &handles.im_status.feishu,
-            "不可用",
-            "本地服务未运行",
+            text.unavailable(),
+            text.local_service_not_running(),
             StateTone::Muted,
         );
         set_im_channel_row(
             &handles.im_status.telegram,
-            "不可用",
-            "本地服务未运行",
+            text.unavailable(),
+            text.local_service_not_running(),
             StateTone::Muted,
         );
         set_im_channel_row(
             &handles.im_status.wechat,
-            "不可用",
-            "本地服务未运行",
+            text.unavailable(),
+            text.local_service_not_running(),
             StateTone::Muted,
         );
         set_disabled_status_panel(
             &handles.codex_status,
-            "不可用",
+            text.unavailable(),
             if CODEX_APP_GUI_UNSUPPORTED {
-                "当前平台暂不支持 App GUI"
+                text.app_gui_unsupported()
             } else {
-                "本地服务未运行"
+                text.local_service_not_running()
             },
         );
         set_status_panel(
             &handles.vscode_status,
-            "不可用",
-            "本地服务未运行",
+            text.unavailable(),
+            text.local_service_not_running(),
             StateTone::Muted,
         );
         set_actions_enabled(handles, false);
@@ -3273,8 +4293,8 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
     if let Some(status) = &snapshot.status {
         set_status_panel(
             &handles.service_status,
-            "运行中",
-            &format!("监听 {}", status.bind),
+            text.running(),
+            &text.listening(&status.bind),
             StateTone::Ok,
         );
     }
@@ -3301,35 +4321,40 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
     if CODEX_APP_GUI_UNSUPPORTED {
         set_disabled_status_panel(
             &handles.codex_status,
-            "暂不可用",
-            "当前平台暂不支持 App GUI",
+            text.unavailable(),
+            text.app_gui_unsupported(),
         );
     } else if codex_control_ready {
         let detail = snapshot
             .remote
             .as_ref()
-            .map(codex_remote_detail)
-            .unwrap_or_else(|| "Codex App remote-control 已连接。".to_string());
-        set_status_panel(&handles.codex_status, "已连接", &detail, StateTone::Ok);
+            .map(|remote| codex_remote_detail(text, remote))
+            .unwrap_or_else(|| text.codex_remote_connected_detail().to_string());
+        set_status_panel(
+            &handles.codex_status,
+            text.connected(),
+            &detail,
+            StateTone::Ok,
+        );
     } else if remote_connected {
         set_status_panel(
             &handles.codex_status,
-            "初始化中",
-            "Codex App 已打开控制通道，正在完成 remote-control 初始化。",
+            text.initializing(),
+            text.codex_initializing(),
             StateTone::Warn,
         );
     } else if codex_configured {
         set_status_panel(
             &handles.codex_status,
-            "未打开控制",
-            "配置已注入，请在 Codex App 里打开“控制这台 Mac”。",
+            text.control_not_open(),
+            text.control_not_open_detail(),
             StateTone::Warn,
         );
     } else {
         set_status_panel(
             &handles.codex_status,
-            "未注入",
-            "填写 Base URL 和 API Key 后点击启用。",
+            text.not_injected(),
+            text.fill_provider_then_enable(),
             StateTone::Warn,
         );
     }
@@ -3338,14 +4363,19 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         let detail = snapshot
             .remote
             .as_ref()
-            .map(codex_remote_detail)
-            .unwrap_or_else(|| "remote-control 已连接。".to_string());
-        set_status_panel(&handles.vscode_status, "已连接", &detail, StateTone::Ok);
+            .map(|remote| codex_remote_detail(text, remote))
+            .unwrap_or_else(|| text.remote_connected_detail().to_string());
+        set_status_panel(
+            &handles.vscode_status,
+            text.connected(),
+            &detail,
+            StateTone::Ok,
+        );
     } else {
         set_status_panel(
             &handles.vscode_status,
-            "可接入",
-            "VS Code 插件可通过 chatgpt.cliExecutable 使用本地 wrapper。",
+            text.can_connect(),
+            text.vscode_wrapper_detail(),
             StateTone::Warn,
         );
     }
@@ -3406,7 +4436,7 @@ fn fill_provider_form_if_empty(handles: &UiHandles, snapshot: &DashboardSnapshot
     let Some(status) = snapshot.codex_app.as_ref() else {
         handles
             .provider_catalog
-            .set_label("本地服务运行后会读取 ~/.codex/config.toml 里的 provider。");
+            .set_label(handles.text.provider_catalog_after_service());
         handles.provider_catalog.wrap(980);
         handles.provider_catalog.layout();
         refresh_provider_list(handles, None);
@@ -3414,7 +4444,7 @@ fn fill_provider_form_if_empty(handles: &UiHandles, snapshot: &DashboardSnapshot
     };
     handles
         .provider_catalog
-        .set_label(&provider_catalog_label(status));
+        .set_label(&provider_catalog_label(handles.text, status));
     handles.provider_catalog.wrap(980);
     handles.provider_catalog.layout();
     refresh_provider_list(handles, Some(status));
@@ -3477,7 +4507,7 @@ fn refresh_provider_choices(input: &ComboBox, providers: &[CodexAppProviderStatu
 }
 
 fn refresh_provider_list(handles: &UiHandles, status: Option<&CodexAppStatus>) {
-    let rows = provider_list_rows(status);
+    let rows = provider_list_rows(handles.text, status);
     if provider_list_matches(&handles.provider_list, &rows) {
         return;
     }
@@ -3498,7 +4528,7 @@ fn refresh_provider_list(handles: &UiHandles, status: Option<&CodexAppStatus>) {
             .provider_list
             .set_item_text_by_column(row as i64, 3, row_data[3].as_str());
 
-        if row_data[2] == "使用中" {
+        if row_data[2] == handles.text.in_use() {
             handles.provider_list.ensure_visible(row as i64);
         }
     }
@@ -3512,8 +4542,8 @@ fn refresh_im_account_list(handles: &UiHandles, snapshot: &DashboardSnapshot) {
         return;
     }
 
-    let rows = im_account_list_rows(snapshot);
-    refresh_im_status_from_rows(&handles.im_status, &rows);
+    let rows = im_account_list_rows(handles.text, snapshot);
+    refresh_im_status_from_rows(handles.text, &handles.im_status, &rows);
     let mut current_rows = handles.im_account_rows.borrow_mut();
     if *current_rows == rows {
         return;
@@ -3538,30 +4568,30 @@ fn refresh_im_account_list(handles: &UiHandles, snapshot: &DashboardSnapshot) {
     }
 }
 
-fn im_account_list_rows(snapshot: &DashboardSnapshot) -> Vec<[String; 5]> {
+fn im_account_list_rows(text: GuiText, snapshot: &DashboardSnapshot) -> Vec<[String; 5]> {
     if !snapshot.service_online {
         return vec![[
-            "等待服务".to_string(),
+            text.waiting_service().to_string(),
             "IM".to_string(),
-            "本地服务启动后读取".to_string(),
+            text.im_waiting_service_row().to_string(),
             String::new(),
             "false".to_string(),
         ]];
     }
     let Some(accounts) = snapshot.im_accounts.as_ref() else {
         return vec![[
-            "读取中".to_string(),
+            text.reading().to_string(),
             "IM".to_string(),
-            "正在读取机器人列表".to_string(),
+            text.reading_bot_list().to_string(),
             String::new(),
             "false".to_string(),
         ]];
     };
     if accounts.accounts.is_empty() {
         return vec![[
-            "未接入".to_string(),
+            text.not_connected().to_string(),
             "IM".to_string(),
-            "请扫码或填写 Bot Token".to_string(),
+            text.scan_or_token().to_string(),
             String::new(),
             "false".to_string(),
         ]];
@@ -3577,7 +4607,7 @@ fn im_account_list_rows(snapshot: &DashboardSnapshot) -> Vec<[String; 5]> {
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or_else(|| account.account_id.clone()),
                 im_platform_label(&account.platform).to_string(),
-                im_account_state_label(account).to_string(),
+                im_account_state_label(text, account).to_string(),
                 account.account_id.clone(),
                 account.enabled.to_string(),
             ]
@@ -3585,7 +4615,7 @@ fn im_account_list_rows(snapshot: &DashboardSnapshot) -> Vec<[String; 5]> {
         .collect()
 }
 
-fn im_account_state_label(account: &ImAccountItem) -> &'static str {
+fn im_account_state_label(text: GuiText, account: &ImAccountItem) -> &'static str {
     let has_error = account
         .last_error
         .as_deref()
@@ -3594,30 +4624,31 @@ fn im_account_state_label(account: &ImAccountItem) -> &'static str {
         matches!(account.platform.as_str(), "telegram" | "wechat") && account.polling && !has_error;
 
     if !account.configured || !account.secret_set {
-        "未配置"
+        text.not_configured()
     } else if !account.enabled {
-        "已暂停"
+        text.paused()
     } else if account.connected || long_polling_ready {
-        "已接入"
+        text.im_connected()
     } else if has_error {
-        "异常"
+        text.error()
     } else if account.connecting || account.polling {
-        "连接中"
+        text.connecting()
     } else {
-        "等待连接"
+        text.waiting_connection()
     }
 }
 
-fn refresh_im_status_from_rows(status: &ImStatusPanel, rows: &[[String; 5]]) {
-    let (state, detail, tone) = im_channel_summary_from_rows(rows, "feishu");
+fn refresh_im_status_from_rows(text: GuiText, status: &ImStatusPanel, rows: &[[String; 5]]) {
+    let (state, detail, tone) = im_channel_summary_from_rows(text, rows, "feishu");
     set_im_channel_row(&status.feishu, state, &detail, tone);
-    let (state, detail, tone) = im_channel_summary_from_rows(rows, "telegram");
+    let (state, detail, tone) = im_channel_summary_from_rows(text, rows, "telegram");
     set_im_channel_row(&status.telegram, state, &detail, tone);
-    let (state, detail, tone) = im_channel_summary_from_rows(rows, "wechat");
+    let (state, detail, tone) = im_channel_summary_from_rows(text, rows, "wechat");
     set_im_channel_row(&status.wechat, state, &detail, tone);
 }
 
 fn im_channel_summary_from_rows<'a>(
+    text: GuiText,
     rows: &'a [[String; 5]],
     platform: &str,
 ) -> (&'static str, String, StateTone) {
@@ -3626,7 +4657,11 @@ fn im_channel_summary_from_rows<'a>(
         .filter(|row| im_platform_key(&row[1]).as_deref() == Some(platform))
         .collect::<Vec<_>>();
     if platform_rows.is_empty() {
-        return ("未接入", im_channel_empty_detail(platform), StateTone::Warn);
+        return (
+            text.not_connected(),
+            text.im_empty_detail(platform),
+            StateTone::Warn,
+        );
     }
 
     let enabled_rows = platform_rows
@@ -3636,57 +4671,43 @@ fn im_channel_summary_from_rows<'a>(
         .collect::<Vec<_>>();
     if enabled_rows.is_empty() {
         return (
-            "已暂停",
+            text.paused(),
             im_channel_first_name(&platform_rows)
-                .map(|name| format!("{name} 已保存"))
-                .unwrap_or_else(|| "机器人已保存".to_string()),
+                .map(|name| text.name_saved(&name))
+                .unwrap_or_else(|| text.bot_saved().to_string()),
             StateTone::Muted,
         );
     }
 
     for (state, tone) in [
-        ("已接入", StateTone::Ok),
-        ("连接中", StateTone::Warn),
-        ("等待连接", StateTone::Warn),
-        ("异常", StateTone::Error),
+        (text.im_connected(), StateTone::Ok),
+        (text.connecting(), StateTone::Warn),
+        (text.waiting_connection(), StateTone::Warn),
+        (text.error(), StateTone::Error),
     ] {
         if let Some(row) = enabled_rows.iter().find(|row| row[2] == state) {
-            return (state, im_channel_row_detail(platform, row), tone);
+            return (state, im_channel_row_detail(text, platform, row), tone);
         }
     }
 
     (
-        "等待连接",
+        text.waiting_connection(),
         im_channel_first_name(&enabled_rows)
-            .map(|name| format!("{name} 等待连接"))
-            .unwrap_or_else(|| "等待机器人连接".to_string()),
+            .map(|name| text.bot_waiting(&name))
+            .unwrap_or_else(|| text.waiting_bot_connection().to_string()),
         StateTone::Warn,
     )
 }
 
-fn im_channel_empty_detail(platform: &str) -> String {
-    match platform {
-        "feishu" => "扫码添加飞书机器人".to_string(),
-        "telegram" => "添加 Telegram Bot Token".to_string(),
-        "wechat" => "扫码添加微信机器人".to_string(),
-        _ => "添加机器人".to_string(),
-    }
-}
-
-fn im_channel_row_detail(platform: &str, row: &[String; 5]) -> String {
+fn im_channel_row_detail(text: GuiText, platform: &str, row: &[String; 5]) -> String {
     let name = row[0].trim();
-    let fallback = match platform {
-        "feishu" => "飞书机器人",
-        "telegram" => "Telegram 机器人",
-        "wechat" => "微信机器人",
-        _ => "机器人",
-    };
+    let fallback = text.bot_fallback(platform);
     let name = if name.is_empty() { fallback } else { name };
     match row[2].as_str() {
-        "已接入" => name.to_string(),
-        "连接中" => format!("{name} 正在连接"),
-        "等待连接" => format!("{name} 等待连接"),
-        "异常" => format!("{name} 异常"),
+        state if state == text.im_connected() => name.to_string(),
+        state if state == text.connecting() => text.bot_connecting(name),
+        state if state == text.waiting_connection() => text.bot_waiting(name),
+        state if state == text.error() => text.bot_error(name),
         _ => name.to_string(),
     }
 }
@@ -3698,11 +4719,11 @@ fn im_channel_first_name(rows: &[&[String; 5]]) -> Option<String> {
         .map(str::to_string)
 }
 
-fn provider_list_rows(status: Option<&CodexAppStatus>) -> Vec<[String; 4]> {
+fn provider_list_rows(text: GuiText, status: Option<&CodexAppStatus>) -> Vec<[String; 4]> {
     let Some(status) = status else {
         return vec![[
-            "等待本地服务".to_string(),
-            "启动后读取 ~/.codex/config.toml".to_string(),
+            text.provider_waiting_service().to_string(),
+            text.provider_read_after_start().to_string(),
             String::new(),
             String::new(),
         ]];
@@ -3716,9 +4737,9 @@ fn provider_list_rows(status: Option<&CodexAppStatus>) -> Vec<[String; 4]> {
     if providers.is_empty() {
         return vec![[
             DEFAULT_PROVIDER_NAME.to_string(),
-            "未配置，写入时新建".to_string(),
+            text.provider_create_on_write().to_string(),
             String::new(),
-            "未配置".to_string(),
+            text.not_configured().to_string(),
         ]];
     }
 
@@ -3730,13 +4751,13 @@ fn provider_list_rows(status: Option<&CodexAppStatus>) -> Vec<[String; 4]> {
                 provider
                     .base_url
                     .clone()
-                    .unwrap_or_else(|| "未配置".to_string()),
+                    .unwrap_or_else(|| text.not_configured().to_string()),
                 if Some(provider.name.as_str()) == active_name {
-                    "使用中".to_string()
+                    text.in_use().to_string()
                 } else {
                     String::new()
                 },
-                masked_provider_key(provider.key.as_deref()),
+                masked_provider_key(text, provider.key.as_deref()),
             ]
         })
         .collect()
@@ -3777,11 +4798,11 @@ fn provider_choice_names(providers: &[CodexAppProviderStatus]) -> Vec<String> {
     names
 }
 
-fn masked_provider_key(value: Option<&str>) -> String {
+fn masked_provider_key(text: GuiText, value: Option<&str>) -> String {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
-        return "未配置".to_string();
+        return text.not_configured().to_string();
     };
-    format!("已配置 {}", masked_secret(value))
+    format!("{} {}", text.key_configured(), masked_secret(value))
 }
 
 fn masked_provider_key_input(value: Option<&str>) -> String {
@@ -3826,21 +4847,18 @@ fn combo_box_items(input: &ComboBox) -> Vec<String> {
         .collect()
 }
 
-fn provider_catalog_label(status: &CodexAppStatus) -> String {
+fn provider_catalog_label(text: GuiText, status: &CodexAppStatus) -> String {
     if status.providers.is_empty() {
         if let Some(active) = status.provider.as_ref() {
-            return format!("当前 provider: {active}", active = active.name.as_str());
+            return text.current_provider(active.name.as_str());
         }
-        return "还没有 provider，填写后点击启用。".to_string();
+        return text.no_provider().to_string();
     }
 
     if let Some(active) = status.provider.as_ref() {
-        format!("当前 provider: {}", active.name)
+        text.current_provider(&active.name)
     } else {
-        format!(
-            "已保存 {} 个 provider，请选择一个使用。",
-            status.providers.len()
-        )
+        text.saved_providers(status.providers.len())
     }
 }
 
@@ -3962,7 +4980,7 @@ fn provider_name_from_ui(
 
 fn is_real_provider_name(value: &str) -> bool {
     let value = value.trim();
-    !value.is_empty() && value != "等待本地服务"
+    !value.is_empty() && value != "等待本地服务" && value != "Waiting for local service"
 }
 
 fn apply_provider_row_to_form(handles: &UiHandles, list: &ListCtrl, row: i64) {
@@ -3992,7 +5010,11 @@ fn list_key_cell_to_input(value: &str) -> String {
     if is_placeholder_config_value(value) {
         return String::new();
     }
-    value.strip_prefix("已配置 ").unwrap_or(value).to_string()
+    value
+        .strip_prefix("已配置 ")
+        .or_else(|| value.strip_prefix("Configured "))
+        .unwrap_or(value)
+        .to_string()
 }
 
 fn clean_provider_text(value: &str) -> String {
@@ -4015,7 +5037,7 @@ fn config_text_value(value: &str) -> Option<String> {
 
 fn is_placeholder_config_value(value: &str) -> bool {
     let value = value.trim();
-    value.is_empty() || value.contains("未配")
+    value.is_empty() || value.contains("未配") || value == "Not configured"
 }
 
 fn apply_provider_to_form(handles: &UiHandles, provider: &CodexAppProviderStatus, overwrite: bool) {
@@ -4172,19 +5194,19 @@ fn set_disabled_status_panel(panel: &StatusPanel, state: &str, detail: &str) {
     panel.detail.wrap(190);
 }
 
-fn codex_remote_detail(remote: &RemoteControlStatus) -> String {
+fn codex_remote_detail(text: GuiText, remote: &RemoteControlStatus) -> String {
     if remote.stale.unwrap_or(false) {
-        return "remote-control 心跳失活，等待 Codex App 自动重连。".to_string();
+        return text.remote_stale().to_string();
     }
     if let Some(err) = &remote.last_error {
-        return format!("最近错误: {err}");
+        return text.recent_error(err);
     }
     if remote.healthy.unwrap_or(false) {
         if let Some(status) = remote.last_app_pong_status.as_deref() {
-            return format!("remote-control 已连接，心跳 {status}。");
+            return text.remote_heartbeat(status);
         }
     }
-    "remote-control 已连接。".to_string()
+    text.remote_connected_detail().to_string()
 }
 
 fn qr_bitmap(value: &str) -> Option<(Bitmap, i32)> {

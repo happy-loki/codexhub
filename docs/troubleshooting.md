@@ -17,7 +17,7 @@ Expected:
 }
 ```
 
-If `feishuWs.connected` is false, check Feishu credentials, websocket subscription, and the event log in the web console.
+If `feishuWs.connected` is false, check Feishu credentials, websocket subscription, and `GET /api/events`.
 
 ## Check Remote-Control
 
@@ -75,7 +75,7 @@ Check:
 2. Remote-control status: `connected=true` and `initialized=true`.
 3. Feishu allowlists: `allowedOpenIds` and `allowedChatIds`.
 4. Group chat mention behavior: if `mentionOnly=true`, mention the bot in group chats.
-5. Event log: `GET /api/events` or the web console.
+5. Event log: `GET /api/events`.
 
 ## Feishu Messages Do Not Reach Codex
 

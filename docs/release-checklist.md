@@ -30,9 +30,9 @@ Remove-Item *.log -ErrorAction SilentlyContinue
 ## Functional Smoke Test
 
 - [ ] Start daemon with a clean config.
-- [ ] Open `http://127.0.0.1:3847`.
+- [ ] Confirm `GET http://127.0.0.1:3847/api/status` returns service status.
 - [ ] Complete Feishu onboarding or enter app credentials.
-- [ ] Click `Configure Codex App` in the web console, or run `codex-remote --config config.toml configure-codex-app`.
+- [ ] Configure Codex App from the desktop GUI, or run `codex-remote --config config.toml configure-codex-app`.
 - [ ] Open Codex App by double-clicking it.
 - [ ] Enable remote control in Codex App.
 - [ ] Confirm remote-control status shows connected and initialized.

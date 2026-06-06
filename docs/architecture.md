@@ -49,7 +49,7 @@ codex-remote daemon
 
 It owns:
 
-- local web console
+- local backend API
 - official remote-control backend endpoints
 - local ChatGPT backend compatibility endpoints needed by the app
 - IM channel listeners
@@ -201,21 +201,10 @@ When an approval action is selected:
 3. The selected option is shown in the platform-specific format.
 4. The next queued approval prompt is sent, if present.
 
-## Local Web Console
+## Local API
 
-The web console is served from the daemon on `bind`, default:
-
-```text
-http://127.0.0.1:3847
-```
-
-It provides:
-
-- daemon status
-- Feishu/Telegram/WeChat onboarding and bridge on/off
-- remote-control status
-- Codex App config hints
-- recent event log
+The daemon serves the local API on `bind`, default `127.0.0.1:3847`.
+The desktop GUI is the maintained user interface; the previous web console is no longer shipped.
 
 ## State Boundaries
 
