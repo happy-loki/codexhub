@@ -14,6 +14,7 @@ use serde::Deserialize;
 use wxdragon::{prelude::*, timer::Timer};
 
 use super::daemon::hide_command_window;
+use super::text::GuiText;
 use super::{
     FrameTimerStore, GuiTimers, UPDATE_CHECK_TIMEOUT, UPDATE_MANIFEST_URL, UPDATE_RELEASE_API_URL,
     UPDATE_RELEASE_PAGE_URL,
@@ -61,10 +62,11 @@ struct GitHubRelease {
 pub(super) fn check_for_updates_async(
     frame: &Frame,
     gui_timers: &GuiTimers,
+    text: GuiText,
     in_flight: &Arc<AtomicBool>,
 ) {
     if in_flight.swap(true, Ordering::SeqCst) {
-        show_info(frame, "正在检查更新，请稍候。");
+        show_info(frame, text.checking_updates_busy());
         return;
     }
 
@@ -72,7 +74,7 @@ pub(super) fn check_for_updates_async(
     {
         let result = result.clone();
         thread::spawn(move || {
-            let update = check_for_updates();
+            let update = check_for_updates(text);
             if let Ok(mut slot) = result.lock() {
                 slot.replace(update);
             }
@@ -95,7 +97,7 @@ pub(super) fn check_for_updates_async(
                 timer.stop();
             }
             in_flight.store(false, Ordering::SeqCst);
-            show_update_check_result(&frame, update);
+            show_update_check_result(&frame, text, update);
         });
     }
     update_timer.start(100, false);
@@ -103,27 +105,24 @@ pub(super) fn check_for_updates_async(
     gui_timers.track(&update_timer_store);
 }
 
-fn check_for_updates() -> Result<UpdateCheckOutcome, String> {
+fn check_for_updates(text: GuiText) -> Result<UpdateCheckOutcome, String> {
     let client = Client::builder()
         .connect_timeout(UPDATE_CHECK_TIMEOUT)
         .timeout(UPDATE_CHECK_TIMEOUT)
         .build()
-        .map_err(|err| format!("创建更新检查客户端失败：{err}"))?;
+        .map_err(|err| text.update_client_failed(&err.to_string()))?;
 
-    let release = fetch_update_manifest(&client).or_else(|manifest_err| {
-        fetch_github_latest_release(&client).map_err(|api_err| {
-            format!(
-                "无法读取 GitHub Release 更新信息：{api_err}\nlatest.json 检查结果：{manifest_err}"
-            )
-        })
+    let release = fetch_update_manifest(text, &client).or_else(|manifest_err| {
+        fetch_github_latest_release(text, &client)
+            .map_err(|api_err| text.update_sources_failed(&api_err, &manifest_err))
     })?;
-    build_update_check_outcome(release)
+    build_update_check_outcome(text, release)
 }
 
-fn fetch_update_manifest(client: &Client) -> Result<LatestReleaseInfo, String> {
-    let text = fetch_update_text(client, UPDATE_MANIFEST_URL)?;
-    let manifest: UpdateManifest =
-        serde_json::from_str(&text).map_err(|err| format!("latest.json 无法解析：{err}"))?;
+fn fetch_update_manifest(text: GuiText, client: &Client) -> Result<LatestReleaseInfo, String> {
+    let body = fetch_update_text(text, client, UPDATE_MANIFEST_URL)?;
+    let manifest: UpdateManifest = serde_json::from_str(&body)
+        .map_err(|err| text.update_manifest_parse_failed(&err.to_string()))?;
     let release_url = manifest
         .release_url
         .filter(|value| !value.trim().is_empty())
@@ -135,10 +134,13 @@ fn fetch_update_manifest(client: &Client) -> Result<LatestReleaseInfo, String> {
     })
 }
 
-fn fetch_github_latest_release(client: &Client) -> Result<LatestReleaseInfo, String> {
-    let text = fetch_update_text(client, UPDATE_RELEASE_API_URL)?;
-    let release: GitHubRelease =
-        serde_json::from_str(&text).map_err(|err| format!("GitHub Release API 无法解析：{err}"))?;
+fn fetch_github_latest_release(
+    text: GuiText,
+    client: &Client,
+) -> Result<LatestReleaseInfo, String> {
+    let body = fetch_update_text(text, client, UPDATE_RELEASE_API_URL)?;
+    let release: GitHubRelease = serde_json::from_str(&body)
+        .map_err(|err| text.github_release_parse_failed(&err.to_string()))?;
     Ok(LatestReleaseInfo {
         version: release.tag_name,
         release_url: release.html_url,
@@ -146,36 +148,43 @@ fn fetch_github_latest_release(client: &Client) -> Result<LatestReleaseInfo, Str
     })
 }
 
-fn fetch_update_text(client: &Client, url: &str) -> Result<String, String> {
+fn fetch_update_text(text: GuiText, client: &Client, url: &str) -> Result<String, String> {
     let response = client
         .get(url)
         .header("User-Agent", "codex-remote")
         .header("Accept", "application/json")
         .send()
         .map_err(|err| {
-            if err.is_timeout() {
-                format!("{url} 请求超时：{err}")
+            let is_timeout = err.is_timeout();
+            let err = err.to_string();
+            if is_timeout {
+                text.url_request_timeout(url, &err)
             } else {
-                format!("{url} 请求失败：{err}")
+                text.url_request_failed(url, &err)
             }
         })?;
     let status = response.status();
-    let text = response.text().map_err(|err| err.to_string())?;
+    let body = response
+        .text()
+        .map_err(|err| text.url_request_failed(url, &err.to_string()))?;
     if status.is_success() {
-        Ok(text)
+        Ok(body)
     } else {
-        Err(format!("{url} 返回 HTTP {status}: {text}"))
+        Err(text.url_http_failed(url, &status.to_string(), &body))
     }
 }
 
-fn build_update_check_outcome(release: LatestReleaseInfo) -> Result<UpdateCheckOutcome, String> {
+fn build_update_check_outcome(
+    text: GuiText,
+    release: LatestReleaseInfo,
+) -> Result<UpdateCheckOutcome, String> {
     let current_version = env!("CARGO_PKG_VERSION").to_string();
     let latest_version = release.version.trim().to_string();
     if latest_version.is_empty() {
-        return Err("GitHub Release 没有版本号。".to_string());
+        return Err(text.release_missing_version().to_string());
     }
 
-    if is_version_newer(&latest_version, &current_version)? {
+    if is_version_newer(text, &latest_version, &current_version)? {
         Ok(UpdateCheckOutcome::Newer {
             current_version,
             latest_version,
@@ -190,7 +199,11 @@ fn build_update_check_outcome(release: LatestReleaseInfo) -> Result<UpdateCheckO
     }
 }
 
-fn show_update_check_result(parent: &Frame, result: Result<UpdateCheckOutcome, String>) {
+fn show_update_check_result(
+    parent: &Frame,
+    text: GuiText,
+    result: Result<UpdateCheckOutcome, String>,
+) {
     match result {
         Ok(UpdateCheckOutcome::Current {
             current_version,
@@ -198,9 +211,7 @@ fn show_update_check_result(parent: &Frame, result: Result<UpdateCheckOutcome, S
         }) => {
             show_info(
                 parent,
-                &format!(
-                    "已是最新版本。\n当前版本：{current_version}\nGitHub 最新版本：{latest_version}"
-                ),
+                &text.already_latest_version(&current_version, &latest_version),
             );
         }
         Ok(UpdateCheckOutcome::Newer {
@@ -209,28 +220,26 @@ fn show_update_check_result(parent: &Frame, result: Result<UpdateCheckOutcome, S
             release_url,
             notes,
         }) => {
-            let notes = update_notes_for_dialog(notes.as_deref());
-            let message = format!(
-                "发现新版本。\n当前版本：{current_version}\n最新版本：{latest_version}\n\n{notes}\n\n是否打开 GitHub Releases 下载？"
-            );
-            if confirm_open_update_release(parent, &message) {
-                if let Err(err) = open_url_in_browser(&release_url) {
+            let notes = update_notes_for_dialog(text, notes.as_deref());
+            let message = text.new_version_message(&current_version, &latest_version, &notes);
+            if confirm_open_update_release(parent, text, &message) {
+                if let Err(err) = open_url_in_browser(text, &release_url) {
                     show_error(parent, &err);
                 }
             }
         }
         Err(err) => {
-            show_error(parent, &format!("检查更新失败：{err}"));
+            show_error(parent, &text.update_failed(&err));
         }
     }
 }
 
-fn update_notes_for_dialog(notes: Option<&str>) -> String {
+fn update_notes_for_dialog(text: GuiText, notes: Option<&str>) -> String {
     let notes = notes.unwrap_or_default().trim();
     if notes.is_empty() {
-        return "Release 页面包含安装包和更新说明。".to_string();
+        return text.release_notes_default().to_string();
     }
-    format!("更新说明：\n{}", truncate_for_dialog(notes, 700))
+    text.release_notes(&truncate_for_dialog(notes, 700))
 }
 
 fn truncate_for_dialog(value: &str, max_chars: usize) -> String {
@@ -242,9 +251,9 @@ fn truncate_for_dialog(value: &str, max_chars: usize) -> String {
     result
 }
 
-fn is_version_newer(latest: &str, current: &str) -> Result<bool, String> {
-    let latest = parse_version_segments(latest)?;
-    let current = parse_version_segments(current)?;
+fn is_version_newer(text: GuiText, latest: &str, current: &str) -> Result<bool, String> {
+    let latest = parse_version_segments(text, latest)?;
+    let current = parse_version_segments(text, current)?;
     for index in 0..latest.len().max(current.len()) {
         let latest_segment = latest.get(index).copied().unwrap_or_default();
         let current_segment = current.get(index).copied().unwrap_or_default();
@@ -255,7 +264,7 @@ fn is_version_newer(latest: &str, current: &str) -> Result<bool, String> {
     Ok(false)
 }
 
-fn parse_version_segments(version: &str) -> Result<Vec<u64>, String> {
+fn parse_version_segments(text: GuiText, version: &str) -> Result<Vec<u64>, String> {
     let normalized = version
         .trim()
         .trim_start_matches('v')
@@ -268,11 +277,11 @@ fn parse_version_segments(version: &str) -> Result<Vec<u64>, String> {
         .map(|segment| {
             segment
                 .parse::<u64>()
-                .map_err(|_| format!("版本号 {version} 无法比较。"))
+                .map_err(|_| text.version_not_comparable(version))
         })
         .collect::<Result<Vec<_>, _>>()?;
     if segments.is_empty() {
-        Err(format!("版本号 {version} 无法比较。"))
+        Err(text.version_not_comparable(version))
     } else {
         Ok(segments)
     }
@@ -280,22 +289,24 @@ fn parse_version_segments(version: &str) -> Result<Vec<u64>, String> {
 
 #[cfg(test)]
 mod update_tests {
+    use super::super::text::{GuiLocale, GuiText};
     use super::*;
 
     #[test]
     fn compares_release_versions() {
-        assert!(is_version_newer("v0.2.6", "0.2.5").unwrap());
-        assert!(is_version_newer("0.3.0", "0.2.99").unwrap());
-        assert!(!is_version_newer("v0.2.5", "0.2.5").unwrap());
-        assert!(!is_version_newer("v0.2.4", "0.2.5").unwrap());
-        assert!(!is_version_newer("v0.2.5-beta.1", "0.2.5").unwrap());
+        let text = GuiText::new(GuiLocale::EnUs);
+        assert!(is_version_newer(text, "v0.2.6", "0.2.5").unwrap());
+        assert!(is_version_newer(text, "0.3.0", "0.2.99").unwrap());
+        assert!(!is_version_newer(text, "v0.2.5", "0.2.5").unwrap());
+        assert!(!is_version_newer(text, "v0.2.4", "0.2.5").unwrap());
+        assert!(!is_version_newer(text, "v0.2.5-beta.1", "0.2.5").unwrap());
     }
 }
 
-fn open_url_in_browser(url: &str) -> Result<(), String> {
+fn open_url_in_browser(text: GuiText, url: &str) -> Result<(), String> {
     let url = url.trim();
     if url.is_empty() {
-        return Err("下载地址为空。".to_string());
+        return Err(text.empty_download_url().to_string());
     }
 
     #[cfg(target_os = "windows")]
@@ -321,5 +332,5 @@ fn open_url_in_browser(url: &str) -> Result<(), String> {
     command
         .spawn()
         .map(|_| ())
-        .map_err(|err| format!("无法打开浏览器：{err}\n下载地址：{url}"))
+        .map_err(|err| text.open_browser_failed(&err.to_string(), url))
 }

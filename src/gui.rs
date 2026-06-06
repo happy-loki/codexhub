@@ -131,10 +131,10 @@ pub fn run() {
 }
 
 fn build_ui() {
-    let api = ApiClient::new(default_base_url());
-    let gui_timers = GuiTimers::new();
     let locale = load_gui_locale();
     let text = GuiText::new(locale);
+    let api = ApiClient::new(default_base_url(), text);
+    let gui_timers = GuiTimers::new();
 
     let frame = Frame::builder()
         .with_title("Codex Remote")
@@ -776,8 +776,10 @@ fn build_ui() {
             let api = api.clone();
             let config_action_result = config_action_result.clone();
             let config_action_in_flight = config_action_in_flight.clone();
+            let text = handles.text;
             thread::spawn(move || {
-                let outcome = save_codex_provider_and_verify(&api, &request, &selected_provider);
+                let outcome =
+                    save_codex_provider_and_verify(&api, &request, &selected_provider, text);
                 if let Ok(mut slot) = config_action_result.lock() {
                     slot.replace(ConfigActionResult::Save {
                         provider_name: selected_provider,
@@ -812,10 +814,10 @@ fn build_ui() {
             );
             if provider_name.trim().is_empty() {
                 config_action_in_flight.store(false, Ordering::SeqCst);
-                show_error(&frame, "请先选择或填写要删除的 provider。");
+                show_error(&frame, handles.text.select_provider_to_delete());
                 return;
             }
-            if !confirm_delete_provider(&frame, &provider_name) {
+            if !confirm_delete_provider(&frame, handles.text, &provider_name) {
                 config_action_in_flight.store(false, Ordering::SeqCst);
                 return;
             }
@@ -835,8 +837,9 @@ fn build_ui() {
             let api = api.clone();
             let config_action_result = config_action_result.clone();
             let config_action_in_flight = config_action_in_flight.clone();
+            let text = handles.text;
             thread::spawn(move || {
-                let outcome = delete_codex_provider_and_verify(&api, &request);
+                let outcome = delete_codex_provider_and_verify(&api, &request, text);
                 if let Ok(mut slot) = config_action_result.lock() {
                     slot.replace(ConfigActionResult::Delete(outcome));
                 }
@@ -885,8 +888,10 @@ fn build_ui() {
             let api = api.clone();
             let config_action_result = config_action_result.clone();
             let config_action_in_flight = config_action_in_flight.clone();
+            let text = handles.text;
             thread::spawn(move || {
-                let outcome = configure_codex_app_and_verify(&api, &request, &selected_provider);
+                let outcome =
+                    configure_codex_app_and_verify(&api, &request, &selected_provider, text);
                 if let Ok(mut slot) = config_action_result.lock() {
                     slot.replace(ConfigActionResult::Configure {
                         provider_name: selected_provider,
@@ -907,16 +912,13 @@ fn build_ui() {
             if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
                 return;
             }
-            if !confirm_uninstall_codex_app_config(&frame) {
+            if !confirm_uninstall_codex_app_config(&frame, handles.text) {
                 return;
             }
 
             match api.uninstall_codex_app() {
                 Ok(_) => {
-                    show_info(
-                        &frame,
-                        "Codex App 本地接入配置已卸载。请重启 Codex App 以恢复官方连接。",
-                    );
+                    show_info(&frame, handles.text.codex_app_config_uninstalled());
                     show_local_codex_app_config_preview(&handles, &api, &dashboard_refresh);
                     schedule_dashboard_refresh(&api, &dashboard_refresh);
                 }
@@ -964,7 +966,7 @@ fn build_ui() {
             if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
                 return;
             }
-            show_feishu_onboard_dialog(&frame, api.clone());
+            show_feishu_onboard_dialog(&frame, handles.text, api.clone());
             schedule_dashboard_refresh(&api, &dashboard_refresh);
         });
     }
@@ -989,14 +991,14 @@ fn build_ui() {
             }
             let Some(account) = selected_im_account(&handles, &dashboard_refresh) else {
                 im_action_in_flight.store(false, Ordering::SeqCst);
-                show_error(&frame, "请先选择一个机器人。");
+                show_error(&frame, handles.text.select_bot_first());
                 return;
             };
             let name = account
                 .display_name
                 .clone()
                 .unwrap_or_else(|| account.account_id.clone());
-            if !confirm_delete_im_account(&frame, &name) {
+            if !confirm_delete_im_account(&frame, handles.text, &name) {
                 im_action_in_flight.store(false, Ordering::SeqCst);
                 return;
             }
@@ -1038,7 +1040,7 @@ fn build_ui() {
                 return;
             }
 
-            let Some(token) = prompt_telegram_bot_token(&frame) else {
+            let Some(token) = prompt_telegram_bot_token(&frame, handles.text) else {
                 im_action_in_flight.store(false, Ordering::SeqCst);
                 return;
             };
@@ -1071,11 +1073,12 @@ fn build_ui() {
         let api = api.clone();
         let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
+        let handles = handles.clone();
         connect_wechat_button.on_click(move |_| {
             if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
                 return;
             }
-            show_wechat_onboard_dialog(&frame, api.clone());
+            show_wechat_onboard_dialog(&frame, handles.text, api.clone());
             schedule_dashboard_refresh(&api, &dashboard_refresh);
         });
     }
@@ -1116,9 +1119,14 @@ fn build_ui() {
                 let thread_api = api.clone();
                 let config_action_result = config_action_result.clone();
                 let config_action_in_flight = config_action_in_flight.clone();
+                let text = handles.text;
                 thread::spawn(move || {
-                    let outcome =
-                        set_provider_websocket_and_verify(&thread_api, &provider_name, enabled);
+                    let outcome = set_provider_websocket_and_verify(
+                        &thread_api,
+                        &provider_name,
+                        enabled,
+                        text,
+                    );
                     if let Ok(mut slot) = config_action_result.lock() {
                         slot.replace(ConfigActionResult::ProviderWebSocket {
                             provider_name,
@@ -1303,7 +1311,7 @@ fn install_system_menu(frame: &Frame, gui_timers: &GuiTimers, text: GuiText) {
         ID_EXIT | ID_MENU_CLOSE_WINDOW => frame.close(true),
         ID_MENU_MINIMIZE => frame.iconize(true),
         ID_MENU_CHECK_UPDATE => {
-            update::check_for_updates_async(&frame, &gui_timers, &update_check_in_flight);
+            update::check_for_updates_async(&frame, &gui_timers, text, &update_check_in_flight);
         }
         ID_MENU_LANGUAGE_ZH_CN => {
             handle_language_selected(&frame, text, GuiLocale::ZhCn);
@@ -1472,7 +1480,10 @@ fn ensure_service_ready_for_action(
     refresh: &DashboardRefresh,
 ) -> bool {
     if refresh.daemon_starting.load(Ordering::SeqCst) {
-        show_info(frame, "本地服务正在启动，请稍后再试。");
+        show_info(
+            frame,
+            GuiText::new(load_gui_locale()).service_starting_wait(),
+        );
         return false;
     }
     if api.is_online() {
@@ -1482,7 +1493,7 @@ fn ensure_service_ready_for_action(
     force_dashboard_refresh(api, refresh);
     show_error(
         frame,
-        "本地服务还没有启动完成，请稍后再试。如果一直未运行，请重启 Codex Remote。",
+        GuiText::new(load_gui_locale()).service_not_ready_retry(),
     );
     false
 }
@@ -1799,7 +1810,7 @@ fn show_about_dialog(parent: &Frame) {
     );
 
     let description = StaticText::builder(&panel)
-        .with_label("本地 remote-control backend + 飞书桥接。")
+        .with_label(&GuiText::new(load_gui_locale()).about_description())
         .build();
     description.set_foreground_color(Colour::rgb(88, 96, 108));
     description.wrap(460);
@@ -1822,7 +1833,9 @@ fn show_about_dialog(parent: &Frame) {
     );
 
     let buttons = BoxSizer::builder(Orientation::Horizontal).build();
-    let close_button = Button::builder(&panel).with_label("关闭").build();
+    let close_button = Button::builder(&panel)
+        .with_label(GuiText::new(load_gui_locale()).close())
+        .build();
     buttons.add_stretch_spacer(1);
     buttons.add(&close_button, 0, SizerFlag::AlignLeft, 0);
     sizer.add_sizer(&buttons, 0, SizerFlag::Expand | SizerFlag::All, 18);
@@ -1856,19 +1869,19 @@ fn show_error(parent: &dyn WxWidget, message: &str) {
         .show_modal();
 }
 
-fn confirm_open_update_release(parent: &dyn WxWidget, message: &str) -> bool {
-    MessageDialog::builder(parent, message, "Codex Remote 更新")
+fn confirm_open_update_release(parent: &dyn WxWidget, text: GuiText, message: &str) -> bool {
+    MessageDialog::builder(parent, message, text.update_dialog_title())
         .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
         .build()
         .show_modal()
         == ID_YES
 }
 
-fn confirm_uninstall_codex_app_config(parent: &dyn WxWidget) -> bool {
+fn confirm_uninstall_codex_app_config(parent: &dyn WxWidget, text: GuiText) -> bool {
     MessageDialog::builder(
         parent,
-        "卸载会移除本工具写入的 chatgpt_base_url、本地认证信息和 Codex App 环境变量。确认继续？",
-        "卸载 Codex App 配置",
+        text.confirm_uninstall_codex_app_message(),
+        text.confirm_uninstall_codex_app_title(),
     )
     .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
     .build()
@@ -1876,11 +1889,11 @@ fn confirm_uninstall_codex_app_config(parent: &dyn WxWidget) -> bool {
         == ID_YES
 }
 
-fn confirm_delete_provider(parent: &dyn WxWidget, provider_name: &str) -> bool {
+fn confirm_delete_provider(parent: &dyn WxWidget, text: GuiText, provider_name: &str) -> bool {
     MessageDialog::builder(
         parent,
-        &format!("删除 provider `{provider_name}`？如果它正在使用中，也会取消当前 provider 设置。"),
-        "删除 Provider",
+        &text.confirm_delete_provider_message(provider_name),
+        text.confirm_delete_provider_title(),
     )
     .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
     .build()
@@ -1888,11 +1901,11 @@ fn confirm_delete_provider(parent: &dyn WxWidget, provider_name: &str) -> bool {
         == ID_YES
 }
 
-fn confirm_delete_im_account(parent: &dyn WxWidget, account_name: &str) -> bool {
+fn confirm_delete_im_account(parent: &dyn WxWidget, text: GuiText, account_name: &str) -> bool {
     MessageDialog::builder(
         parent,
-        &format!("删除机器人 `{account_name}`？相关会话绑定也会一起清理。"),
-        "删除机器人接入",
+        &text.confirm_delete_im_account_message(account_name),
+        text.confirm_delete_im_account_title(),
     )
     .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
     .build()

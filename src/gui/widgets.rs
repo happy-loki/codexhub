@@ -116,9 +116,23 @@ pub(super) fn im_status_panel<W: WxWidget>(parent: &W, text: GuiText) -> ImStatu
     panel.set_min_size(Size::new(260, 190));
 
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
-    let feishu = im_channel_row(&panel, &sizer, ImChannelKind::Feishu, "飞书", 8, text);
+    let feishu = im_channel_row(
+        &panel,
+        &sizer,
+        ImChannelKind::Feishu,
+        text.feishu_label(),
+        8,
+        text,
+    );
     let telegram = im_channel_row(&panel, &sizer, ImChannelKind::Telegram, "Telegram", 8, text);
-    let wechat = im_channel_row(&panel, &sizer, ImChannelKind::Wechat, "微信", 0, text);
+    let wechat = im_channel_row(
+        &panel,
+        &sizer,
+        ImChannelKind::Wechat,
+        text.wechat_label(),
+        0,
+        text,
+    );
 
     panel.set_sizer(sizer, true);
     ImStatusPanel {

@@ -30,7 +30,7 @@ pub(super) fn apply_pending_im_action(
 
     match result {
         ImActionResult::TelegramConfigure(Ok(_)) => {
-            show_info(frame, "Telegram 已保存并接入。");
+            show_info(frame, handles.text.telegram_saved());
             schedule_dashboard_refresh(api, refresh);
         }
         ImActionResult::TelegramConfigure(Err(err)) => {
@@ -45,7 +45,7 @@ pub(super) fn apply_pending_im_action(
             force_dashboard_refresh(api, refresh);
         }
         ImActionResult::AccountDelete(Ok(_)) => {
-            show_info(frame, "机器人接入已删除。");
+            show_info(frame, handles.text.im_account_deleted());
             force_dashboard_refresh(api, refresh);
         }
         ImActionResult::AccountDelete(Err(err)) => {
@@ -88,20 +88,20 @@ pub(super) fn selected_im_account(
         })
 }
 
-fn im_platform_label(platform: &str) -> &'static str {
+fn im_platform_label(text: GuiText, platform: &str) -> &'static str {
     match platform {
-        "feishu" => "飞书",
+        "feishu" => text.feishu_label(),
         "telegram" => "Telegram",
-        "wechat" => "微信",
+        "wechat" => text.wechat_label(),
         _ => "IM",
     }
 }
 
 pub(super) fn im_platform_key(label: &str) -> Option<String> {
     match label.trim() {
-        "飞书" | "feishu" => Some("feishu".to_string()),
+        "飞书" | "Feishu" | "feishu" => Some("feishu".to_string()),
         "Telegram" | "telegram" => Some("telegram".to_string()),
-        "微信" | "wechat" => Some("wechat".to_string()),
+        "微信" | "WeChat" | "wechat" => Some("wechat".to_string()),
         _ => None,
     }
 }
@@ -178,7 +178,7 @@ fn im_account_list_rows(text: GuiText, snapshot: &DashboardSnapshot) -> Vec<[Str
                     .clone()
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or_else(|| account.account_id.clone()),
-                im_platform_label(&account.platform).to_string(),
+                im_platform_label(text, &account.platform).to_string(),
                 im_account_state_label(text, account).to_string(),
                 account.account_id.clone(),
                 account.enabled.to_string(),

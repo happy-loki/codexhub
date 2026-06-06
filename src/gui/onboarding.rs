@@ -4,6 +4,7 @@ use wxdragon::{prelude::*, timer::Timer};
 use super::api::{ApiClient, WechatOnboardPoll};
 use super::provider::strip_nul;
 use super::show_error;
+use super::text::GuiText;
 
 fn qr_bitmap(value: &str) -> Option<(Bitmap, i32)> {
     let code = QrCode::new(value.as_bytes()).ok()?;
@@ -37,8 +38,8 @@ fn qr_bitmap(value: &str) -> Option<(Bitmap, i32)> {
         .map(|bitmap| (bitmap, image_size as i32))
 }
 
-pub(super) fn prompt_telegram_bot_token(parent: &Frame) -> Option<String> {
-    let dialog = Dialog::builder(parent, "添加 Telegram 机器人")
+pub(super) fn prompt_telegram_bot_token(parent: &Frame, text: GuiText) -> Option<String> {
+    let dialog = Dialog::builder(parent, text.telegram_dialog_title())
         .with_style(DialogStyle::DefaultDialogStyle | DialogStyle::ResizeBorder)
         .with_size(520, 300)
         .build();
@@ -50,7 +51,7 @@ pub(super) fn prompt_telegram_bot_token(parent: &Frame) -> Option<String> {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let title = StaticText::builder(&panel)
-        .with_label("填写 BotFather 提供的 Bot Token")
+        .with_label(text.telegram_token_title())
         .build();
     title.set_foreground_color(Colour::rgb(21, 25, 31));
     sizer.add(
@@ -73,7 +74,7 @@ pub(super) fn prompt_telegram_bot_token(parent: &Frame) -> Option<String> {
     );
 
     let hint = StaticText::builder(&panel)
-        .with_label("仅支持与机器人私聊；群聊暂不接入。")
+        .with_label(text.telegram_private_hint())
         .build();
     hint.set_foreground_color(Colour::rgb(103, 111, 124));
     sizer.add(
@@ -86,11 +87,11 @@ pub(super) fn prompt_telegram_bot_token(parent: &Frame) -> Option<String> {
     let buttons = BoxSizer::builder(Orientation::Horizontal).build();
     let cancel_button = Button::builder(&panel)
         .with_id(ID_CANCEL)
-        .with_label("取消")
+        .with_label(text.cancel())
         .build();
     let save_button = Button::builder(&panel)
         .with_id(ID_OK)
-        .with_label("保存并接入")
+        .with_label(text.save_and_connect())
         .build();
     save_button.set_default();
     buttons.add_stretch_spacer(1);
@@ -131,13 +132,13 @@ pub(super) fn prompt_telegram_bot_token(parent: &Frame) -> Option<String> {
         return None;
     }
     if token.is_empty() {
-        show_error(parent, "请输入 Telegram Bot Token。");
+        show_error(parent, text.telegram_token_required());
         return None;
     }
     Some(token)
 }
 
-pub(super) fn show_feishu_onboard_dialog(parent: &Frame, api: ApiClient) {
+pub(super) fn show_feishu_onboard_dialog(parent: &Frame, text: GuiText, api: ApiClient) {
     let start = match api.start_feishu_onboard() {
         Ok(start) => start,
         Err(err) => {
@@ -146,7 +147,7 @@ pub(super) fn show_feishu_onboard_dialog(parent: &Frame, api: ApiClient) {
         }
     };
 
-    let dialog = Dialog::builder(parent, "扫码使用新机器人")
+    let dialog = Dialog::builder(parent, text.feishu_onboard_title())
         .with_style(DialogStyle::DefaultDialogStyle | DialogStyle::ResizeBorder)
         .with_size(660, 760)
         .build();
@@ -158,7 +159,7 @@ pub(super) fn show_feishu_onboard_dialog(parent: &Frame, api: ApiClient) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let title = StaticText::builder(&panel)
-        .with_label("请使用飞书扫码")
+        .with_label(text.scan_feishu())
         .build();
     title.set_foreground_color(Colour::rgb(21, 25, 31));
     sizer.add(&title, 0, SizerFlag::All, 18);
@@ -187,7 +188,7 @@ pub(super) fn show_feishu_onboard_dialog(parent: &Frame, api: ApiClient) {
         );
     } else {
         let qr_error = StaticText::builder(&panel)
-            .with_label("二维码生成失败，请使用浏览器打开链接。")
+            .with_label(text.qr_open_browser_failed())
             .build();
         qr_error.set_foreground_color(Colour::rgb(185, 55, 55));
         sizer.add(
@@ -199,7 +200,7 @@ pub(super) fn show_feishu_onboard_dialog(parent: &Frame, api: ApiClient) {
     }
 
     let fallback_link = HyperlinkCtrl::builder(&panel)
-        .with_label("扫码失败？打开飞书确认链接")
+        .with_label(text.feishu_fallback_link())
         .with_url(&start.verification_uri_complete)
         .build();
     sizer.add(
@@ -210,7 +211,7 @@ pub(super) fn show_feishu_onboard_dialog(parent: &Frame, api: ApiClient) {
     );
 
     let info = StaticText::builder(&panel)
-        .with_label("扫码完成后会自动关闭。")
+        .with_label(text.scan_done_auto_close())
         .build();
     info.set_foreground_color(Colour::rgb(88, 96, 108));
     info.wrap(600);
@@ -222,7 +223,7 @@ pub(super) fn show_feishu_onboard_dialog(parent: &Frame, api: ApiClient) {
     );
 
     let buttons = BoxSizer::builder(Orientation::Horizontal).build();
-    let close_button = Button::builder(&panel).with_label("关闭").build();
+    let close_button = Button::builder(&panel).with_label(text.close()).build();
     buttons.add_stretch_spacer(1);
     buttons.add(&close_button, 1, SizerFlag::Expand, 0);
     sizer.add_sizer(
@@ -249,13 +250,13 @@ pub(super) fn show_feishu_onboard_dialog(parent: &Frame, api: ApiClient) {
             }
             Ok(result) => {
                 if is_feishu_onboard_pending(result.error.as_ref()) {
-                    info.set_label("扫码完成后会自动关闭。");
+                    info.set_label(text.scan_done_auto_close());
                 } else if result.error.is_some() {
-                    info.set_label("接入失败，请关闭后重试。");
+                    info.set_label(text.onboard_failed_retry());
                 }
             }
             Err(_) => {
-                info.set_label("接入失败，请关闭后重试。");
+                info.set_label(text.onboard_failed_retry());
             }
         });
     }
@@ -271,7 +272,7 @@ pub(super) fn show_feishu_onboard_dialog(parent: &Frame, api: ApiClient) {
     dialog.destroy();
 }
 
-pub(super) fn show_wechat_onboard_dialog(parent: &Frame, api: ApiClient) {
+pub(super) fn show_wechat_onboard_dialog(parent: &Frame, text: GuiText, api: ApiClient) {
     let start = match api.start_wechat_onboard() {
         Ok(start) => start,
         Err(err) => {
@@ -280,7 +281,7 @@ pub(super) fn show_wechat_onboard_dialog(parent: &Frame, api: ApiClient) {
         }
     };
 
-    let dialog = Dialog::builder(parent, "扫码连接微信")
+    let dialog = Dialog::builder(parent, text.wechat_onboard_title())
         .with_style(DialogStyle::DefaultDialogStyle | DialogStyle::ResizeBorder)
         .with_size(660, 760)
         .build();
@@ -292,7 +293,7 @@ pub(super) fn show_wechat_onboard_dialog(parent: &Frame, api: ApiClient) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let title = StaticText::builder(&panel)
-        .with_label("请使用微信扫码")
+        .with_label(text.scan_wechat())
         .build();
     title.set_foreground_color(Colour::rgb(21, 25, 31));
     sizer.add(&title, 0, SizerFlag::All, 18);
@@ -321,7 +322,7 @@ pub(super) fn show_wechat_onboard_dialog(parent: &Frame, api: ApiClient) {
         );
     } else {
         let qr_error = StaticText::builder(&panel)
-            .with_label("二维码生成失败，请关闭后重试。")
+            .with_label(text.qr_retry_failed())
             .build();
         qr_error.set_foreground_color(Colour::rgb(185, 55, 55));
         sizer.add(
@@ -333,7 +334,9 @@ pub(super) fn show_wechat_onboard_dialog(parent: &Frame, api: ApiClient) {
     }
 
     let verify_row = BoxSizer::builder(Orientation::Horizontal).build();
-    let verify_label = StaticText::builder(&panel).with_label("验证码").build();
+    let verify_label = StaticText::builder(&panel)
+        .with_label(text.verify_code())
+        .build();
     verify_label.set_foreground_color(Colour::rgb(78, 86, 98));
     let verify_code = TextCtrl::builder(&panel).with_value("").build();
     verify_code.set_min_size(Size::new(220, 30));
@@ -353,10 +356,7 @@ pub(super) fn show_wechat_onboard_dialog(parent: &Frame, api: ApiClient) {
     );
 
     let info = StaticText::builder(&panel)
-        .with_label(&format!(
-            "扫码完成后会自动关闭。二维码约 {} 秒后过期。",
-            start.expires_in
-        ))
+        .with_label(&text.wechat_expire_notice(start.expires_in))
         .build();
     info.set_foreground_color(Colour::rgb(88, 96, 108));
     info.wrap(600);
@@ -368,7 +368,7 @@ pub(super) fn show_wechat_onboard_dialog(parent: &Frame, api: ApiClient) {
     );
 
     let buttons = BoxSizer::builder(Orientation::Horizontal).build();
-    let close_button = Button::builder(&panel).with_label("关闭").build();
+    let close_button = Button::builder(&panel).with_label(text.close()).build();
     buttons.add_stretch_spacer(1);
     buttons.add(&close_button, 1, SizerFlag::Expand, 0);
     sizer.add_sizer(
@@ -400,11 +400,11 @@ pub(super) fn show_wechat_onboard_dialog(parent: &Frame, api: ApiClient) {
                     if result.need_verify_code.unwrap_or(false) {
                         verify_code.enable(true);
                     }
-                    info.set_label(&wechat_onboard_status_text(&result));
+                    info.set_label(&wechat_onboard_status_text(text, &result));
                     info.wrap(600);
                 }
                 Err(_) => {
-                    info.set_label("接入失败，请关闭后重试。");
+                    info.set_label(text.onboard_failed_retry());
                 }
             }
         });
@@ -421,27 +421,27 @@ pub(super) fn show_wechat_onboard_dialog(parent: &Frame, api: ApiClient) {
     dialog.destroy();
 }
 
-fn wechat_onboard_status_text(result: &WechatOnboardPoll) -> String {
+fn wechat_onboard_status_text(text: GuiText, result: &WechatOnboardPoll) -> String {
     if result.need_verify_code.unwrap_or(false) {
-        return "微信需要验证码，请输入后等待自动确认。".to_string();
+        return text.wechat_need_verify().to_string();
     }
     if let Some(error) = result.error.as_ref().and_then(|value| value.as_str()) {
         return match error {
-            "expired" => "二维码已过期，请关闭后重新扫码。".to_string(),
-            "verify_code_blocked" => "验证码被限制，请稍后重试。".to_string(),
-            _ => format!("接入暂未完成：{error}"),
+            "expired" => text.wechat_qr_expired().to_string(),
+            "verify_code_blocked" => text.wechat_verify_blocked().to_string(),
+            _ => text.onboard_pending_error(error),
         };
     }
     match result.status.as_deref() {
-        Some("wait") => "等待微信扫码。".to_string(),
-        Some("scaned") => "已扫码，请在微信里确认。".to_string(),
-        Some("scaned_but_redirect") => "已扫码，正在切换微信登录入口。".to_string(),
-        Some("confirmed") => "已确认，正在保存配置。".to_string(),
+        Some("wait") => text.wechat_wait().to_string(),
+        Some("scaned") => text.wechat_scanned().to_string(),
+        Some("scaned_but_redirect") => text.wechat_redirect().to_string(),
+        Some("confirmed") => text.wechat_confirmed().to_string(),
         Some("binded_redirect") if result.already_connected.unwrap_or(false) => {
-            "该微信已完成绑定。".to_string()
+            text.wechat_bound().to_string()
         }
-        Some(status) => format!("当前状态：{status}"),
-        None => "扫码完成后会自动关闭。".to_string(),
+        Some(status) => text.current_status(status),
+        None => text.scan_done_auto_close().to_string(),
     }
 }
 

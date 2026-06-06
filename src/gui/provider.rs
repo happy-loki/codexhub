@@ -16,10 +16,11 @@ pub(super) fn configure_codex_app_and_verify(
     api: &ApiClient,
     request: &ConfigureRequest,
     selected_provider: &str,
+    text: GuiText,
 ) -> Result<CodexAppStatus, String> {
     api.configure_codex_app(request)?;
     let status = api.codex_app_status()?;
-    verify_selected_provider(&status, selected_provider)?;
+    verify_selected_provider(text, &status, selected_provider)?;
     Ok(status)
 }
 
@@ -27,10 +28,11 @@ pub(super) fn save_codex_provider_and_verify(
     api: &ApiClient,
     request: &ConfigureRequest,
     selected_provider: &str,
+    text: GuiText,
 ) -> Result<CodexAppStatus, String> {
     api.configure_codex_app(request)?;
     let status = api.codex_app_status()?;
-    verify_saved_provider(&status, selected_provider)?;
+    verify_saved_provider(text, &status, selected_provider)?;
     Ok(status)
 }
 
@@ -38,6 +40,7 @@ pub(super) fn set_provider_websocket_and_verify(
     api: &ApiClient,
     provider_name: &str,
     enabled: bool,
+    text: GuiText,
 ) -> Result<CodexAppStatus, String> {
     let request = SetProviderWebSocketRequest {
         provider_name: provider_name.to_string(),
@@ -45,21 +48,23 @@ pub(super) fn set_provider_websocket_and_verify(
     };
     api.set_codex_provider_websocket(&request)?;
     let status = api.codex_app_status()?;
-    verify_provider_websocket(&status, provider_name, enabled)?;
+    verify_provider_websocket(text, &status, provider_name, enabled)?;
     Ok(status)
 }
 
 pub(super) fn delete_codex_provider_and_verify(
     api: &ApiClient,
     request: &DeleteProviderRequest,
+    text: GuiText,
 ) -> Result<CodexAppStatus, String> {
     api.delete_codex_provider(request)?;
     let status = api.codex_app_status()?;
-    verify_deleted_provider(&status, &request.provider_name)?;
+    verify_deleted_provider(text, &status, &request.provider_name)?;
     Ok(status)
 }
 
 fn verify_selected_provider(
+    text: GuiText,
     status: &CodexAppStatus,
     selected_provider: &str,
 ) -> Result<(), String> {
@@ -76,17 +81,17 @@ fn verify_selected_provider(
         return Ok(());
     }
 
-    Err(format!(
-        "配置接口已返回成功，但当前 provider 仍是 {}，期望是 {}。请刷新后再试一次。",
-        active.unwrap_or("<未设置>"),
-        selected_provider
-    ))
+    Err(text.provider_verify_selected_failed(active.unwrap_or(text.unset()), selected_provider))
 }
 
-fn verify_saved_provider(status: &CodexAppStatus, selected_provider: &str) -> Result<(), String> {
+fn verify_saved_provider(
+    text: GuiText,
+    status: &CodexAppStatus,
+    selected_provider: &str,
+) -> Result<(), String> {
     let selected_provider = selected_provider.trim();
     if selected_provider.is_empty() {
-        return Err("Provider 名称不能为空。".to_string());
+        return Err(text.provider_name_empty().to_string());
     }
 
     if provider_rows(status)
@@ -96,20 +101,18 @@ fn verify_saved_provider(status: &CodexAppStatus, selected_provider: &str) -> Re
         return Ok(());
     }
 
-    Err(format!(
-        "保存接口已返回成功，但 provider {} 没有出现在配置列表里。请刷新后再试一次。",
-        selected_provider
-    ))
+    Err(text.provider_verify_saved_failed(selected_provider))
 }
 
 fn verify_provider_websocket(
+    text: GuiText,
     status: &CodexAppStatus,
     provider_name: &str,
     expected: bool,
 ) -> Result<(), String> {
     let provider_name = provider_name.trim();
     if provider_name.is_empty() {
-        return Err("Provider 名称不能为空。".to_string());
+        return Err(text.provider_name_empty().to_string());
     }
 
     let actual = provider_rows(status)
@@ -120,25 +123,22 @@ fn verify_provider_websocket(
         return Ok(());
     }
 
-    Err(format!(
-        "WebSocket 写入接口已返回成功，但 provider {} 的 supports_websockets 仍是 {}，期望是 {}。请刷新后再试一次。",
-        provider_name,
-        actual
-            .map(|value| value.to_string())
-            .unwrap_or_else(|| "<未找到>".to_string()),
-        expected
-    ))
+    let actual = actual
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| text.not_found().to_string());
+    Err(text.provider_verify_websocket_failed(provider_name, &actual, expected))
 }
 
-fn verify_deleted_provider(status: &CodexAppStatus, provider_name: &str) -> Result<(), String> {
+fn verify_deleted_provider(
+    text: GuiText,
+    status: &CodexAppStatus,
+    provider_name: &str,
+) -> Result<(), String> {
     if provider_rows(status)
         .iter()
         .any(|provider| provider.name == provider_name)
     {
-        return Err(format!(
-            "删除接口已返回成功，但 provider {} 仍在配置列表里。请刷新后再试一次。",
-            provider_name
-        ));
+        return Err(text.provider_verify_deleted_failed(provider_name));
     }
     Ok(())
 }
@@ -173,7 +173,7 @@ pub(super) fn apply_pending_config_action(
             result: Ok(status),
         } => {
             apply_provider_action_status(handles, refresh, status, &provider_name);
-            show_info(frame, "Provider 已保存。需要使用它时再点击启用。");
+            show_info(frame, handles.text.provider_saved_info());
             schedule_dashboard_refresh(api, refresh);
         }
         ConfigActionResult::Save {
@@ -196,7 +196,7 @@ pub(super) fn apply_pending_config_action(
                 last_snapshot.replace(snapshot.clone());
             }
             fill_provider_form_if_empty(handles, &snapshot);
-            show_info(frame, "Provider 已删除。");
+            show_info(frame, handles.text.provider_deleted_info());
             schedule_dashboard_refresh(api, refresh);
         }
         ConfigActionResult::Delete(Err(err)) => {
@@ -208,10 +208,7 @@ pub(super) fn apply_pending_config_action(
             result: Ok(status),
         } => {
             apply_provider_action_status(handles, refresh, status, &provider_name);
-            show_info(
-                frame,
-                "已启用。请重启 Codex App，然后在 App 里打开 remote-control；VS Code 插件也可以接入。",
-            );
+            show_info(frame, handles.text.provider_enabled_info());
             schedule_dashboard_refresh(api, refresh);
         }
         ConfigActionResult::Configure {

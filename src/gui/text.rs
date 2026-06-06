@@ -918,4 +918,654 @@ impl GuiText {
             GuiLocale::EnUs => "Codex App remote-control connected.",
         }
     }
+
+    pub(super) fn feishu_label(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "飞书",
+            GuiLocale::EnUs => "Feishu",
+        }
+    }
+
+    pub(super) fn wechat_label(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "微信",
+            GuiLocale::EnUs => "WeChat",
+        }
+    }
+
+    pub(super) fn close(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "关闭",
+            GuiLocale::EnUs => "Close",
+        }
+    }
+
+    pub(super) fn cancel(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "取消",
+            GuiLocale::EnUs => "Cancel",
+        }
+    }
+
+    pub(super) fn save_and_connect(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "保存并接入",
+            GuiLocale::EnUs => "Save and Connect",
+        }
+    }
+
+    pub(super) fn select_provider_to_delete(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请先选择或填写要删除的 provider。",
+            GuiLocale::EnUs => "Select or enter a provider to delete first.",
+        }
+    }
+
+    pub(super) fn codex_app_config_uninstalled(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Codex App 本地接入配置已卸载。请重启 Codex App 以恢复官方连接。",
+            GuiLocale::EnUs => {
+                "Local Codex App access settings were removed. Restart Codex App to restore the official connection."
+            }
+        }
+    }
+
+    pub(super) fn select_bot_first(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请先选择一个机器人。",
+            GuiLocale::EnUs => "Select a bot first.",
+        }
+    }
+
+    pub(super) fn service_starting_wait(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "本地服务正在启动，请稍后再试。",
+            GuiLocale::EnUs => "The local service is starting. Try again shortly.",
+        }
+    }
+
+    pub(super) fn service_not_ready_retry(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "本地服务还没有启动完成，请稍后再试。如果一直未运行，请重启 Codex Remote。"
+            }
+            GuiLocale::EnUs => {
+                "The local service is not ready yet. Try again shortly. Restart Codex Remote if it stays offline."
+            }
+        }
+    }
+
+    pub(super) fn about_description(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "本地 remote-control backend + 聊天工具桥接。",
+            GuiLocale::EnUs => "Local remote-control backend with chat integration bridges.",
+        }
+    }
+
+    pub(super) fn update_dialog_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Codex Remote 更新",
+            GuiLocale::EnUs => "Codex Remote Update",
+        }
+    }
+
+    pub(super) fn checking_updates_busy(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "正在检查更新，请稍候。",
+            GuiLocale::EnUs => "Checking for updates. Please wait.",
+        }
+    }
+
+    pub(super) fn update_client_failed(self, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("创建更新检查客户端失败：{err}"),
+            GuiLocale::EnUs => format!("Failed to create the update check client: {err}"),
+        }
+    }
+
+    pub(super) fn update_sources_failed(self, api_err: &str, manifest_err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                format!(
+                    "无法读取 GitHub Release 更新信息：{api_err}\nlatest.json 检查结果：{manifest_err}"
+                )
+            }
+            GuiLocale::EnUs => {
+                format!(
+                    "Failed to read GitHub Release update info: {api_err}\nlatest.json result: {manifest_err}"
+                )
+            }
+        }
+    }
+
+    pub(super) fn update_manifest_parse_failed(self, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("latest.json 无法解析：{err}"),
+            GuiLocale::EnUs => format!("Failed to parse latest.json: {err}"),
+        }
+    }
+
+    pub(super) fn github_release_parse_failed(self, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("GitHub Release API 无法解析：{err}"),
+            GuiLocale::EnUs => format!("Failed to parse GitHub Release API response: {err}"),
+        }
+    }
+
+    pub(super) fn url_request_timeout(self, url: &str, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("{url} 请求超时：{err}"),
+            GuiLocale::EnUs => format!("{url} timed out: {err}"),
+        }
+    }
+
+    pub(super) fn url_request_failed(self, url: &str, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("{url} 请求失败：{err}"),
+            GuiLocale::EnUs => format!("{url} request failed: {err}"),
+        }
+    }
+
+    pub(super) fn url_http_failed(self, url: &str, status: &str, body: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("{url} 返回 HTTP {status}: {body}"),
+            GuiLocale::EnUs => format!("{url} returned HTTP {status}: {body}"),
+        }
+    }
+
+    pub(super) fn release_missing_version(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "GitHub Release 没有版本号。",
+            GuiLocale::EnUs => "The GitHub Release has no version.",
+        }
+    }
+
+    pub(super) fn already_latest_version(self, current: &str, latest: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                format!("已是最新版本。\n当前版本：{current}\nGitHub 最新版本：{latest}")
+            }
+            GuiLocale::EnUs => format!(
+                "Already up to date.\nCurrent version: {current}\nLatest GitHub version: {latest}"
+            ),
+        }
+    }
+
+    pub(super) fn new_version_message(self, current: &str, latest: &str, notes: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                format!(
+                    "发现新版本。\n当前版本：{current}\n最新版本：{latest}\n\n{notes}\n\n是否打开 GitHub Releases 下载？"
+                )
+            }
+            GuiLocale::EnUs => {
+                format!(
+                    "A new version is available.\nCurrent version: {current}\nLatest version: {latest}\n\n{notes}\n\nOpen GitHub Releases to download it?"
+                )
+            }
+        }
+    }
+
+    pub(super) fn update_failed(self, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("检查更新失败：{err}"),
+            GuiLocale::EnUs => format!("Update check failed: {err}"),
+        }
+    }
+
+    pub(super) fn release_notes_default(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Release 页面包含安装包和更新说明。",
+            GuiLocale::EnUs => "The Release page includes installers and release notes.",
+        }
+    }
+
+    pub(super) fn release_notes(self, notes: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("更新说明：\n{notes}"),
+            GuiLocale::EnUs => format!("Release notes:\n{notes}"),
+        }
+    }
+
+    pub(super) fn version_not_comparable(self, version: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("版本号 {version} 无法比较。"),
+            GuiLocale::EnUs => format!("Version {version} cannot be compared."),
+        }
+    }
+
+    pub(super) fn empty_download_url(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "下载地址为空。",
+            GuiLocale::EnUs => "The download URL is empty.",
+        }
+    }
+
+    pub(super) fn open_browser_failed(self, err: &str, url: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("无法打开浏览器：{err}\n下载地址：{url}"),
+            GuiLocale::EnUs => format!("Failed to open the browser: {err}\nDownload URL: {url}"),
+        }
+    }
+
+    pub(super) fn confirm_uninstall_codex_app_message(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "卸载会移除本工具写入的 chatgpt_base_url、本地认证信息和 Codex App 环境变量。确认继续？"
+            }
+            GuiLocale::EnUs => {
+                "Uninstalling removes chatgpt_base_url, local auth data, and Codex App environment variables written by this tool. Continue?"
+            }
+        }
+    }
+
+    pub(super) fn confirm_uninstall_codex_app_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "卸载 Codex App 配置",
+            GuiLocale::EnUs => "Uninstall Codex App Settings",
+        }
+    }
+
+    pub(super) fn confirm_delete_provider_message(self, provider_name: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                format!(
+                    "删除 provider `{provider_name}`？如果它正在使用中，也会取消当前 provider 设置。"
+                )
+            }
+            GuiLocale::EnUs => {
+                format!(
+                    "Delete provider `{provider_name}`? If it is active, the current provider setting will also be cleared."
+                )
+            }
+        }
+    }
+
+    pub(super) fn confirm_delete_provider_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "删除 Provider",
+            GuiLocale::EnUs => "Delete Provider",
+        }
+    }
+
+    pub(super) fn confirm_delete_im_account_message(self, account_name: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("删除机器人 `{account_name}`？相关会话绑定也会一起清理。"),
+            GuiLocale::EnUs => {
+                format!(
+                    "Delete bot `{account_name}`? Related conversation bindings will also be cleared."
+                )
+            }
+        }
+    }
+
+    pub(super) fn confirm_delete_im_account_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "删除机器人接入",
+            GuiLocale::EnUs => "Delete Bot Integration",
+        }
+    }
+
+    pub(super) fn telegram_saved(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Telegram 已保存并接入。",
+            GuiLocale::EnUs => "Telegram has been saved and connected.",
+        }
+    }
+
+    pub(super) fn im_account_deleted(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "机器人接入已删除。",
+            GuiLocale::EnUs => "Bot integration deleted.",
+        }
+    }
+
+    pub(super) fn provider_verify_selected_failed(self, active: &str, expected: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!(
+                "配置接口已返回成功，但当前 provider 仍是 {active}，期望是 {expected}。请刷新后再试一次。"
+            ),
+            GuiLocale::EnUs => format!(
+                "The configure API returned success, but the current provider is still {active}; expected {expected}. Refresh and try again."
+            ),
+        }
+    }
+
+    pub(super) fn provider_name_empty(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Provider 名称不能为空。",
+            GuiLocale::EnUs => "Provider name cannot be empty.",
+        }
+    }
+
+    pub(super) fn provider_verify_saved_failed(self, provider_name: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!(
+                "保存接口已返回成功，但 provider {provider_name} 没有出现在配置列表里。请刷新后再试一次。"
+            ),
+            GuiLocale::EnUs => format!(
+                "The save API returned success, but provider {provider_name} is not in the configured provider list. Refresh and try again."
+            ),
+        }
+    }
+
+    pub(super) fn provider_verify_websocket_failed(
+        self,
+        provider_name: &str,
+        actual: &str,
+        expected: bool,
+    ) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!(
+                "WebSocket 写入接口已返回成功，但 provider {provider_name} 的 supports_websockets 仍是 {actual}，期望是 {expected}。请刷新后再试一次。"
+            ),
+            GuiLocale::EnUs => format!(
+                "The WebSocket API returned success, but provider {provider_name} still has supports_websockets={actual}; expected {expected}. Refresh and try again."
+            ),
+        }
+    }
+
+    pub(super) fn not_found(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "<未找到>",
+            GuiLocale::EnUs => "<not found>",
+        }
+    }
+
+    pub(super) fn unset(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "<未设置>",
+            GuiLocale::EnUs => "<unset>",
+        }
+    }
+
+    pub(super) fn provider_verify_deleted_failed(self, provider_name: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!(
+                "删除接口已返回成功，但 provider {provider_name} 仍在配置列表里。请刷新后再试一次。"
+            ),
+            GuiLocale::EnUs => format!(
+                "The delete API returned success, but provider {provider_name} is still in the configured provider list. Refresh and try again."
+            ),
+        }
+    }
+
+    pub(super) fn provider_saved_info(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Provider 已保存。需要使用它时再点击启用。",
+            GuiLocale::EnUs => "Provider saved. Click Enable when you want to use it.",
+        }
+    }
+
+    pub(super) fn provider_deleted_info(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Provider 已删除。",
+            GuiLocale::EnUs => "Provider deleted.",
+        }
+    }
+
+    pub(super) fn provider_enabled_info(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "已启用。请重启 Codex App，然后在 App 里打开 remote-control；VS Code 插件也可以接入。"
+            }
+            GuiLocale::EnUs => {
+                "Enabled. Restart Codex App, then open remote-control in the App. The VS Code extension can also connect."
+            }
+        }
+    }
+
+    pub(super) fn telegram_dialog_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "添加 Telegram 机器人",
+            GuiLocale::EnUs => "Add Telegram Bot",
+        }
+    }
+
+    pub(super) fn telegram_token_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "填写 BotFather 提供的 Bot Token",
+            GuiLocale::EnUs => "Enter the Bot Token from BotFather",
+        }
+    }
+
+    pub(super) fn telegram_private_hint(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "仅支持与机器人私聊；群聊暂不接入。",
+            GuiLocale::EnUs => {
+                "Only private bot chats are supported. Group chats are not connected yet."
+            }
+        }
+    }
+
+    pub(super) fn telegram_token_required(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请输入 Telegram Bot Token。",
+            GuiLocale::EnUs => "Enter a Telegram Bot Token.",
+        }
+    }
+
+    pub(super) fn feishu_onboard_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "扫码使用新机器人",
+            GuiLocale::EnUs => "Scan to Use a New Bot",
+        }
+    }
+
+    pub(super) fn scan_feishu(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请使用飞书扫码",
+            GuiLocale::EnUs => "Scan with Feishu",
+        }
+    }
+
+    pub(super) fn qr_open_browser_failed(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "二维码生成失败，请使用浏览器打开链接。",
+            GuiLocale::EnUs => "QR code generation failed. Open the link in a browser.",
+        }
+    }
+
+    pub(super) fn feishu_fallback_link(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "扫码失败？打开飞书确认链接",
+            GuiLocale::EnUs => "Scan failed? Open the Feishu confirmation link",
+        }
+    }
+
+    pub(super) fn scan_done_auto_close(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "扫码完成后会自动关闭。",
+            GuiLocale::EnUs => "This will close automatically after scanning.",
+        }
+    }
+
+    pub(super) fn onboard_failed_retry(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "接入失败，请关闭后重试。",
+            GuiLocale::EnUs => "Connection failed. Close this dialog and try again.",
+        }
+    }
+
+    pub(super) fn wechat_onboard_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "扫码连接微信",
+            GuiLocale::EnUs => "Scan to Connect WeChat",
+        }
+    }
+
+    pub(super) fn scan_wechat(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请使用微信扫码",
+            GuiLocale::EnUs => "Scan with WeChat",
+        }
+    }
+
+    pub(super) fn qr_retry_failed(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "二维码生成失败，请关闭后重试。",
+            GuiLocale::EnUs => "QR code generation failed. Close this dialog and try again.",
+        }
+    }
+
+    pub(super) fn verify_code(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "验证码",
+            GuiLocale::EnUs => "Verification Code",
+        }
+    }
+
+    pub(super) fn wechat_expire_notice(self, seconds: u64) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("扫码完成后会自动关闭。二维码约 {seconds} 秒后过期。"),
+            GuiLocale::EnUs => {
+                format!(
+                    "This will close automatically after scanning. The QR code expires in about {seconds} seconds."
+                )
+            }
+        }
+    }
+
+    pub(super) fn wechat_need_verify(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "微信需要验证码，请输入后等待自动确认。",
+            GuiLocale::EnUs => {
+                "WeChat requires a verification code. Enter it and wait for confirmation."
+            }
+        }
+    }
+
+    pub(super) fn wechat_qr_expired(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "二维码已过期，请关闭后重新扫码。",
+            GuiLocale::EnUs => "The QR code expired. Close this dialog and scan again.",
+        }
+    }
+
+    pub(super) fn wechat_verify_blocked(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "验证码被限制，请稍后重试。",
+            GuiLocale::EnUs => "Verification codes are temporarily restricted. Try again later.",
+        }
+    }
+
+    pub(super) fn onboard_pending_error(self, error: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("接入暂未完成：{error}"),
+            GuiLocale::EnUs => format!("Connection is not complete yet: {error}"),
+        }
+    }
+
+    pub(super) fn wechat_wait(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "等待微信扫码。",
+            GuiLocale::EnUs => "Waiting for WeChat scan.",
+        }
+    }
+
+    pub(super) fn wechat_scanned(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "已扫码，请在微信里确认。",
+            GuiLocale::EnUs => "Scanned. Confirm in WeChat.",
+        }
+    }
+
+    pub(super) fn wechat_redirect(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "已扫码，正在切换微信登录入口。",
+            GuiLocale::EnUs => "Scanned. Switching WeChat login entry.",
+        }
+    }
+
+    pub(super) fn wechat_confirmed(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "已确认，正在保存配置。",
+            GuiLocale::EnUs => "Confirmed. Saving settings.",
+        }
+    }
+
+    pub(super) fn wechat_bound(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "该微信已完成绑定。",
+            GuiLocale::EnUs => "This WeChat account is already connected.",
+        }
+    }
+
+    pub(super) fn current_status(self, status: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("当前状态：{status}"),
+            GuiLocale::EnUs => format!("Current status: {status}"),
+        }
+    }
+
+    pub(super) fn api_response_parse_failed(self, path: &str, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("{path} 返回数据无法解析：{err}"),
+            GuiLocale::EnUs => format!("Failed to parse the response from {path}: {err}"),
+        }
+    }
+
+    pub(super) fn api_timeout(self, base_url: &str, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("本地服务 {base_url} 响应超时：{err}"),
+            GuiLocale::EnUs => format!("Local service {base_url} timed out: {err}"),
+        }
+    }
+
+    pub(super) fn api_connect_failed(self, base_url: &str, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("无法连接本地服务 {base_url}：{err}"),
+            GuiLocale::EnUs => format!("Failed to connect to local service {base_url}: {err}"),
+        }
+    }
+
+    pub(super) fn api_request_failed(self, base_url: &str, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("本地服务 {base_url} 请求失败：{err}"),
+            GuiLocale::EnUs => format!("Local service {base_url} request failed: {err}"),
+        }
+    }
+
+    pub(super) fn daemon_exited(self, status: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("本地服务启动后退出：{status}"),
+            GuiLocale::EnUs => format!("The local service exited after startup: {status}"),
+        }
+    }
+
+    pub(super) fn daemon_start_timeout(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "本地服务已启动，但 10 秒内没有响应。请检查 logs/codex-remote-chain.log。"
+            }
+            GuiLocale::EnUs => {
+                "The local service started, but did not respond within 10 seconds. Check logs/codex-remote-chain.log."
+            }
+        }
+    }
+
+    pub(super) fn daemon_watchdog_timeout(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "本地服务启动超过 30 秒仍未完成。请检查旧进程占用或 logs/codex-remote-chain.log。"
+            }
+            GuiLocale::EnUs => {
+                "The local service has not finished starting after 30 seconds. Check for an old process or logs/codex-remote-chain.log."
+            }
+        }
+    }
+
+    pub(super) fn daemon_spawn_failed(self, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("无法启动本地服务：{err}"),
+            GuiLocale::EnUs => format!("Failed to start the local service: {err}"),
+        }
+    }
+
+    pub(super) fn daemon_current_exe_failed(self, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("无法定位当前程序：{err}"),
+            GuiLocale::EnUs => format!("Failed to locate the current executable: {err}"),
+        }
+    }
 }

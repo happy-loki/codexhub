@@ -3,27 +3,33 @@ use std::{thread, time::Duration};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+use super::text::GuiText;
 use super::{GUI_ACTION_TIMEOUT, GUI_CONFIG_TIMEOUT, GUI_CONNECT_TIMEOUT, GUI_STATUS_TIMEOUT};
 
 #[derive(Clone)]
 pub(super) struct ApiClient {
     pub(super) base_url: String,
     pub(super) http: Client,
+    text: GuiText,
 }
 
 impl ApiClient {
-    pub(super) fn new(base_url: String) -> Self {
+    pub(super) fn new(base_url: String, text: GuiText) -> Self {
         let http = Client::builder()
             .connect_timeout(GUI_CONNECT_TIMEOUT)
             .timeout(GUI_ACTION_TIMEOUT)
             .build()
             .expect("build HTTP client");
-        Self { base_url, http }
+        Self {
+            base_url,
+            http,
+            text,
+        }
     }
 
     pub(super) fn get_quick<T: DeserializeOwned>(&self, path: &str) -> Result<T, String> {
-        let text = self.request_text(self.http.get(self.url(path)).timeout(GUI_STATUS_TIMEOUT))?;
-        serde_json::from_str(&text).map_err(|err| format!("{path} 返回数据无法解析：{err}"))
+        let body = self.request_text(self.http.get(self.url(path)).timeout(GUI_STATUS_TIMEOUT))?;
+        self.parse_response(path, &body)
     }
 
     pub(super) fn get_with_timeout<T: DeserializeOwned>(
@@ -31,8 +37,8 @@ impl ApiClient {
         path: &str,
         timeout: Duration,
     ) -> Result<T, String> {
-        let text = self.request_text(self.http.get(self.url(path)).timeout(timeout))?;
-        serde_json::from_str(&text).map_err(|err| format!("{path} 返回数据无法解析：{err}"))
+        let body = self.request_text(self.http.get(self.url(path)).timeout(timeout))?;
+        self.parse_response(path, &body)
     }
 
     pub(super) fn is_online(&self) -> bool {
@@ -48,8 +54,8 @@ impl ApiClient {
         path: &str,
         timeout: Duration,
     ) -> Result<T, String> {
-        let text = self.request_text(self.http.post(self.url(path)).timeout(timeout))?;
-        serde_json::from_str(&text).map_err(|err| format!("{path} 返回数据无法解析：{err}"))
+        let body = self.request_text(self.http.post(self.url(path)).timeout(timeout))?;
+        self.parse_response(path, &body)
     }
 
     pub(super) fn post_json<B: Serialize, T: DeserializeOwned>(
@@ -66,8 +72,8 @@ impl ApiClient {
         body: &B,
         timeout: Duration,
     ) -> Result<T, String> {
-        let text = self.request_text(self.http.post(self.url(path)).json(body).timeout(timeout))?;
-        serde_json::from_str(&text).map_err(|err| format!("{path} 返回数据无法解析：{err}"))
+        let body = self.request_text(self.http.post(self.url(path)).json(body).timeout(timeout))?;
+        self.parse_response(path, &body)
     }
 
     pub(super) fn request_text(
@@ -75,12 +81,13 @@ impl ApiClient {
         request: reqwest::blocking::RequestBuilder,
     ) -> Result<String, String> {
         let response = request.send().map_err(|err| {
+            let err_text = err.to_string();
             if err.is_timeout() {
-                format!("本地服务 {} 响应超时：{err}", self.base_url)
+                self.text.api_timeout(&self.base_url, &err_text)
             } else if err.is_connect() {
-                format!("无法连接本地服务 {}：{err}", self.base_url)
+                self.text.api_connect_failed(&self.base_url, &err_text)
             } else {
-                format!("本地服务 {} 请求失败：{err}", self.base_url)
+                self.text.api_request_failed(&self.base_url, &err_text)
             }
         })?;
         let status = response.status();
@@ -94,6 +101,11 @@ impl ApiClient {
 
     pub(super) fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url.trim_end_matches('/'), path)
+    }
+
+    fn parse_response<T: DeserializeOwned>(&self, path: &str, body: &str) -> Result<T, String> {
+        serde_json::from_str(body)
+            .map_err(|err| self.text.api_response_parse_failed(path, &err.to_string()))
     }
 
     pub(super) fn local_port(&self) -> Option<u16> {

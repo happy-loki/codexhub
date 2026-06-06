@@ -17,28 +17,29 @@ use wxdragon::{prelude::*, timer::Timer};
 #[cfg(target_os = "windows")]
 use super::CREATE_NO_WINDOW;
 use super::api::ApiClient;
+use super::text::GuiText;
 use super::{
     DashboardRefresh, FrameTimerStore, GUI_STARTUP_WATCHDOG_TIMEOUT, GuiTimers, UiHandles,
 };
 use super::{force_dashboard_refresh, schedule_dashboard_refresh, set_actions_enabled};
 use super::{show_dashboard_starting, show_dashboard_startup_error};
 
-pub(super) fn restart_daemon_for_gui(api: &ApiClient) -> Result<Child, String> {
+pub(super) fn restart_daemon_for_gui(api: &ApiClient, text: GuiText) -> Result<Child, String> {
     stop_existing_daemon(api);
-    let mut child = spawn_daemon()?;
+    let mut child = spawn_daemon(text)?;
     for _ in 0..40 {
         thread::sleep(Duration::from_millis(250));
         if api.is_online() {
             return Ok(child);
         }
         if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
-            return Err(format!("本地服务启动后退出：{status}"));
+            return Err(text.daemon_exited(&status.to_string()));
         }
     }
 
     let _ = child.kill();
     let _ = child.wait();
-    Err("本地服务已启动，但 10 秒内没有响应。请检查 logs/codex-remote-chain.log。".to_string())
+    Err(text.daemon_start_timeout().to_string())
 }
 
 pub(super) fn stop_existing_daemon(api: &ApiClient) {
@@ -85,8 +86,9 @@ pub(super) fn start_daemon_for_gui_async(
         let closing = dashboard_refresh.closing.clone();
         let pending_startup_child = dashboard_refresh.pending_startup_child.clone();
         let result = result.clone();
+        let text = handles.text;
         thread::spawn(move || {
-            let startup = match restart_daemon_for_gui(&api) {
+            let startup = match restart_daemon_for_gui(&api, text) {
                 Ok(mut child) => {
                     let mut pending_child = pending_startup_child.lock().ok();
                     if closing.load(Ordering::SeqCst) {
@@ -126,10 +128,7 @@ pub(super) fn start_daemon_for_gui_async(
                     dashboard_refresh
                         .daemon_starting
                         .store(false, Ordering::SeqCst);
-                    show_dashboard_startup_error(
-                        &handles,
-                        "本地服务启动超过 30 秒仍未完成。请检查旧进程占用或 logs/codex-remote-chain.log。",
-                    );
+                    show_dashboard_startup_error(&handles, handles.text.daemon_watchdog_timeout());
                     force_dashboard_refresh(&api, &dashboard_refresh);
                 }
                 return;
@@ -346,19 +345,20 @@ pub(super) fn windows_pid_is_codex_remote(pid: &str) -> bool {
 #[cfg(all(not(unix), not(windows)))]
 pub(super) fn stop_daemon_by_port(_api: &ApiClient) {}
 
-pub(super) fn spawn_daemon() -> Result<Child, String> {
-    let mut command = daemon_command()?;
+pub(super) fn spawn_daemon(text: GuiText) -> Result<Child, String> {
+    let mut command = daemon_command(text)?;
     hide_command_window(&mut command);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .map_err(|err| format!("无法启动本地服务：{err}"))
+        .map_err(|err| text.daemon_spawn_failed(&err.to_string()))
 }
 
-pub(super) fn daemon_command() -> Result<Command, String> {
-    let exe = std::env::current_exe().map_err(|err| format!("无法定位当前程序：{err}"))?;
+pub(super) fn daemon_command(text: GuiText) -> Result<Command, String> {
+    let exe =
+        std::env::current_exe().map_err(|err| text.daemon_current_exe_failed(&err.to_string()))?;
     let mut command = Command::new(exe);
     append_daemon_args(&mut command);
     Ok(command)
