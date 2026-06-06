@@ -786,23 +786,22 @@ fn thread_create_options_text(
     has_next: bool,
 ) -> String {
     let mut lines = Vec::new();
-    lines.push(title.to_string());
-    lines.push(String::new());
+    lines.push(format!("**{title}**"));
     lines.push(body.to_string());
-    lines.push(format!("第 {} 页", page.max(1)));
     let mut hints = vec![format!("回复 1~{} 选择", options.len())];
     if has_prev {
-        hints.push("p 上一页".to_string());
+        hints.push("**p** 上一页".to_string());
     }
     if has_next {
-        hints.push("n 下一页".to_string());
+        hints.push("**n** 下一页".to_string());
     }
-    hints.push("0 返回设置".to_string());
-    lines.push(hints.join("，"));
+    hints.push("**0** 返回设置".to_string());
+    let navigation_hint = format!("第 {} 页 · {}", page.max(1), hints.join("，"));
+    lines.push("---".to_string());
     lines.push(String::new());
     for (index, option) in options.iter().enumerate() {
         lines.push(format!(
-            "{}. {}",
+            "{}. **{}**",
             index + 1,
             truncate_line(option.label.trim(), 72)
         ));
@@ -812,11 +811,27 @@ fn thread_create_options_text(
             .map(str::trim)
             .filter(|value| !value.is_empty())
         {
-            lines.push(truncate_line(summary, 96));
+            lines.push(format_option_summary(summary));
         }
         lines.push(String::new());
     }
+    lines.push("---".to_string());
+    lines.push(navigation_hint);
     lines.join("\n").trim_end().to_string()
+}
+
+fn format_option_summary(summary: &str) -> String {
+    let summary = truncate_line(summary, 96);
+    if looks_like_path(&summary) {
+        format!("`{summary}`")
+    } else {
+        summary
+    }
+}
+
+fn looks_like_path(value: &str) -> bool {
+    let value = value.trim();
+    value.contains('\\') || value.contains('/') || value.starts_with('~')
 }
 
 async fn send_thread_routing_choice(

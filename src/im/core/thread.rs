@@ -386,13 +386,7 @@ fn cwd_create_options(
         &mut options,
         "__default__",
         "使用 Codex App 默认目录",
-        Some(
-            defaults
-                .cwd
-                .as_deref()
-                .map(|cwd| format!("当前默认：{cwd}"))
-                .unwrap_or_else(|| "不覆盖 cwd，由 Codex App 决定".to_string()),
-        ),
+        None,
         draft.cwd_custom.is_none() && is_default_selection(draft.cwd_choice.as_deref()),
     );
     for project in defaults
@@ -570,9 +564,7 @@ fn push_create_option(
         label.trim().to_string()
     };
     let summary = match (selected, summary) {
-        (true, Some(summary)) if !summary.trim().is_empty() => {
-            Some(format!("已选 - {}", summary.trim()))
-        }
+        (true, Some(summary)) if !summary.trim().is_empty() => Some(summary.trim().to_string()),
         (true, _) => Some("已选".to_string()),
         (false, Some(summary)) if !summary.trim().is_empty() => Some(summary.trim().to_string()),
         _ => None,
@@ -678,15 +670,13 @@ fn selected_permission_text(
 }
 
 fn project_option_label(path: &str) -> String {
-    let name = Path::new(path)
+    Path::new(path)
         .file_name()
         .and_then(|value| value.to_str())
         .map(str::trim)
-        .filter(|value| !value.is_empty());
-    match name {
-        Some(name) => format!("{name} - {path}"),
-        None => path.to_string(),
-    }
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.to_string())
 }
 
 fn reasoning_effort_label(effort: &str) -> String {

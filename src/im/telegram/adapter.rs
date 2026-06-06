@@ -400,18 +400,8 @@ impl TelegramAdapter {
             &format!("trc:{request_id}:new"),
         )]);
 
-        let hint = if options.is_empty() {
-            "当前没有可选项。".to_string()
-        } else if field == "cwd" {
-            format!(
-                "回复 /1 ~ /{} 选择目录，或点击下方按钮输入新目录。",
-                options.len()
-            )
-        } else {
-            format!("回复 /1 ~ /{} 选择。", options.len())
-        };
         let options_html = create_options_table_html(options);
-        let text = create_options_html_text(title, body, page, &hint, &options_html);
+        let text = create_options_html_text(title, body, page, options.len(), &options_html);
         log_adapter(
             "send_thread_create_options_begin",
             format!(
@@ -615,47 +605,56 @@ fn thread_entries_table_html(entries: &[TelegramThreadListEntry]) -> String {
 }
 
 fn create_options_table_html(options: &[ThreadCreateOption]) -> String {
-    let mut lines = vec!["<b>序号 | 选项</b>".to_string(), "---- | ----".to_string()];
-    lines.extend(
-        options
-            .iter()
-            .enumerate()
-            .map(|(index, option)| create_option_row_html(index, option)),
-    );
+    let mut lines = Vec::new();
+    for (index, option) in options.iter().enumerate() {
+        lines.push(create_option_row_html(index, option));
+        lines.push(String::new());
+    }
     lines.join("\n")
 }
 
 fn create_option_row_html(index: usize, option: &ThreadCreateOption) -> String {
     let label = truncate_display_text(option.label.trim(), 34);
-    let mut row = format!("/{} | <b>{}</b>", index + 1, telegram_html_escape(&label));
+    let mut row = format!("/{} <b>{}</b>", index + 1, telegram_html_escape(&label));
     if let Some(summary) = option
         .summary
         .as_deref()
         .map(telegram_cleanup_text)
         .filter(|v| !v.is_empty())
     {
-        row.push_str(&format!(
-            "\n    <code>{}</code>",
-            telegram_html_escape(&truncate_middle(&summary, 56))
-        ));
+        row.push('\n');
+        row.push_str(&option_summary_html(&summary));
     }
     row
+}
+
+fn option_summary_html(summary: &str) -> String {
+    let summary = truncate_middle(summary, 56);
+    if looks_like_path(&summary) {
+        format!("<code>{}</code>", telegram_html_escape(&summary))
+    } else {
+        telegram_html_escape(&summary)
+    }
 }
 
 fn create_options_html_text(
     title: &str,
     body: &str,
     page: usize,
-    hint: &str,
+    option_count: usize,
     options_html: &str,
 ) -> String {
+    let hint = if option_count == 0 {
+        "当前没有可选项。".to_string()
+    } else {
+        format!("第 {} 页 · 点击 /1 ~ /{} 选择", page.max(1), option_count)
+    };
     format!(
-        "<b>{}</b>\n\n{}\n\n第 {} 页\n{}\n\n{}",
+        "<b>{}</b>\n{}\n\n{}\n<code>{}</code>",
         telegram_html_escape(title),
         telegram_markdown_to_html(&telegram_cleanup_text(body)),
-        page.max(1),
-        telegram_html_escape(hint),
-        options_html
+        options_html.trim_end(),
+        telegram_html_escape(&hint)
     )
 }
 
@@ -737,6 +736,11 @@ fn project_name(path: &str) -> String {
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| path.to_string())
+}
+
+fn looks_like_path(value: &str) -> bool {
+    let value = value.trim();
+    value.contains('\\') || value.contains('/') || value.starts_with('~')
 }
 
 fn truncate_middle(text: &str, max_chars: usize) -> String {

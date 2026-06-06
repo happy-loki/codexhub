@@ -1623,15 +1623,13 @@ fn dedupe_options(options: Vec<(String, String)>) -> Vec<(String, String)> {
 }
 
 fn project_option_label(path: &str) -> String {
-    let name = std::path::Path::new(path)
+    std::path::Path::new(path)
         .file_name()
         .and_then(|value| value.to_str())
         .map(str::trim)
-        .filter(|value| !value.is_empty());
-    match name {
-        Some(name) => format!("{name} - {path}"),
-        None => path.to_string(),
-    }
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| path.to_string())
 }
 
 pub fn build_thread_list_card(
