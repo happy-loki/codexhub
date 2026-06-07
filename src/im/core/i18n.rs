@@ -208,12 +208,12 @@ impl ImText {
         match self.locale {
             ImLocale::ZhCn => {
                 format!(
-                    "Codex App 没有接收这条消息：{error}\n\n请确认 Codex App 还打开着 remote-control。"
+                    "Codex 没有接收这条消息：{error}\n\n当前 IM 会话绑定的 Codex 端点可能已经退出或断开。请回复 /q 退出当前会话，然后重新新建会话或恢复历史会话。"
                 )
             }
             ImLocale::EnUs => {
                 format!(
-                    "Codex App did not accept this message: {error}\n\nMake sure Codex App still has remote-control open."
+                    "Codex did not accept this message: {error}\n\nThe Codex endpoint bound to this IM session may have exited or disconnected. Reply /q to exit the current session, then create a new session or resume a historical session."
                 )
             }
         }
