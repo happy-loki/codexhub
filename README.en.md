@@ -27,7 +27,7 @@
 
 ### 0. Prerequisites
 
-- macOS or Windows device
+- macOS, Windows, or Linux device
 - Codex App, the Codex VS Code extension, or Codex CLI
 - No ChatGPT account and no acceleration network required
 - A third-party key for a GPT-5.x-compatible model
@@ -35,9 +35,9 @@
 
 ### 1. Install
 
-Download `Codex Remote.dmg` from GitHub Releases, drag it to Applications, then open it. On Windows, run `codex-remote.exe` from the release package.
+Download `Codex Remote.dmg` from GitHub Releases, drag it to Applications, then open it. On Windows, run `codex-remote.exe` from the release package. On Linux, download `Codex Remote Linux x86_64.AppImage`, make it executable, then double-click it.
 
-If macOS warns that the app was downloaded from the internet, confirm the system prompt. The app does not install startup items and does not run in the background automatically.
+If macOS warns that the app was downloaded from the internet, confirm the system prompt. If your Linux desktop does not mark the AppImage as executable automatically, run `chmod +x "Codex Remote Linux x86_64.AppImage"` once. The app does not install startup items and does not run in the background automatically.
 
 Later, use `Help -> Check for Updates` to manually check GitHub Releases for a newer version. The MVP only opens the download page; it does not silently replace the local app.
 

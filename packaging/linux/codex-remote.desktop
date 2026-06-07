@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Codex Remote
+Comment=Remote-control Codex from Feishu, WeChat, and Telegram
+Exec=codex-remote
+Icon=codex-remote
+Terminal=false
+Categories=Development;Utility;

@@ -27,7 +27,7 @@
 
 ### 0. 前置条件
 
-- macOS 或 Windows 设备
+- macOS、Windows 或 Linux 设备
 - Codex App、Codex VS Code 插件或 Codex CLI
 - 不需要 ChatGPT 账号，也不需要“加速网络”
 - 一个可以访问 GPT-5.x 兼容模型的第三方 key, 需要有生图能力(打开远程,会顺便打开codex的原生gen-image工具, 如果渠道拒绝生图工具会报错)
@@ -35,9 +35,9 @@
 
 ### 1. 安装
 
-从 GitHub Releases 下载 `Codex Remote.dmg`，拖到 Applications 后打开。
+从 GitHub Releases 下载 `Codex Remote.dmg`，拖到 Applications 后打开。Linux 下载 `Codex Remote Linux x86_64.AppImage` 后赋予执行权限即可双击运行。
 
-第一次打开时，如果 macOS 提示来自互联网，按系统提示确认即可。Windows 直接运行 release 包里的 `codex-remote.exe`。这个 App 不会安装开机启动项，也不会自动常驻后台。
+第一次打开时，如果 macOS 提示来自互联网，按系统提示确认即可。Windows 直接运行 release 包里的 `codex-remote.exe`。Linux 如果桌面环境没有自动赋权，可以先执行 `chmod +x "Codex Remote Linux x86_64.AppImage"`。这个 App 不会安装开机启动项，也不会自动常驻后台。
 
 后续可以在菜单 `Help -> Check for Updates` 手动检查 GitHub Releases 是否有新版本。当前 MVP 只引导打开下载页，不会静默替换本机程序。
 
