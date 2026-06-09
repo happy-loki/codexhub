@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use tracing::info;
 
 use crate::{
@@ -164,7 +164,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
             };
             let remote_client_key = remote_client_key_for_thread(&state, &thread_id)
                 .await
-                .unwrap_or_else(|| remote_control_backend::default_remote_client_key().to_string());
+                .context("bound IM thread is missing remote client key")?;
             remote_control_backend::interrupt_turn_for_client(
                 &state,
                 &remote_client_key,
@@ -192,9 +192,7 @@ pub(crate) async fn handle_inbound(state: SharedState, message: InboundMessage) 
             if let Some((thread_id, turn_id)) = active_turn_for_message(&state, &message).await {
                 let remote_client_key = remote_client_key_for_thread(&state, &thread_id)
                     .await
-                    .unwrap_or_else(|| {
-                        remote_control_backend::default_remote_client_key().to_string()
-                    });
+                    .context("bound IM thread is missing remote client key")?;
                 let _ = remote_control_backend::interrupt_turn_for_client(
                     &state,
                     &remote_client_key,
@@ -431,11 +429,8 @@ async fn send_thread_create_settings(
         .as_ref()
         .map(|request| request.create_draft.clone())
         .unwrap_or_default();
-    let defaults = load_thread_create_defaults_for_client(
-        state,
-        remote_control_backend::default_remote_client_key(),
-    )
-    .await;
+    let remote_client_key = route.remote_client_key.clone();
+    let defaults = load_thread_create_defaults_for_client(state, &remote_client_key).await;
     let im_text = im_text_for_state(state);
     let mut text = thread_create_help_text(&defaults, &create_draft, im_text);
     text.push_str(im_text.create_settings_menu_suffix());
@@ -551,9 +546,11 @@ async fn create_wechat_thread_from_request(
     message: &InboundMessage,
     request: ThreadRoutingRequestState,
 ) -> Result<()> {
+    let route = route_for_message(message);
+    let remote_client_key = route.remote_client_key.clone();
     let options = match thread_start_options_from_form_for_client(
         state,
-        remote_control_backend::default_remote_client_key(),
+        &remote_client_key,
         thread_create_form_from_draft(&request.create_draft),
     )
     .await
@@ -572,7 +569,6 @@ async fn create_wechat_thread_from_request(
             return Ok(());
         }
     };
-    let route = route_for_message(message);
     create_wechat_thread_for_route(state, adapter, &route, options, Some(&request.request_id))
         .await?;
     Ok(())
@@ -597,11 +593,8 @@ async fn send_thread_create_options(
             .await?;
         return Ok(());
     };
-    let defaults = load_thread_create_defaults_for_client(
-        state,
-        remote_control_backend::default_remote_client_key(),
-    )
-    .await;
+    let remote_client_key = route_for_message(message).remote_client_key;
+    let defaults = load_thread_create_defaults_for_client(state, &remote_client_key).await;
     let text = im_text_for_state(state);
     let (title, body, mut options) =
         create_options_for_field(&defaults, &request.create_draft, field, text)?;

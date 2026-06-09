@@ -6,8 +6,9 @@ pub(crate) fn route_for_message(message: &InboundMessage) -> RouteTarget {
         conversation_key: message.conversation_key(),
         account_id: message.account_id.clone(),
         chat_id: message.chat_id.clone(),
-        remote_client_key: None,
+        remote_client_key: String::new(),
     }
+    .with_deterministic_remote_client_key()
 }
 
 pub(crate) async fn live_thread_for_route(
@@ -61,7 +62,7 @@ pub(crate) async fn remote_client_key_for_thread(
         .lock()
         .await
         .route_for_thread(thread_id)
-        .and_then(|route| route.remote_client_key)
+        .map(|route| route.remote_client_key)
 }
 
 pub(crate) async fn clear_thread_binding(

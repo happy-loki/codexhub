@@ -8,17 +8,10 @@ pub(crate) async fn create_and_bind_thread(
     options: remote_control_backend::ThreadStartOptions,
     request_id: Option<&str>,
 ) -> Result<String> {
-    let remote_client_key = remote_control_backend::select_remote_client_key(state).await?;
+    let remote_client_key = route.remote_client_key.clone();
     let thread_id =
         remote_control_backend::start_thread_for_client(state, &remote_client_key, options).await?;
-    bind_thread_to_route(
-        state,
-        route,
-        &thread_id,
-        request_id,
-        Some(remote_client_key),
-    )
-    .await?;
+    bind_thread_to_route(state, route, &thread_id, request_id, remote_client_key).await?;
     Ok(thread_id)
 }
 
@@ -28,7 +21,7 @@ pub(crate) async fn resume_and_bind_thread(
     thread_id: &str,
     request_id: Option<&str>,
 ) -> Result<serde_json::Value> {
-    let remote_client_key = remote_control_backend::select_remote_client_key(state).await?;
+    let remote_client_key = route.remote_client_key.clone();
     let response = remote_control_backend::resume_thread_for_client(
         state,
         &remote_client_key,
@@ -36,7 +29,7 @@ pub(crate) async fn resume_and_bind_thread(
         true,
     )
     .await?;
-    bind_thread_to_route(state, route, thread_id, request_id, Some(remote_client_key)).await?;
+    bind_thread_to_route(state, route, thread_id, request_id, remote_client_key).await?;
     Ok(response
         .get("thread")
         .cloned()
@@ -48,7 +41,7 @@ pub(crate) async fn bind_thread_to_route(
     route: &RouteTarget,
     thread_id: &str,
     request_id: Option<&str>,
-    remote_client_key: Option<String>,
+    remote_client_key: String,
 ) -> Result<()> {
     {
         let mut runtime = state.runtime.lock().await;

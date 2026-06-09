@@ -344,8 +344,9 @@ async fn install_default_feishu_route(
         conversation_key: format!("feishu:{account_id}:open_id:{open_id}"),
         account_id: account_id.to_string(),
         chat_id: format!("open_id:{open_id}"),
-        remote_client_key: None,
-    };
+        remote_client_key: String::new(),
+    }
+    .with_deterministic_remote_client_key();
     state.runtime.lock().await.last_route = Some(route);
     state
         .push_event("info", "feishu_default_route", format!("open_id={open_id}"))
@@ -368,8 +369,9 @@ async fn handle_inbound(
         conversation_key: message.conversation_key(),
         account_id: message.account_id.clone(),
         chat_id: message.chat_id.clone(),
-        remote_client_key: None,
-    };
+        remote_client_key: String::new(),
+    }
+    .with_deterministic_remote_client_key();
     let Some(api) = api_registry.feishu_for_route(&route) else {
         anyhow::bail!(
             "Feishu API is not configured for account {}",
@@ -497,6 +499,16 @@ async fn codex_event_router(
                     .await;
                 continue;
             };
+            let Some(remote_client_key) = notification.remote_client_key.clone() else {
+                state
+                    .push_event(
+                        "error",
+                        "approval_remote_client_key_missing",
+                        format!("thread={thread_id} kind={request_kind} request_id={request_id}"),
+                    )
+                    .await;
+                continue;
+            };
             let (should_send_now, approval) = {
                 let mut runtime = state.runtime.lock().await;
                 runtime.bind_route(&thread_id, route.clone());
@@ -512,10 +524,7 @@ async fn codex_event_router(
                     summary: summary.clone(),
                     decisions: decisions.clone(),
                     message_id: None,
-                    remote_client_key: notification
-                        .remote_client_key
-                        .clone()
-                        .or_else(|| Some(route.conversation_key.clone())),
+                    remote_client_key: Some(remote_client_key),
                 };
                 if !runtime.push_approval(route.conversation_key.clone(), approval.clone()) {
                     drop(runtime);

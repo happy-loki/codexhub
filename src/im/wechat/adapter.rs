@@ -12,7 +12,7 @@ use crate::{
 
 use super::{api::WechatApi, store};
 
-const WECHAT_TEXT_CHUNK_CHARS: usize = 3500;
+pub(crate) const WECHAT_TEXT_CHUNK_CHARS: usize = 3500;
 const WECHAT_CHUNK_DELAY_MS: u64 = 120;
 const WECHAT_CONTEXT_TOKEN_STALE_WARN_MS: u128 = 60_000;
 
@@ -33,13 +33,40 @@ impl WechatAdapter {
         target: &str,
         text: &str,
     ) -> Result<String> {
-        let context_token = store::context_token_record(state, account_id, target).await;
+        self.send_text_inner(state, account_id, target, text, true)
+            .await
+    }
+
+    pub(crate) async fn send_text_without_context_token(
+        &self,
+        state: &SharedState,
+        account_id: &str,
+        target: &str,
+        text: &str,
+    ) -> Result<String> {
+        self.send_text_inner(state, account_id, target, text, false)
+            .await
+    }
+
+    async fn send_text_inner(
+        &self,
+        state: &SharedState,
+        account_id: &str,
+        target: &str,
+        text: &str,
+        use_context_token: bool,
+    ) -> Result<String> {
+        let context_token = if use_context_token {
+            store::context_token_record(state, account_id, target).await
+        } else {
+            None
+        };
         let chunks = wechat_text_chunks(text);
         let mut last_message_id = String::new();
         log_adapter(
             "send_text_begin",
             format!(
-                "account={} target={} chars={} chunks={} context_token={} token_age_ms={} token_stale={}",
+                "account={} target={} chars={} chunks={} context_token={} token_age_ms={} token_stale={} context_mode={}",
                 account_id,
                 target,
                 text.chars().count(),
@@ -50,7 +77,8 @@ impl WechatAdapter {
                     "missing"
                 },
                 token_age_label(context_token.as_ref()),
-                token_stale_label(context_token.as_ref())
+                token_stale_label(context_token.as_ref()),
+                if use_context_token { "stored" } else { "none" }
             ),
         );
         for (index, chunk) in chunks.iter().enumerate() {

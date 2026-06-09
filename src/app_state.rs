@@ -133,6 +133,7 @@ impl Default for RemoteControlSourceKind {
 pub struct PendingRemoteRequest {
     pub method: String,
     pub thread_id: Option<String>,
+    pub track_thread_active: bool,
     pub response_tx: oneshot::Sender<anyhow::Result<Value>>,
     pub message: Value,
     pub envelopes: Vec<Value>,

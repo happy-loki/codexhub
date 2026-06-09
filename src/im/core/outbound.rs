@@ -9,7 +9,11 @@ use crate::{
     im::{
         core::accounts::ImApiRegistry,
         telegram::{adapter::TelegramAdapter, api::TelegramApi},
-        wechat::{adapter::WechatAdapter, api::WechatApi, store as wechat_store},
+        wechat::{
+            adapter::{WECHAT_TEXT_CHUNK_CHARS, WechatAdapter},
+            api::WechatApi,
+            store as wechat_store,
+        },
     },
     im_runtime::RouteTarget,
     types::ImPlatformKind,
@@ -300,24 +304,68 @@ async fn send_wechat_text(
     {
         Ok(message_id) => {
             log_outbound_result("send_wechat_text_done", message, &message_id);
-            state
-                .push_event(
-                    "info",
-                    event_done,
-                    format!(
-                        "thread={} item={} type={} peer={} message={}",
-                        message.thread_id,
-                        message.item_id.as_deref().unwrap_or(""),
-                        message.item_type.as_deref().unwrap_or(""),
-                        message.route.chat_id,
-                        message_id
-                    ),
-                )
-                .await;
+            push_wechat_text_sent_event(state, event_done, message, &message_id).await;
         }
         Err(err) => {
-            log_outbound_result("send_wechat_text_failed", message, &err.to_string());
-            if defer_wechat_outbound_on_context_error(state, message, &err.to_string()).await {
+            let err_text = err.to_string();
+            let mut final_err_text = err_text.clone();
+            log_outbound_result("send_wechat_text_failed", message, &err_text);
+            if is_wechat_context_token_error(&err_text) && wechat_text_can_retry_without_token(text)
+            {
+                forget_wechat_context_token(state, message).await;
+                state
+                    .push_event(
+                        "warn",
+                        "wechat_text_retry_without_context_token",
+                        format!(
+                            "thread={} item={} type={} peer={} err={}",
+                            message.thread_id,
+                            message.item_id.as_deref().unwrap_or(""),
+                            message.item_type.as_deref().unwrap_or(""),
+                            message.route.chat_id,
+                            err_text
+                        ),
+                    )
+                    .await;
+                log_outbound_result(
+                    "send_wechat_text_retry_without_context_token",
+                    message,
+                    &err_text,
+                );
+                match adapter
+                    .send_text_without_context_token(
+                        state,
+                        &message.route.account_id,
+                        &message.route.chat_id,
+                        text,
+                    )
+                    .await
+                {
+                    Ok(message_id) => {
+                        log_outbound_result(
+                            "send_wechat_text_retry_without_context_token_done",
+                            message,
+                            &message_id,
+                        );
+                        push_wechat_text_sent_event(state, event_done, message, &message_id).await;
+                        return;
+                    }
+                    Err(retry_err) => {
+                        let retry_err_text = retry_err.to_string();
+                        final_err_text = retry_err_text.clone();
+                        log_outbound_result(
+                            "send_wechat_text_retry_without_context_token_failed",
+                            message,
+                            &retry_err_text,
+                        );
+                        if defer_wechat_outbound_on_context_error(state, message, &retry_err_text)
+                            .await
+                        {
+                            return;
+                        }
+                    }
+                }
+            } else if defer_wechat_outbound_on_context_error(state, message, &err_text).await {
                 return;
             }
             let event_failed = match message.kind {
@@ -334,7 +382,7 @@ async fn send_wechat_text(
                         message.item_id.as_deref().unwrap_or(""),
                         message.item_type.as_deref().unwrap_or(""),
                         message.route.chat_id,
-                        err
+                        final_err_text
                     ),
                 )
                 .await;
@@ -424,6 +472,14 @@ async fn defer_wechat_outbound_if_waiting(
         recovery.awaiting_fresh_context_token.contains(&key)
     };
     if waiting {
+        if matches!(message.payload, ImOutboundPayload::Text(_)) {
+            log_outbound_result(
+                "wechat_context_token_waiting_text_allowed",
+                message,
+                "waiting_for_fresh_context_token",
+            );
+            return false;
+        }
         queue_wechat_pending_outbound(state, message, "waiting_for_fresh_context_token").await;
         return true;
     }
@@ -434,6 +490,14 @@ async fn defer_wechat_outbound_if_waiting(
     )
     .await;
     if context_token.is_none() {
+        if matches!(message.payload, ImOutboundPayload::Text(_)) {
+            log_outbound_result(
+                "wechat_context_token_missing_text_allowed",
+                message,
+                "missing_context_token",
+            );
+            return false;
+        }
         queue_wechat_pending_outbound(state, message, "missing_context_token").await;
         return true;
     }
@@ -459,28 +523,55 @@ async fn defer_wechat_outbound_on_context_error(
     err: &str,
 ) -> bool {
     if is_wechat_context_token_error(err) {
-        if let Err(forget_err) = wechat_store::forget_context_token(
-            state,
-            &message.route.account_id,
-            &message.route.chat_id,
-        )
-        .await
-        {
-            state
-                .push_event(
-                    "warn",
-                    "wechat_context_token_forget_failed",
-                    format!(
-                        "account={} peer={} err={}",
-                        message.route.account_id, message.route.chat_id, forget_err
-                    ),
-                )
-                .await;
-        }
+        forget_wechat_context_token(state, message).await;
         queue_wechat_pending_outbound(state, message, "ret_minus_2").await;
         return true;
     }
     false
+}
+
+async fn forget_wechat_context_token(state: &SharedState, message: &ImOutboundMessage) {
+    if let Err(forget_err) =
+        wechat_store::forget_context_token(state, &message.route.account_id, &message.route.chat_id)
+            .await
+    {
+        state
+            .push_event(
+                "warn",
+                "wechat_context_token_forget_failed",
+                format!(
+                    "account={} peer={} err={}",
+                    message.route.account_id, message.route.chat_id, forget_err
+                ),
+            )
+            .await;
+    }
+}
+
+async fn push_wechat_text_sent_event(
+    state: &SharedState,
+    event_done: &str,
+    message: &ImOutboundMessage,
+    message_id: &str,
+) {
+    state
+        .push_event(
+            "info",
+            event_done,
+            format!(
+                "thread={} item={} type={} peer={} message={}",
+                message.thread_id,
+                message.item_id.as_deref().unwrap_or(""),
+                message.item_type.as_deref().unwrap_or(""),
+                message.route.chat_id,
+                message_id
+            ),
+        )
+        .await;
+}
+
+fn wechat_text_can_retry_without_token(text: &str) -> bool {
+    text.trim().chars().count() <= WECHAT_TEXT_CHUNK_CHARS
 }
 
 async fn queue_wechat_pending_outbound(

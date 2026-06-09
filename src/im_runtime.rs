@@ -14,7 +14,7 @@ pub struct RouteTarget {
     pub conversation_key: String,
     pub account_id: String,
     pub chat_id: String,
-    pub remote_client_key: Option<String>,
+    pub remote_client_key: String,
 }
 
 #[derive(Debug, Clone)]
@@ -23,6 +23,7 @@ pub struct PendingApproval {
     pub request_kind: String,
     #[allow(dead_code)]
     pub method: String,
+    #[allow(dead_code)]
     pub params: Value,
     pub summary: String,
     pub decisions: Vec<ApprovalDecisionOption>,
@@ -416,6 +417,36 @@ impl RuntimeState {
     }
 }
 
+impl RouteTarget {
+    pub fn deterministic_remote_client_key_for(
+        platform: ImPlatformKind,
+        account_id: &str,
+        chat_id: &str,
+    ) -> String {
+        let source = format!(
+            "{}:{}:{}",
+            platform.key(),
+            account_id.trim(),
+            chat_id.trim()
+        );
+        let digest = Sha256::digest(source.as_bytes());
+        let mut suffix = String::with_capacity(16);
+        for byte in digest.iter().take(8) {
+            let _ = write!(&mut suffix, "{byte:02x}");
+        }
+        format!("im:{}:{suffix}", platform.key())
+    }
+
+    pub fn deterministic_remote_client_key(&self) -> String {
+        Self::deterministic_remote_client_key_for(self.platform, &self.account_id, &self.chat_id)
+    }
+
+    pub fn with_deterministic_remote_client_key(mut self) -> Self {
+        self.remote_client_key = self.deterministic_remote_client_key();
+        self
+    }
+}
+
 fn log_route_bind(thread_id: &str, route: &RouteTarget, previous: Option<&RouteTarget>) {
     match previous {
         Some(previous) => chain_log::write_line(format!(
@@ -490,13 +521,16 @@ pub fn route_from_conversation_key(conversation_key: &str) -> Option<RouteTarget
     };
     let account_id = parts.next()?.to_string();
     let chat_id = parts.next()?.to_string();
-    Some(RouteTarget {
-        platform,
-        conversation_key: conversation_key.to_string(),
-        account_id,
-        chat_id,
-        remote_client_key: None,
-    })
+    Some(
+        RouteTarget {
+            platform,
+            conversation_key: conversation_key.to_string(),
+            account_id,
+            chat_id,
+            remote_client_key: String::new(),
+        }
+        .with_deterministic_remote_client_key(),
+    )
 }
 
 #[cfg(test)]
@@ -506,7 +540,8 @@ mod tests {
     use crate::types::ImPlatformKind;
 
     use super::{
-        PendingApproval, RuntimeState, ThreadTurnState, TurnOrigin, route_from_conversation_key,
+        PendingApproval, RouteTarget, RuntimeState, ThreadTurnState, TurnOrigin,
+        route_from_conversation_key,
     };
 
     fn approval(id: i64) -> PendingApproval {
@@ -633,13 +668,49 @@ mod tests {
         assert_eq!(feishu.platform, ImPlatformKind::Feishu);
         assert_eq!(feishu.account_id, "default");
         assert_eq!(feishu.chat_id, "open_id:ou_test");
+        assert!(feishu.remote_client_key.starts_with("im:feishu:"));
 
         let telegram =
             route_from_conversation_key("telegram:bot:chat:123").expect("telegram route");
         assert_eq!(telegram.platform, ImPlatformKind::Telegram);
         assert_eq!(telegram.account_id, "bot");
         assert_eq!(telegram.chat_id, "chat:123");
+        assert!(telegram.remote_client_key.starts_with("im:telegram:"));
 
         assert!(route_from_conversation_key("slack:team:channel").is_none());
+    }
+
+    #[test]
+    fn im_remote_client_key_is_deterministic_and_route_scoped() {
+        let feishu_key = RouteTarget::deterministic_remote_client_key_for(
+            ImPlatformKind::Feishu,
+            "default",
+            "chat-1",
+        );
+        assert_eq!(
+            feishu_key,
+            RouteTarget::deterministic_remote_client_key_for(
+                ImPlatformKind::Feishu,
+                "default",
+                "chat-1"
+            )
+        );
+        assert!(feishu_key.starts_with("im:feishu:"));
+        assert_ne!(
+            feishu_key,
+            RouteTarget::deterministic_remote_client_key_for(
+                ImPlatformKind::Wechat,
+                "default",
+                "chat-1"
+            )
+        );
+        assert_ne!(
+            feishu_key,
+            RouteTarget::deterministic_remote_client_key_for(
+                ImPlatformKind::Feishu,
+                "default",
+                "chat-2"
+            )
+        );
     }
 }

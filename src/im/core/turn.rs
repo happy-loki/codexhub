@@ -30,9 +30,7 @@ pub(crate) async fn start_turn_for_route(
     let Some((thread_id, bound_route)) = live_thread_binding_for_route(state, route).await else {
         return TurnStartOutcome::NoThread;
     };
-    let remote_client_key = bound_route
-        .remote_client_key
-        .unwrap_or_else(|| remote_control_backend::default_remote_client_key().to_string());
+    let remote_client_key = bound_route.remote_client_key;
     let blocked = {
         let mut runtime = state.runtime.lock().await;
         match runtime.try_mark_turn_starting(&thread_id) {

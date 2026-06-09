@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 
 use crate::{
     app_state::SharedState,
@@ -106,25 +106,11 @@ pub(crate) async fn submit_approval_decision(
     decision: &ApprovalDecisionOption,
 ) -> Result<Option<(String, PendingApproval)>> {
     let response = approval_response(decision.decision.clone());
-    let fallback_client_key = {
-        let runtime = state.runtime.lock().await;
-        pending
-            .params
-            .get("threadId")
-            .and_then(|value| value.as_str())
-            .and_then(|thread_id| runtime.route_for_thread(thread_id))
-            .map(|route| route.conversation_key)
-            .or_else(|| {
-                runtime
-                    .approval_by_request_key_anywhere(&pending.request_key())
-                    .map(|(conversation_key, _)| conversation_key)
-            })
-    };
     let client_key = pending
         .remote_client_key
         .clone()
-        .or(fallback_client_key)
-        .unwrap_or_default();
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| anyhow!("approval remote client key is missing"))?;
     remote_control_backend::send_response_for_client(
         state,
         &client_key,

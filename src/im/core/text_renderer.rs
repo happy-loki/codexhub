@@ -1,22 +1,66 @@
 use std::path::PathBuf;
 
+use std::collections::HashMap;
+
 use serde_json::Value;
+
+use crate::codex::extract_agent_message_text;
 
 const SUMMARY_CHAR_LIMIT: usize = 2400;
 const JSON_CHAR_LIMIT: usize = 1800;
 const DIFF_LINE_LIMIT: usize = 16;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MarkdownImageRef {
+    pub alt: String,
+    pub target: String,
+    pub path: PathBuf,
+}
+
 pub(crate) fn render_agent_message_text(text: &str) -> String {
+    let text = replace_local_markdown_images_with_text(text);
     format!("{}\n\n{}", type_header("agentMessage"), text.trim())
+}
+
+pub(crate) fn local_markdown_image_refs(text: &str) -> Vec<MarkdownImageRef> {
+    let mut refs = Vec::new();
+    visit_markdown_images(text, |alt, target, _| {
+        let Some(path) = local_existing_path_from_markdown_target(target) else {
+            return;
+        };
+        refs.push(MarkdownImageRef {
+            alt: alt.trim().to_string(),
+            target: target.trim().to_string(),
+            path,
+        });
+    });
+    refs
+}
+
+pub(crate) fn replace_local_markdown_images_with_text(text: &str) -> String {
+    rewrite_markdown_images(text, |alt, target, _original| {
+        local_existing_path_from_markdown_target(target)
+            .map(|_| markdown_image_text_replacement(alt, target))
+    })
+}
+
+pub(crate) fn replace_markdown_image_targets(
+    text: &str,
+    replacements: &HashMap<String, String>,
+) -> String {
+    rewrite_markdown_images(text, |alt, target, _original| {
+        replacements
+            .get(target.trim())
+            .map(|replacement| format!("![{}]({})", alt.trim(), replacement))
+    })
 }
 
 pub(crate) fn render_item_text(item: &Value) -> Option<String> {
     let item_type = item.get("type").and_then(|v| v.as_str())?;
     match item_type {
-        "agentMessage" => item
-            .get("text")
-            .and_then(|v| v.as_str())
-            .map(render_agent_message_text),
+        "agentMessage" => {
+            extract_agent_message_text(item).map(|text| render_agent_message_text(&text))
+        }
         "userMessage" => render_user_message(item),
         "todoList" => render_todo_list(item),
         "imageGeneration" => render_image_generation(item),
@@ -31,6 +75,84 @@ pub(crate) fn render_item_text(item: &Value) -> Option<String> {
         "collabAgentToolCall" => render_collab_agent_tool_call(item),
         "webSearch" => render_web_search(item),
         _ => render_unknown_item(item, item_type),
+    }
+}
+
+fn local_existing_path_from_markdown_target(target: &str) -> Option<PathBuf> {
+    let target = target.trim().trim_matches('<').trim_matches('>');
+    let target = target.strip_prefix("file:///").unwrap_or(target);
+    let target = target.strip_prefix("file://").unwrap_or(target);
+    let path = PathBuf::from(target);
+    path.is_file().then_some(path)
+}
+
+fn visit_markdown_images(mut text: &str, mut visitor: impl FnMut(&str, &str, &str)) {
+    loop {
+        let Some(start) = text.find("![") else {
+            break;
+        };
+        let candidate = &text[start..];
+        let Some(alt_end) = candidate.find("](") else {
+            break;
+        };
+        let target_start = alt_end + 2;
+        let Some(target_end) = candidate[target_start..].find(')') else {
+            break;
+        };
+
+        let full_end = target_start + target_end + 1;
+        let alt = &candidate[2..alt_end];
+        let target = &candidate[target_start..target_start + target_end];
+        visitor(alt, target, &candidate[..full_end]);
+        text = &candidate[full_end..];
+    }
+}
+
+fn rewrite_markdown_images(
+    mut text: &str,
+    mut replacer: impl FnMut(&str, &str, &str) -> Option<String>,
+) -> String {
+    let mut output = String::new();
+    loop {
+        let Some(start) = text.find("![") else {
+            output.push_str(text);
+            break;
+        };
+        output.push_str(&text[..start]);
+
+        let candidate = &text[start..];
+        let Some(alt_end) = candidate.find("](") else {
+            output.push_str(candidate);
+            break;
+        };
+        let target_start = alt_end + 2;
+        let Some(target_end) = candidate[target_start..].find(')') else {
+            output.push_str(candidate);
+            break;
+        };
+
+        let full_end = target_start + target_end + 1;
+        let alt = &candidate[2..alt_end];
+        let target = &candidate[target_start..target_start + target_end];
+        let original = &candidate[..full_end];
+        if let Some(replacement) = replacer(alt, target, original) {
+            output.push_str(&replacement);
+        } else {
+            output.push_str(original);
+        }
+        text = &candidate[full_end..];
+    }
+    output
+}
+
+fn markdown_image_text_replacement(alt: &str, target: &str) -> String {
+    let alt = alt.trim();
+    let target = target.trim().replace('`', "'");
+    match (alt.is_empty(), target.is_empty()) {
+        (true, true) => "图片".to_string(),
+        (true, false) => format!("图片：`{target}`"),
+        (false, true) => format!("图片：{alt}"),
+        (false, false) => format!("图片：{alt}（`{target}`）"),
     }
 }
 
@@ -619,7 +741,12 @@ fn looks_like_image_payload(value: &str) -> bool {
 mod tests {
     use serde_json::json;
 
-    use super::{render_agent_message_text, render_item_text};
+    use std::collections::HashMap;
+
+    use super::{
+        local_markdown_image_refs, render_agent_message_text, render_item_text,
+        replace_markdown_image_targets,
+    };
 
     #[test]
     fn agent_message_is_tagged_and_not_truncated() {
@@ -630,6 +757,42 @@ mod tests {
         assert!(!rendered.contains("agentMessage"));
         assert!(rendered.contains(&"hello\n".repeat(100)));
         assert!(!rendered.contains("[truncated]"));
+    }
+
+    #[test]
+    fn agent_message_local_markdown_image_is_rendered_as_text_and_extracted() {
+        let path =
+            std::env::temp_dir().join(format!("codex-remote-md-image-{}.png", std::process::id()));
+        std::fs::write(&path, b"png").expect("write temp image");
+        let text = format!("看图：![preview]({})", path.display());
+
+        let refs = local_markdown_image_refs(&text);
+        let rendered = render_agent_message_text(&text);
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].alt, "preview");
+        assert_eq!(refs[0].path, path);
+        assert!(!rendered.contains("![preview]("));
+        assert!(rendered.contains("图片：preview"));
+    }
+
+    #[test]
+    fn markdown_image_target_can_be_replaced_with_uploaded_key() {
+        let path = std::env::temp_dir().join(format!(
+            "codex-remote-md-image-replace-{}.png",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"png").expect("write temp image");
+        let target = path.display().to_string();
+        let text = format!("看图：![preview]({target})");
+        let mut replacements = HashMap::new();
+        replacements.insert(target, "img_v3_uploaded".to_string());
+
+        let replaced = replace_markdown_image_targets(&text, &replacements);
+
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(replaced, "看图：![preview](img_v3_uploaded)");
     }
 
     #[test]

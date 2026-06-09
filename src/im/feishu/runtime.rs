@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use anyhow::Result;
 use tracing::{info, warn};
@@ -6,13 +9,17 @@ use tracing::{info, warn};
 use crate::{
     app_state::SharedState,
     chain_log,
-    im::feishu::{
-        FeishuApi,
-        renderer::{
-            self, FEISHU_CARDKIT_STREAMING_ELEMENT_ID, build_cardkit_streaming_agent_message_card,
-            build_cardkit_streaming_reply_card, build_cardkit_streaming_tool_card,
+    im::{
+        core::text_renderer,
+        feishu::{
+            FeishuApi,
+            renderer::{
+                self, FEISHU_CARDKIT_STREAMING_ELEMENT_ID,
+                build_cardkit_streaming_agent_message_card, build_cardkit_streaming_reply_card,
+                build_cardkit_streaming_tool_card,
+            },
+            types::FeishuStreamingCardState,
         },
-        types::FeishuStreamingCardState,
     },
 };
 
@@ -534,7 +541,8 @@ async fn send_agent_message_cardkit(
     let (card_id, message_id, next_sequence) =
         ensure_cardkit_streaming_card(api, state_snapshot).await?;
     if state_snapshot.completed {
-        let final_card = build_streaming_card(&state_snapshot.kind, &state_snapshot.text, true);
+        let text = resolve_agent_message_markdown_images(api, &state_snapshot.text).await;
+        let final_card = build_streaming_card(&state_snapshot.kind, &text, true);
         api.update_cardkit_card(&card_id, &final_card, next_sequence)
             .await?;
         api.set_cardkit_streaming_mode(&card_id, false, next_sequence.saturating_add(1))
@@ -543,14 +551,54 @@ async fn send_agent_message_cardkit(
     } else if state_snapshot.text.trim().is_empty() {
         Ok((message_id, Some(card_id), next_sequence))
     } else {
+        let content = renderer::normalize_cardkit_streaming_markdown(&state_snapshot.text);
         api.stream_cardkit_element_content(
             &card_id,
             FEISHU_CARDKIT_STREAMING_ELEMENT_ID,
-            &state_snapshot.text,
+            &content,
             next_sequence,
         )
         .await?;
         Ok((message_id, Some(card_id), next_sequence))
+    }
+}
+
+pub async fn resolve_agent_message_markdown_images(api: &FeishuApi, text: &str) -> String {
+    let mut replacements = HashMap::new();
+    for image in text_renderer::local_markdown_image_refs(text) {
+        if replacements.contains_key(&image.target) {
+            continue;
+        }
+        let path = image.path.to_string_lossy().to_string();
+        match api.upload_image(&path).await {
+            Ok(image_key) => {
+                chain_log::write_line(format!(
+                    "[feishu_stream] event=agent_message_image_uploaded path={} image_key={}",
+                    image.path.display(),
+                    image_key
+                ));
+                replacements.insert(image.target, image_key);
+            }
+            Err(err) => {
+                chain_log::write_line(format!(
+                    "[feishu_stream] event=agent_message_image_upload_failed path={} err={}",
+                    image.path.display(),
+                    err
+                ));
+                warn!(
+                    target: "codex_remote::feishu",
+                    event = "feishu_agent_message_image_upload_failed",
+                    path = %image.path.display(),
+                    err = %err,
+                    "Failed to upload agent message markdown image"
+                );
+            }
+        }
+    }
+    if replacements.is_empty() {
+        renderer::normalize_cardkit_streaming_markdown(text)
+    } else {
+        text_renderer::replace_markdown_image_targets(text, &replacements)
     }
 }
 

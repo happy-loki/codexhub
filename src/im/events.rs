@@ -17,8 +17,8 @@ use crate::{
         feishu::{
             FeishuAdapter, FeishuApi, flow as feishu_flow, renderer,
             runtime::{
-                complete_existing_item_card, ensure_started_streaming_card_state,
-                upsert_streaming_card_state,
+                self as feishu_runtime, complete_existing_item_card,
+                ensure_started_streaming_card_state, upsert_streaming_card_state,
             },
         },
         telegram::adapter::TelegramAdapter,
@@ -155,8 +155,9 @@ pub(crate) async fn send_turn_reply(
                 log_missing_api(state, route, "turn_reply").await;
                 return;
             };
+            let text = feishu_runtime::resolve_agent_message_markdown_images(&api, text).await;
             let adapter = FeishuAdapter::new(api);
-            if let Err(err) = adapter.send_turn_completed(&route.chat_id, text).await {
+            if let Err(err) = adapter.send_turn_completed(&route.chat_id, &text).await {
                 state
                     .push_event(
                         "error",
@@ -189,6 +190,17 @@ pub(crate) async fn send_turn_reply(
                         .push_event(
                             "error",
                             "telegram_turn_enqueue_failed",
+                            format!("thread={thread_id} chat={} err={err}", route.chat_id),
+                        )
+                        .await;
+                }
+                if let Err(err) =
+                    queue_agent_message_images(outbound_tx, thread_id, route, None, text)
+                {
+                    state
+                        .push_event(
+                            "error",
+                            "telegram_agent_message_images_enqueue_failed",
                             format!("thread={thread_id} chat={} err={err}", route.chat_id),
                         )
                         .await;
@@ -251,6 +263,17 @@ pub(crate) async fn send_turn_reply(
                         )
                         .await;
                 }
+                if let Err(err) =
+                    queue_agent_message_images(outbound_tx, thread_id, route, None, text)
+                {
+                    state
+                        .push_event(
+                            "error",
+                            "wechat_agent_message_images_enqueue_failed",
+                            format!("thread={thread_id} peer={} err={err}", route.chat_id),
+                        )
+                        .await;
+                }
             } else {
                 let Some(api) = api_registry.wechat_for_route(route) else {
                     log_missing_api(state, route, "turn_reply").await;
@@ -285,6 +308,47 @@ pub(crate) async fn send_turn_reply(
                 }
             }
         }
+    }
+}
+
+fn queue_agent_message_images(
+    outbound_tx: &ImOutboundSender,
+    thread_id: &str,
+    route: &RouteTarget,
+    item_id: Option<&str>,
+    text: &str,
+) -> Result<usize> {
+    let images = text_renderer::local_markdown_image_refs(text);
+    let count = images.len();
+    for (index, image) in images.into_iter().enumerate() {
+        let caption = (!image.alt.trim().is_empty()).then_some(image.alt.clone());
+        let fallback_text = Some(agent_message_image_fallback_text(&image.alt, &image.target));
+        outbound_tx.enqueue(ImOutboundMessage {
+            thread_id: thread_id.to_string(),
+            route: route.clone(),
+            item_id: item_id
+                .map(str::to_string)
+                .or_else(|| Some(format!("agent-message-image-{index}"))),
+            item_type: Some("agentMessageImage".to_string()),
+            kind: ImOutboundKind::ImageItem,
+            payload: ImOutboundPayload::Image {
+                path: image.path,
+                caption,
+                fallback_text,
+            },
+        })?;
+    }
+    Ok(count)
+}
+
+fn agent_message_image_fallback_text(alt: &str, target: &str) -> String {
+    let alt = alt.trim();
+    let target = target.trim();
+    match (alt.is_empty(), target.is_empty()) {
+        (true, true) => "图片".to_string(),
+        (true, false) => format!("图片：`{target}`"),
+        (false, true) => format!("图片：{alt}"),
+        (false, false) => format!("图片：{alt}（`{target}`）"),
     }
 }
 
@@ -443,8 +507,7 @@ pub(crate) async fn handle_codex_notification(
                 return;
             };
             let route =
-                feishu_route_for_codex_output(&state, &notification.method, thread_id, params)
-                    .await;
+                route_for_codex_output(&state, &notification.method, thread_id, params).await;
             let Some(route) = route else {
                 state
                     .push_event(
@@ -455,6 +518,9 @@ pub(crate) async fn handle_codex_notification(
                     .await;
                 return;
             };
+            if route.platform != ImPlatformKind::Feishu {
+                return;
+            }
             let Some(api) = api_registry.feishu_for_route(&route) else {
                 log_missing_api(&state, &route, "agent_delta").await;
                 return;

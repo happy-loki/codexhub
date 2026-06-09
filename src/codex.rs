@@ -26,37 +26,111 @@ pub fn extract_agent_delta(notification: &CodexNotification) -> Option<String> {
     }
 }
 
+pub fn is_agent_message_item(item: &Value) -> bool {
+    match item.get("type").and_then(|v| v.as_str()) {
+        Some("agentMessage") | Some("agent_message") => true,
+        Some("message") => item.get("role").and_then(|v| v.as_str()) == Some("assistant"),
+        Some("event_msg") | Some("response_item") => item
+            .get("payload")
+            .is_some_and(|payload| is_agent_message_item(payload)),
+        Some("task_complete") => true,
+        _ => false,
+    }
+}
+
 pub fn extract_agent_message_text(item: &Value) -> Option<String> {
-    if item.get("type").and_then(|v| v.as_str()) != Some("agentMessage") {
+    if !is_agent_message_item(item) {
         return None;
     }
-    item.get("text")
-        .and_then(|v| v.as_str())
-        .map(|text| text.trim().to_string())
-        .filter(|text| !text.is_empty())
-        .or_else(|| {
-            item.get("content")
-                .and_then(|content| content.as_array())
-                .and_then(|items| {
-                    items.iter().find_map(|entry| {
-                        entry
-                            .get("text")
-                            .and_then(|v| v.as_str())
-                            .map(|text| text.trim().to_string())
-                            .filter(|text| !text.is_empty())
-                    })
-                })
-        })
+    extract_message_text(item)
 }
 
 pub fn extract_turn_reply_text(params: &Value) -> Option<String> {
-    params
-        .get("turn")
-        .and_then(|turn| turn.get("items"))
-        .and_then(|items| items.as_array())
-        .and_then(|items| items.iter().rev().find_map(extract_agent_message_text))
+    extract_direct_turn_reply_text(params)
+        .or_else(|| {
+            params
+                .get("payload")
+                .and_then(extract_direct_turn_reply_text)
+        })
+        .or_else(|| params.get("turn").and_then(extract_direct_turn_reply_text))
+        .or_else(|| extract_agent_message_text(params))
+        .or_else(|| latest_agent_message_in_items(params))
+        .or_else(|| params.get("turn").and_then(latest_agent_message_in_items))
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
+}
+
+fn latest_agent_message_in_items(value: &Value) -> Option<String> {
+    value
+        .get("turn")
+        .and_then(|turn| turn.get("items"))
+        .or_else(|| value.get("items"))
+        .and_then(|items| items.as_array())
+        .and_then(|items| items.iter().rev().find_map(extract_agent_message_text))
+}
+
+fn extract_direct_turn_reply_text(value: &Value) -> Option<String> {
+    text_from_fields(
+        value,
+        &[
+            "lastAgentMessage",
+            "last_agent_message",
+            "agentMessage",
+            "agent_message",
+        ],
+    )
+}
+
+fn extract_message_text(value: &Value) -> Option<String> {
+    text_from_fields(
+        value,
+        &[
+            "text",
+            "message",
+            "lastAgentMessage",
+            "last_agent_message",
+            "outputText",
+            "output_text",
+        ],
+    )
+    .or_else(|| value.get("content").and_then(text_from_content_value))
+    .or_else(|| value.get("payload").and_then(extract_message_text))
+}
+
+fn text_from_fields(value: &Value, fields: &[&str]) -> Option<String> {
+    fields
+        .iter()
+        .find_map(|field| value.get(*field).and_then(text_from_content_value))
+}
+
+fn text_from_content_value(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str() {
+        return non_empty_text(text);
+    }
+    if let Some(items) = value.as_array() {
+        let parts = items
+            .iter()
+            .filter_map(text_from_content_entry)
+            .collect::<Vec<_>>();
+        return (!parts.is_empty()).then(|| parts.join("\n\n"));
+    }
+    if value.is_object() {
+        return text_from_content_entry(value);
+    }
+    None
+}
+
+fn text_from_content_entry(entry: &Value) -> Option<String> {
+    if let Some(text) = entry.as_str() {
+        return non_empty_text(text);
+    }
+    text_from_fields(entry, &["text", "content", "message", "value"])
+        .or_else(|| entry.get("payload").and_then(extract_message_text))
+}
+
+fn non_empty_text(text: &str) -> Option<String> {
+    let text = text.trim().to_string();
+    (!text.is_empty()).then_some(text)
 }
 
 pub fn is_turn_completed(notification: &CodexNotification, turn_id: &str) -> bool {
@@ -561,6 +635,7 @@ mod tests {
 
     use super::{
         CodexNotification, approval_decision_by_input, approval_request_view, approval_response,
+        extract_agent_message_text, extract_turn_reply_text,
     };
 
     fn notification(method: &str, params: serde_json::Value) -> CodexNotification {
@@ -658,5 +733,49 @@ mod tests {
         assert_eq!(yes.decision, json!("accept"));
         assert_eq!(no_index, 2);
         assert_eq!(no.decision, json!("cancel"));
+    }
+
+    #[test]
+    fn agent_message_text_supports_response_message_content() {
+        let item = json!({
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "output_text", "text": "hello"},
+                {"type": "output_text", "text": "world"}
+            ]
+        });
+
+        assert_eq!(
+            extract_agent_message_text(&item).as_deref(),
+            Some("hello\n\nworld")
+        );
+    }
+
+    #[test]
+    fn turn_reply_text_supports_task_complete_last_agent_message() {
+        let params = json!({
+            "threadId": "thread",
+            "payload": {
+                "type": "task_complete",
+                "last_agent_message": "done"
+            }
+        });
+
+        assert_eq!(extract_turn_reply_text(&params).as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn turn_reply_text_supports_not_loaded_turn_with_direct_message() {
+        let params = json!({
+            "threadId": "thread",
+            "turn": {
+                "items": [],
+                "itemsView": "notLoaded",
+                "lastAgentMessage": "final"
+            }
+        });
+
+        assert_eq!(extract_turn_reply_text(&params).as_deref(), Some("final"));
     }
 }

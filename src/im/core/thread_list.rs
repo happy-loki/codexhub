@@ -61,7 +61,7 @@ impl ThreadRoutingPage {
 
 pub(crate) async fn load_thread_routing_page(
     state: &SharedState,
-    _route: &RouteTarget,
+    route: &RouteTarget,
     existing_request: Option<&ThreadRoutingRequestState>,
     cursor: Option<&str>,
     page: usize,
@@ -77,10 +77,10 @@ pub(crate) async fn load_thread_routing_page(
     }
     page_cursors[page - 1] = cursor.map(str::to_string);
 
-    let client_key = remote_control_backend::default_remote_client_key();
+    let client_key = route.remote_client_key.clone();
     let loaded_ids = match remote_control_backend::thread_loaded_list_for_client(
         state,
-        client_key,
+        &client_key,
         None,
         Some(THREAD_LOADED_LIMIT),
     )
@@ -103,7 +103,7 @@ pub(crate) async fn load_thread_routing_page(
     let model_provider_filter = load_codex_app_model_provider();
     let history = remote_control_backend::thread_list_for_client(
         state,
-        client_key,
+        &client_key,
         cursor,
         Some(THREAD_HISTORY_PAGE_SIZE),
         None,
@@ -116,7 +116,7 @@ pub(crate) async fn load_thread_routing_page(
         .cloned()
         .unwrap_or_default();
     let current_thread_id =
-        remote_control_backend::current_thread_for_client(state, client_key).await;
+        remote_control_backend::current_thread_for_client(state, &client_key).await;
     let text = im_text_for_state(state);
     let entries = build_thread_entries(
         &loaded_ids,

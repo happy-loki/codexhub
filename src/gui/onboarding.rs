@@ -1,3 +1,11 @@
+use std::{
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+};
+
 use qrcode::{Color, QrCode};
 use wxdragon::{prelude::*, timer::Timer};
 
@@ -384,39 +392,79 @@ pub(super) fn show_wechat_onboard_dialog(parent: &Frame, text: GuiText, api: Api
     dialog.set_sizer(dialog_sizer, true);
     dialog.center();
 
+    let poll_result: Arc<Mutex<Option<Result<WechatOnboardPoll, String>>>> =
+        Arc::new(Mutex::new(None));
+    let poll_in_flight = Arc::new(AtomicBool::new(false));
+    let poll_closed = Arc::new(AtomicBool::new(false));
     let timer = Timer::new(&dialog);
     {
         let api = api.clone();
         let session_key = start.session_key.clone();
         let dialog = dialog;
+        let poll_result = poll_result.clone();
+        let poll_in_flight = poll_in_flight.clone();
+        let poll_closed = poll_closed.clone();
         timer.on_tick(move |_| {
-            let code = verify_code.get_value();
-            let code = code.trim();
-            match api.poll_wechat_onboard(&session_key, (!code.is_empty()).then_some(code)) {
-                Ok(result) if result.done => {
-                    dialog.end_modal(ID_OK);
-                }
-                Ok(result) => {
-                    if result.need_verify_code.unwrap_or(false) {
-                        verify_code.enable(true);
+            let poll = poll_result.lock().ok().and_then(|mut slot| slot.take());
+            if let Some(poll) = poll {
+                poll_in_flight.store(false, Ordering::SeqCst);
+                match poll {
+                    Ok(result) if result.done => {
+                        poll_closed.store(true, Ordering::SeqCst);
+                        dialog.end_modal(ID_OK);
+                        return;
                     }
-                    info.set_label(&wechat_onboard_status_text(text, &result));
-                    info.wrap(600);
-                }
-                Err(_) => {
-                    info.set_label(text.onboard_failed_retry());
+                    Ok(result) => {
+                        if result.need_verify_code.unwrap_or(false) {
+                            verify_code.enable(true);
+                        }
+                        info.set_label(&wechat_onboard_status_text(text, &result));
+                        info.wrap(600);
+                    }
+                    Err(_) => {
+                        info.set_label(text.onboard_failed_retry());
+                    }
                 }
             }
+
+            if poll_closed.load(Ordering::SeqCst) || poll_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+
+            let api = api.clone();
+            let session_key = session_key.clone();
+            let code = strip_nul(&verify_code.get_value()).trim().to_string();
+            let poll_result = poll_result.clone();
+            let poll_in_flight = poll_in_flight.clone();
+            let poll_closed = poll_closed.clone();
+            thread::spawn(move || {
+                let verify_code = (!code.is_empty()).then_some(code);
+                let poll = api.poll_wechat_onboard(&session_key, verify_code.as_deref());
+                if poll_closed.load(Ordering::SeqCst) {
+                    poll_in_flight.store(false, Ordering::SeqCst);
+                    return;
+                }
+                if let Ok(mut slot) = poll_result.lock() {
+                    slot.replace(poll);
+                } else {
+                    poll_in_flight.store(false, Ordering::SeqCst);
+                }
+            });
         });
     }
     timer.start(1500, false);
 
     {
         let dialog = dialog;
-        close_button.on_click(move |_| dialog.end_modal(ID_CANCEL));
+        let poll_closed = poll_closed.clone();
+        close_button.on_click(move |_| {
+            poll_closed.store(true, Ordering::SeqCst);
+            dialog.end_modal(ID_CANCEL);
+        });
     }
 
     dialog.show_modal();
+    poll_closed.store(true, Ordering::SeqCst);
     timer.stop();
     dialog.destroy();
 }
