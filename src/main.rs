@@ -67,7 +67,7 @@ async fn main() -> anyhow::Result<()> {
             provider_name,
             provider_base_url,
             provider_key,
-            model,
+            model: _,
         } => {
             let backend_url = config.remote_control_base_url();
             let report = codex_app_config::configure_codex_app(
@@ -81,7 +81,6 @@ async fn main() -> anyhow::Result<()> {
                     provider_name,
                     provider_base_url,
                     provider_key,
-                    model,
                     activate_provider: true,
                     image_generation_enabled: None,
                     provider_supports_websockets: None,

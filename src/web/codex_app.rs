@@ -14,7 +14,6 @@ pub(super) struct ConfigureCodexAppRequest {
     provider_name: Option<String>,
     provider_base_url: Option<String>,
     provider_key: Option<String>,
-    model: Option<String>,
     activate: Option<bool>,
     image_generation_enabled: Option<bool>,
     supports_websockets: Option<bool>,
@@ -60,11 +59,6 @@ pub(super) async fn configure_codex_app(
         .and_then(|value| value.provider_key.clone())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty());
-    let model = request
-        .as_ref()
-        .and_then(|value| value.model.clone())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
     let activate_provider = request
         .as_ref()
         .and_then(|value| value.activate)
@@ -96,7 +90,6 @@ pub(super) async fn configure_codex_app(
         provider_name,
         provider_base_url,
         provider_key,
-        model,
         activate_provider,
         image_generation_enabled,
         provider_supports_websockets,

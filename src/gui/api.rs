@@ -333,7 +333,6 @@ pub(super) struct ConfigureRequest {
     pub(super) provider_name: Option<String>,
     pub(super) provider_base_url: Option<String>,
     pub(super) provider_key: Option<String>,
-    pub(super) model: Option<String>,
     pub(super) activate: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) image_generation_enabled: Option<bool>,

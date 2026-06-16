@@ -739,7 +739,6 @@ fn build_ui() {
                 provider_name: None,
                 provider_base_url: None,
                 provider_key: None,
-                model: None,
                 activate: true,
                 image_generation_enabled: Some(handles.provider_image_generation.get_value()),
                 supports_websockets: false,

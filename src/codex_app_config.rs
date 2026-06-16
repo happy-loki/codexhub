@@ -21,7 +21,7 @@ use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 use crate::chain_log;
 
 const DEFAULT_PROVIDER_NAME: &str = "ai-codex";
-const DEFAULT_MODEL: &str = "gpt-5.5";
+const AI_GATEWAY_PROVIDER_NAME: &str = "ai-gateway";
 const CODEX_API_BASE_URL_ENV: &str = "CODEX_API_BASE_URL";
 const CODEX_APP_SERVER_LOGIN_ISSUER_ENV: &str = "CODEX_APP_SERVER_LOGIN_ISSUER";
 const CODEX_APP_SQLITE_DIR: &str = "sqlite";
@@ -45,10 +45,20 @@ pub struct ConfigureCodexAppOptions {
     pub provider_name: Option<String>,
     pub provider_base_url: Option<String>,
     pub provider_key: Option<String>,
-    pub model: Option<String>,
     pub activate_provider: bool,
     pub image_generation_enabled: Option<bool>,
     pub provider_supports_websockets: Option<bool>,
+}
+
+impl ConfigureCodexAppOptions {
+    fn ai_gateway_base_url(&self) -> String {
+        let backend = self.backend_url.trim_end_matches('/');
+        if let Some(base) = backend.strip_suffix("/backend-api") {
+            format!("{base}/ai-gateway/v1")
+        } else {
+            format!("{backend}/ai-gateway/v1")
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -832,22 +842,31 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
     disable_codex_apps_feature_if_unset(&mut doc);
     set_hosted_image_generation_feature(&mut doc, options.image_generation_enabled);
 
-    let provider_base_url = options.provider_base_url.as_deref().and_then(config_value);
+    let explicit_provider_name = non_empty(options.provider_name.as_deref());
+    let explicit_provider_base_url = options.provider_base_url.as_deref().and_then(config_value);
     let provider_key = options.provider_key.as_deref().and_then(config_value);
-    let model = non_empty(options.model.as_deref());
-    let provider_name_requested = non_empty(options.provider_name.as_deref()).is_some();
-    let provider_config_requested = provider_name_requested
-        || provider_base_url.is_some()
-        || provider_key.is_some()
-        || model.is_some();
+    let inject_default_ai_gateway = explicit_provider_name.is_none()
+        && explicit_provider_base_url.is_none()
+        && provider_key.is_none();
+    let default_ai_gateway_base_url =
+        inject_default_ai_gateway.then(|| options.ai_gateway_base_url());
+    let provider_config_requested = if inject_default_ai_gateway {
+        true
+    } else {
+        explicit_provider_name.is_some()
+            || explicit_provider_base_url.is_some()
+            || provider_key.is_some()
+    };
 
     if provider_config_requested {
-        let provider_name = provider_name(options.provider_name.as_deref())?;
-        let model = model.unwrap_or(DEFAULT_MODEL);
+        let provider_name = if inject_default_ai_gateway {
+            provider_name(Some(AI_GATEWAY_PROVIDER_NAME))?
+        } else {
+            provider_name(options.provider_name.as_deref())?
+        };
 
         if options.activate_provider {
             doc["model_provider"] = toml_edit::value(provider_name.as_str());
-            doc["model"] = toml_edit::value(model);
         }
 
         let provider = provider_table_mut(&mut doc, provider_name.as_str());
@@ -855,13 +874,23 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
         provider["wire_api"] = toml_edit::value("responses");
         provider["requires_openai_auth"] = toml_edit::value(true);
 
-        if let Some(provider_base_url) = provider_base_url {
+        if inject_default_ai_gateway {
+            provider["base_url"] =
+                toml_edit::value(default_ai_gateway_base_url.as_deref().unwrap_or_default());
+            provider.remove("env_key");
+            provider.remove("env_key_instructions");
+            provider["experimental_bearer_token"] = toml_edit::value("dummy-token");
+            provider.remove("auth");
+        } else if let Some(provider_base_url) = explicit_provider_base_url {
             provider["base_url"] = toml_edit::value(provider_base_url);
         }
         if let Some(provider_key) = provider_key {
             provider["experimental_bearer_token"] = toml_edit::value(provider_key);
         }
-        if let Some(supports_websockets) = options.provider_supports_websockets {
+        if let Some(supports_websockets) = options
+            .provider_supports_websockets
+            .or(inject_default_ai_gateway.then_some(false))
+        {
             provider["supports_websockets"] = toml_edit::value(supports_websockets);
         }
     }
@@ -1427,7 +1456,6 @@ mod tests {
             provider_name: None,
             provider_base_url: Some("https://api.example.invalid".to_string()),
             provider_key: Some("test-provider-key".to_string()),
-            model: Some("gpt-5.5".to_string()),
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: Some(true),
@@ -1438,7 +1466,7 @@ mod tests {
         assert!(config.starts_with("chatgpt_base_url = \"http://127.0.0.1:3847/backend-api\"\n"));
         assert!(config.contains("chatgpt_base_url = \"http://127.0.0.1:3847/backend-api\""));
         assert!(config.contains("model_provider = \"ai-codex\""));
-        assert!(config.contains("model = \"gpt-5.5\""));
+        assert!(!config.contains("model = \"gpt-5.5\""));
         assert!(!config.contains("review_model"));
         assert!(!config.contains("model_reasoning_effort"));
         assert!(!config.contains("disable_response_storage"));
@@ -1458,6 +1486,134 @@ mod tests {
         assert!(auth.contains(&format!("\"auth_mode\": \"{LOCAL_AUTH_MODE}\"")));
         assert!(auth.contains("\"account_id\": \"acct_test\""));
         assert!(report.remote_control_switch.configured);
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn configure_codex_app_defaults_to_ai_gateway_provider() {
+        let codex_home = unique_temp_dir();
+        let report = configure_codex_app(ConfigureCodexAppOptions {
+            codex_home: Some(codex_home.clone()),
+            backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+            account_id: "acct_test".to_string(),
+            user_id: "user_test".to_string(),
+            email: "local@example.test".to_string(),
+            plan_type: "pro".to_string(),
+            provider_name: None,
+            provider_base_url: None,
+            provider_key: None,
+            activate_provider: true,
+            image_generation_enabled: None,
+            provider_supports_websockets: None,
+        })
+        .expect("configure codex app");
+
+        let config = std::fs::read_to_string(report.config_path).expect("read config");
+        assert!(config.contains("chatgpt_base_url = \"http://127.0.0.1:3847/backend-api\""));
+        assert!(config.contains("model_provider = \"ai-gateway\""));
+        assert!(config.contains("[model_providers.ai-gateway]"));
+        assert!(config.contains("name = \"ai-gateway\""));
+        assert!(config.contains("base_url = \"http://127.0.0.1:3847/ai-gateway/v1\""));
+        assert!(config.contains("wire_api = \"responses\""));
+        assert!(config.contains("requires_openai_auth = true"));
+        assert!(config.contains("supports_websockets = false"));
+        assert!(config.contains("experimental_bearer_token = \"dummy-token\""));
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn configure_codex_app_default_ai_gateway_repairs_existing_provider_base_url() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        std::fs::create_dir_all(&codex_home).expect("create codex home");
+        std::fs::write(
+            &config_path,
+            r#"model_provider = "custom-provider"
+model = "custom-model"
+
+[model_providers.ai-gateway]
+name = "ai-gateway"
+base_url = "https://old.example.invalid/v1"
+env_key = "AI_GATEWAY_API_KEY"
+experimental_bearer_token = "old-token"
+
+[model_providers.ai-gateway.auth]
+command = "print-token"
+"#,
+        )
+        .expect("write config");
+
+        configure_codex_app(ConfigureCodexAppOptions {
+            codex_home: Some(codex_home.clone()),
+            backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+            account_id: "acct_test".to_string(),
+            user_id: "user_test".to_string(),
+            email: "local@example.test".to_string(),
+            plan_type: "pro".to_string(),
+            provider_name: None,
+            provider_base_url: None,
+            provider_key: None,
+            activate_provider: true,
+            image_generation_enabled: None,
+            provider_supports_websockets: None,
+        })
+        .expect("configure codex app");
+
+        let config = std::fs::read_to_string(config_path).expect("read config");
+        assert!(config.contains("model_provider = \"ai-gateway\""));
+        assert!(config.contains("model = \"custom-model\""));
+        assert!(config.contains("base_url = \"http://127.0.0.1:3847/ai-gateway/v1\""));
+        assert!(config.contains("requires_openai_auth = true"));
+        assert!(!config.contains("env_key"));
+        assert!(config.contains("experimental_bearer_token = \"dummy-token\""));
+        assert!(!config.contains("[model_providers.ai-gateway.auth]"));
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn configure_codex_app_default_ai_gateway_completes_matching_existing_provider() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        std::fs::create_dir_all(&codex_home).expect("create codex home");
+        std::fs::write(
+            &config_path,
+            r#"model_provider = "custom-provider"
+model = "custom-model"
+
+[model_providers.ai-gateway]
+name = "ai-gateway"
+base_url = "http://localhost:3847/ai-gateway/v1"
+env_key = "AI_GATEWAY_API_KEY"
+"#,
+        )
+        .expect("write config");
+
+        configure_codex_app(ConfigureCodexAppOptions {
+            codex_home: Some(codex_home.clone()),
+            backend_url: "http://127.0.0.1:3847/backend-api".to_string(),
+            account_id: "acct_test".to_string(),
+            user_id: "user_test".to_string(),
+            email: "local@example.test".to_string(),
+            plan_type: "pro".to_string(),
+            provider_name: None,
+            provider_base_url: None,
+            provider_key: None,
+            activate_provider: true,
+            image_generation_enabled: None,
+            provider_supports_websockets: None,
+        })
+        .expect("configure codex app");
+
+        let config = std::fs::read_to_string(config_path).expect("read config");
+        assert!(config.contains("model_provider = \"ai-gateway\""));
+        assert!(config.contains("model = \"custom-model\""));
+        assert!(config.contains("base_url = \"http://127.0.0.1:3847/ai-gateway/v1\""));
+        assert!(config.contains("requires_openai_auth = true"));
+        assert!(!config.contains("env_key"));
+        assert!(config.contains("experimental_bearer_token = \"dummy-token\""));
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -1488,7 +1644,6 @@ name = "old-provider"
             provider_name: None,
             provider_base_url: None,
             provider_key: None,
-            model: None,
             activate_provider: true,
             image_generation_enabled: Some(true),
             provider_supports_websockets: None,
@@ -1564,7 +1719,6 @@ experimental_bearer_token = "existing-qwen-key"
             provider_name: Some("qwen".to_string()),
             provider_base_url: None,
             provider_key: None,
-            model: None,
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: None,
@@ -1611,7 +1765,6 @@ base_url = "https://old.example.invalid"
                 "https://dashscope.aliyuncs.com/compatible-mode/v1".to_string(),
             ),
             provider_key: Some("existing-qwen-key".to_string()),
-            model: None,
             activate_provider: false,
             image_generation_enabled: None,
             provider_supports_websockets: Some(false),
@@ -1731,7 +1884,6 @@ requires_openai_auth = true
             provider_name: None,
             provider_base_url: Some("https://api.example.invalid".to_string()),
             provider_key: Some("test-provider-key".to_string()),
-            model: Some("gpt-5.5".to_string()),
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: None,
@@ -1850,7 +2002,6 @@ base_url = "https://api.example.invalid"
                 provider_name: None,
                 provider_base_url: None,
                 provider_key: None,
-                model: None,
                 activate_provider: true,
                 image_generation_enabled: None,
                 provider_supports_websockets: None,

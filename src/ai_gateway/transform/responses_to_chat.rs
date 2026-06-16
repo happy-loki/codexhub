@@ -1,7 +1,7 @@
 //! Responses API input → Chat Completions messages 转换。
 //! 参考 AxonHub `responses/inbound.go` 的 `convertInputToMessages`。
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::ai_gateway::model::{
     GatewayRequest, ItemContent, ItemType, Reasoning, ResponseItem, TextFormat,
@@ -39,12 +39,7 @@ pub fn build_chat_request(request: &GatewayRequest, deepseek_mode: bool) -> Resu
         let chat_tools: Vec<Value> = request
             .tools
             .iter()
-            .filter(|t| {
-                t.get("type")
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|s| s == "function")
-            })
-            .cloned()
+            .filter_map(convert_tool_to_chat_tool)
             .collect();
         if !chat_tools.is_empty() {
             body["tools"] = json!(chat_tools);
@@ -53,7 +48,7 @@ pub fn build_chat_request(request: &GatewayRequest, deepseek_mode: bool) -> Resu
 
     // 5. tool_choice
     if let Some(tc) = &request.tool_choice {
-        body["tool_choice"] = tc.clone();
+        body["tool_choice"] = convert_tool_choice_to_chat(tc);
     }
 
     // 6. temperature / top_p
@@ -113,6 +108,79 @@ pub fn build_chat_request(request: &GatewayRequest, deepseek_mode: bool) -> Resu
     }
 
     Ok(body)
+}
+
+fn convert_tool_to_chat_tool(tool: &Value) -> Option<Value> {
+    let obj = tool.as_object()?;
+    if obj.get("type").and_then(|v| v.as_str()) != Some("function") {
+        return None;
+    }
+
+    let function = build_chat_function_object(obj)?;
+    Some(json!({
+        "type": "function",
+        "function": function,
+    }))
+}
+
+fn build_chat_function_object(tool: &Map<String, Value>) -> Option<Value> {
+    let mut function = tool
+        .get("function")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+
+    if !function.contains_key("name") {
+        if let Some(name) = tool.get("name") {
+            function.insert("name".to_string(), name.clone());
+        }
+    }
+    if !function.contains_key("description") {
+        if let Some(description) = tool.get("description") {
+            function.insert("description".to_string(), description.clone());
+        }
+    }
+    if !function.contains_key("parameters") {
+        if let Some(parameters) = tool.get("parameters") {
+            function.insert("parameters".to_string(), parameters.clone());
+        }
+    }
+    if !function.contains_key("strict") {
+        if let Some(strict) = tool.get("strict") {
+            function.insert("strict".to_string(), strict.clone());
+        }
+    }
+
+    if function.get("name").and_then(|v| v.as_str()).is_none() {
+        return None;
+    }
+
+    Some(Value::Object(function))
+}
+
+fn convert_tool_choice_to_chat(tool_choice: &Value) -> Value {
+    if tool_choice.is_string() {
+        return tool_choice.clone();
+    }
+
+    let Some(obj) = tool_choice.as_object() else {
+        return tool_choice.clone();
+    };
+
+    if let Some(mode) = obj.get("mode").and_then(|v| v.as_str()) {
+        return json!(mode);
+    }
+
+    if obj.get("type").and_then(|v| v.as_str()) == Some("function") {
+        if let Some(function) = build_chat_function_object(obj) {
+            return json!({
+                "type": "function",
+                "function": function,
+            });
+        }
+    }
+
+    tool_choice.clone()
 }
 
 /// 将 Responses API input items 转换为 Chat messages。
@@ -985,6 +1053,63 @@ mod tests {
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0]["function"]["name"], "search");
         assert_eq!(tools[1]["function"]["name"], "calc");
+    }
+
+    #[test]
+    fn test_flat_responses_function_tool_converted_to_chat_tool() {
+        let mut req = make_request(vec![]);
+        req.tools = vec![json!({
+            "type": "function",
+            "name": "apply_patch",
+            "description": "Apply a patch",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "patch": {"type": "string"}
+                },
+                "required": ["patch"]
+            },
+            "strict": true
+        })];
+
+        let body = build_chat_request(&req, false).unwrap();
+        let tool = &body["tools"].as_array().unwrap()[0];
+        assert_eq!(tool["type"], "function");
+        assert_eq!(tool["function"]["name"], "apply_patch");
+        assert_eq!(tool["function"]["description"], "Apply a patch");
+        assert_eq!(tool["function"]["parameters"]["type"], "object");
+        assert_eq!(tool["function"]["strict"], true);
+        assert!(tool.get("name").is_none());
+        assert!(tool.get("parameters").is_none());
+    }
+
+    #[test]
+    fn test_malformed_function_tool_without_name_filtered() {
+        let mut req = make_request(vec![]);
+        req.tools = vec![json!({"type": "function", "description": "missing name"})];
+
+        let body = build_chat_request(&req, false).unwrap();
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn test_flat_tool_choice_converted_to_chat_tool_choice() {
+        let mut req = make_request(vec![]);
+        req.tool_choice = Some(json!({"type": "function", "name": "apply_patch"}));
+
+        let body = build_chat_request(&req, false).unwrap();
+        assert_eq!(body["tool_choice"]["type"], "function");
+        assert_eq!(body["tool_choice"]["function"]["name"], "apply_patch");
+        assert!(body["tool_choice"].get("name").is_none());
+    }
+
+    #[test]
+    fn test_tool_choice_mode_converted_to_string() {
+        let mut req = make_request(vec![]);
+        req.tool_choice = Some(json!({"mode": "auto"}));
+
+        let body = build_chat_request(&req, false).unwrap();
+        assert_eq!(body["tool_choice"], "auto");
     }
 
     // ═══ DeepSeek 严格约束测试 ═══════════════════════════════════
