@@ -7,6 +7,8 @@ use crate::ai_gateway::model::{
     GatewayRequest, ItemContent, ItemType, Reasoning, ResponseItem, TextFormat,
 };
 
+const RESPONSES_MCP_NAMESPACE_UNIT_MARKER: &str = "responses_unit__";
+
 /// Chat Completions 请求 body（JSON）。
 pub fn build_chat_request(request: &GatewayRequest, deepseek_mode: bool) -> Result<Value, String> {
     let mut messages = Vec::new();
@@ -36,11 +38,7 @@ pub fn build_chat_request(request: &GatewayRequest, deepseek_mode: bool) -> Resu
 
     // 4. tools
     if !request.tools.is_empty() {
-        let chat_tools: Vec<Value> = request
-            .tools
-            .iter()
-            .filter_map(convert_tool_to_chat_tool)
-            .collect();
+        let chat_tools = convert_tools_to_chat_tools(&request.tools);
         if !chat_tools.is_empty() {
             body["tools"] = json!(chat_tools);
         }
@@ -110,20 +108,54 @@ pub fn build_chat_request(request: &GatewayRequest, deepseek_mode: bool) -> Resu
     Ok(body)
 }
 
-fn convert_tool_to_chat_tool(tool: &Value) -> Option<Value> {
-    let obj = tool.as_object()?;
-    if obj.get("type").and_then(|v| v.as_str()) != Some("function") {
-        return None;
-    }
-
-    let function = build_chat_function_object(obj)?;
-    Some(json!({
-        "type": "function",
-        "function": function,
-    }))
+fn convert_tools_to_chat_tools(tools: &[Value]) -> Vec<Value> {
+    tools
+        .iter()
+        .flat_map(|tool| {
+            let Some(obj) = tool.as_object() else {
+                return Vec::new();
+            };
+            match obj.get("type").and_then(|v| v.as_str()) {
+                Some("namespace") => {
+                    let namespace = obj.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    obj.get("tools")
+                        .and_then(|v| v.as_array())
+                        .map(|items| {
+                            items
+                                .iter()
+                                .filter_map(|item| {
+                                    let item_obj = item.as_object()?;
+                                    if item_obj.get("type").and_then(|v| v.as_str())
+                                        != Some("function")
+                                    {
+                                        return None;
+                                    }
+                                    let function =
+                                        build_chat_function_object(item_obj, Some(namespace))?;
+                                    Some(json!({
+                                        "type": "function",
+                                        "function": function,
+                                    }))
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                }
+                Some("function") => build_chat_function_object(obj, None)
+                    .map(|function| {
+                        vec![json!({
+                            "type": "function",
+                            "function": function,
+                        })]
+                    })
+                    .unwrap_or_default(),
+                _ => Vec::new(),
+            }
+        })
+        .collect()
 }
 
-fn build_chat_function_object(tool: &Map<String, Value>) -> Option<Value> {
+fn build_chat_function_object(tool: &Map<String, Value>, namespace: Option<&str>) -> Option<Value> {
     let mut function = tool
         .get("function")
         .and_then(|v| v.as_object())
@@ -151,6 +183,10 @@ fn build_chat_function_object(tool: &Map<String, Value>) -> Option<Value> {
         }
     }
 
+    let name = function.get("name").and_then(|v| v.as_str())?;
+    let encoded_name = encode_responses_function_call_name(namespace.unwrap_or(""), name);
+    function.insert("name".to_string(), json!(encoded_name));
+
     if function.get("name").and_then(|v| v.as_str()).is_none() {
         return None;
     }
@@ -172,7 +208,7 @@ fn convert_tool_choice_to_chat(tool_choice: &Value) -> Value {
     }
 
     if obj.get("type").and_then(|v| v.as_str()) == Some("function") {
-        if let Some(function) = build_chat_function_object(obj) {
+        if let Some(function) = build_chat_function_object(obj, None) {
             return json!({
                 "type": "function",
                 "function": function,
@@ -190,16 +226,20 @@ fn convert_input_to_messages(
     messages: &mut Vec<Value>,
     _deepseek_mode: bool,
 ) -> Result<(), String> {
+    let mut removed_tool_call_ids = std::collections::HashSet::new();
     let mut i = 0;
     while i < items.len() {
         let item = &items[i];
         match item.item_type {
             ItemType::InputText => {
-                let text = match &item.content {
+                let text = item.text.clone().unwrap_or_else(|| match &item.content {
                     Some(ItemContent::Text(s)) => s.clone(),
                     _ => String::new(),
-                };
-                messages.push(json!({"role": "user", "content": text}));
+                });
+                messages.push(json!({
+                    "role": item.role.as_deref().unwrap_or("user"),
+                    "content": text,
+                }));
                 i += 1;
             }
             ItemType::InputImage => {
@@ -209,15 +249,21 @@ fn convert_input_to_messages(
                         .iter()
                         .find_map(|p| p.image_url.clone())
                         .unwrap_or_default(),
-                    _ => String::new(),
+                    _ => item.image_url.clone().unwrap_or_default(),
                 };
-                messages.push(json!({
-                    "role": "user",
-                    "content": [{
-                        "type": "image_url",
-                        "image_url": {"url": image_url}
-                    }]
-                }));
+                if !image_url.is_empty() {
+                    let mut image = json!({"url": image_url});
+                    if let Some(detail) = &item.detail {
+                        image["detail"] = json!(detail);
+                    }
+                    messages.push(json!({
+                        "role": item.role.as_deref().unwrap_or("user"),
+                        "content": [{
+                            "type": "image_url",
+                            "image_url": image
+                        }]
+                    }));
+                }
                 i += 1;
             }
             ItemType::Message => {
@@ -228,17 +274,33 @@ fn convert_input_to_messages(
             }
             ItemType::Reasoning => {
                 // reasoning 后面紧跟 function_call 时，合并为同一个 assistant message
-                i = convert_reasoning_with_following(items, i, messages);
+                i = convert_reasoning_with_following(
+                    items,
+                    i,
+                    messages,
+                    &mut removed_tool_call_ids,
+                );
             }
-            ItemType::FunctionCall => {
-                // 连续 function_call 合并到同一个 assistant message
-                i = convert_function_calls(items, i, messages);
+            ItemType::FunctionCall
+            | ItemType::CustomToolCall
+            | ItemType::WebSearchCall
+            | ItemType::ImageGenerationCall => {
+                // 连续 tool call 合并到同一个 assistant message
+                i = convert_function_calls(items, i, messages, &mut removed_tool_call_ids);
             }
-            ItemType::FunctionCallOutput => {
+            ItemType::FunctionCallOutput | ItemType::CustomToolCallOutput => {
                 let call_id = item.call_id.as_deref().unwrap_or("");
+                if matches!(item.item_type, ItemType::CustomToolCallOutput)
+                    || removed_tool_call_ids.contains(call_id)
+                {
+                    removed_tool_call_ids.insert(call_id.to_string());
+                    i += 1;
+                    continue;
+                }
                 let output = item
                     .output
-                    .as_deref()
+                    .as_ref()
+                    .map(|output| output.to_chat_tool_content())
                     .ok_or_else(|| "function_call_output missing output".to_string())?;
                 messages.push(json!({
                     "role": "tool",
@@ -262,29 +324,54 @@ fn convert_reasoning_with_following(
     items: &[ResponseItem],
     start: usize,
     messages: &mut Vec<Value>,
+    removed_tool_call_ids: &mut std::collections::HashSet<String>,
 ) -> usize {
     let reasoning_item = &items[start];
     let reasoning_text = extract_reasoning_text(reasoning_item);
 
     let next = start + 1;
-    if next < items.len() && items[next].item_type == ItemType::FunctionCall {
-        // 合并 reasoning + function_calls 为单个 assistant message
+    if next < items.len() && is_assistant_tool_call_item(&items[next]) {
+        // 合并 reasoning + tool calls 为单个 assistant message
         let mut tool_calls = Vec::new();
         let mut i = next;
-        while i < items.len() && items[i].item_type == ItemType::FunctionCall {
-            tool_calls.push(build_tool_call(&items[i], tool_calls.len()));
+        while i < items.len() && is_assistant_tool_call_item(&items[i]) {
+            if let Some(tool_call) = build_function_tool_call(&items[i], tool_calls.len()) {
+                tool_calls.push(tool_call);
+            } else {
+                remember_removed_tool_call(&items[i], removed_tool_call_ids);
+            }
             i += 1;
         }
         let mut msg = json!({
             "role": "assistant",
             "content": null,
-            "tool_calls": tool_calls,
+        });
+        if !tool_calls.is_empty() {
+            msg["tool_calls"] = json!(tool_calls);
+        }
+        if !reasoning_text.is_empty() {
+            msg["reasoning_content"] = json!(reasoning_text);
+        }
+        if !should_drop_message_after_tool_filtering(&msg) {
+            messages.push(msg);
+        }
+        i
+    } else if next < items.len()
+        && matches!(
+            items[next].item_type,
+            ItemType::Message | ItemType::InputText
+        )
+        && items[next].role.as_deref() == Some("assistant")
+    {
+        let mut msg = json!({
+            "role": "assistant",
+            "content": extract_message_content(&items[next]),
         });
         if !reasoning_text.is_empty() {
             msg["reasoning_content"] = json!(reasoning_text);
         }
         messages.push(msg);
-        i
+        next + 1
     } else {
         // 独立的 reasoning item → assistant message with reasoning_content
         let mut msg = json!({"role": "assistant", "content": null});
@@ -296,49 +383,135 @@ fn convert_reasoning_with_following(
     }
 }
 
-/// 连续 function_call 合并到同一个 assistant message。
+/// 连续 tool call 合并到同一个 assistant message。
 fn convert_function_calls(
     items: &[ResponseItem],
     start: usize,
     messages: &mut Vec<Value>,
+    removed_tool_call_ids: &mut std::collections::HashSet<String>,
 ) -> usize {
     let mut tool_calls = Vec::new();
     let mut i = start;
-    while i < items.len() && items[i].item_type == ItemType::FunctionCall {
-        tool_calls.push(build_tool_call(&items[i], tool_calls.len()));
+    while i < items.len() && is_assistant_tool_call_item(&items[i]) {
+        if let Some(tool_call) = build_function_tool_call(&items[i], tool_calls.len()) {
+            tool_calls.push(tool_call);
+        } else {
+            remember_removed_tool_call(&items[i], removed_tool_call_ids);
+        }
         i += 1;
     }
-    messages.push(json!({
-        "role": "assistant",
-        "content": null,
-        "tool_calls": tool_calls,
-    }));
+    if !tool_calls.is_empty() {
+        messages.push(json!({
+            "role": "assistant",
+            "content": null,
+            "tool_calls": tool_calls,
+        }));
+    }
     i
 }
 
-fn build_tool_call(item: &ResponseItem, index: usize) -> Value {
-    json!({
+fn is_assistant_tool_call_item(item: &ResponseItem) -> bool {
+    matches!(
+        item.item_type,
+        ItemType::FunctionCall
+            | ItemType::CustomToolCall
+            | ItemType::WebSearchCall
+            | ItemType::ImageGenerationCall
+    )
+}
+
+fn build_function_tool_call(item: &ResponseItem, index: usize) -> Option<Value> {
+    if item.item_type != ItemType::FunctionCall {
+        return None;
+    }
+
+    let name = encode_responses_function_call_name(
+        item.namespace.as_deref().unwrap_or(""),
+        item.name.as_deref().unwrap_or(""),
+    );
+
+    Some(json!({
         "index": index,
         "id": item.call_id.as_deref().unwrap_or(""),
         "type": "function",
         "function": {
-            "name": item.name.as_deref().unwrap_or(""),
+            "name": name,
             "arguments": item.arguments.as_deref().unwrap_or("{}"),
         }
-    })
+    }))
+}
+
+fn remember_removed_tool_call(
+    item: &ResponseItem,
+    removed_tool_call_ids: &mut std::collections::HashSet<String>,
+) {
+    if let Some(call_id) = item.call_id.as_deref().filter(|s| !s.is_empty()) {
+        removed_tool_call_ids.insert(call_id.to_string());
+    }
+    if let Some(id) = item.id.as_deref().filter(|s| !s.is_empty()) {
+        removed_tool_call_ids.insert(id.to_string());
+    }
+}
+
+fn should_drop_message_after_tool_filtering(msg: &Value) -> bool {
+    let has_tool_calls = msg
+        .get("tool_calls")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| !a.is_empty());
+    if has_tool_calls {
+        return false;
+    }
+
+    let has_content = msg.get("content").is_some_and(|v| {
+        !v.is_null()
+            && v.as_str().is_none_or(|s| !s.is_empty())
+            && v.as_array().is_none_or(|a| !a.is_empty())
+    });
+    if has_content {
+        return false;
+    }
+
+    let has_reasoning = msg
+        .get("reasoning_content")
+        .and_then(|v| v.as_str())
+        .is_some_and(|s| !s.is_empty());
+    !has_reasoning
+}
+
+fn encode_responses_function_call_name(namespace: &str, name: &str) -> String {
+    if namespace.is_empty() || name.is_empty() {
+        return name.to_string();
+    }
+    format!("{namespace}{RESPONSES_MCP_NAMESPACE_UNIT_MARKER}{name}")
 }
 
 fn extract_message_content(item: &ResponseItem) -> Value {
     match &item.content {
         Some(ItemContent::Text(s)) => json!(s),
         Some(ItemContent::Parts(parts)) => {
+            if parts.len() == 1
+                && matches!(
+                    parts[0].part_type.as_str(),
+                    "output_text" | "input_text" | "text"
+                )
+            {
+                return json!(parts[0].text.as_deref().unwrap_or(""));
+            }
+
             let content_parts: Vec<Value> = parts
                 .iter()
                 .map(|p| {
-                    if p.part_type == "output_text" || p.part_type == "text" {
+                    if p.part_type == "output_text"
+                        || p.part_type == "input_text"
+                        || p.part_type == "text"
+                    {
                         json!({"type": "text", "text": p.text.as_deref().unwrap_or("")})
                     } else if p.part_type == "image_url" || p.part_type == "input_image" {
-                        json!({"type": "image_url", "image_url": {"url": p.image_url.as_deref().unwrap_or("")}})
+                        let mut image = json!({"url": p.image_url.as_deref().unwrap_or("")});
+                        if let Some(detail) = &p.detail {
+                            image["detail"] = json!(detail);
+                        }
+                        json!({"type": "image_url", "image_url": image})
                     } else {
                         json!({"type": "text", "text": p.text.as_deref().unwrap_or("")})
                     }
@@ -346,7 +519,11 @@ fn extract_message_content(item: &ResponseItem) -> Value {
                 .collect();
             json!(content_parts)
         }
-        None => json!(null),
+        None => item
+            .text
+            .as_deref()
+            .map(|text| json!(text))
+            .unwrap_or_else(|| json!(null)),
     }
 }
 
@@ -549,11 +726,17 @@ mod tests {
             id: None,
             role: None,
             content: None,
+            text: None,
             name: None,
+            namespace: None,
             call_id: None,
             arguments: None,
+            input: None,
             output: None,
             status: None,
+            image_url: None,
+            detail: None,
+            action: None,
             summary: None,
             encrypted_content: None,
         }
@@ -650,6 +833,180 @@ mod tests {
     }
 
     #[test]
+    fn test_function_call_output_content_items_to_tool_message() {
+        let raw = r#"{
+            "model": "test",
+            "stream": false,
+            "input": [{
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": [
+                    {"type": "input_text", "text": "line one"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,abc", "detail": "high"},
+                    {"type": "input_text", "text": "line two"}
+                ]
+            }]
+        }"#;
+
+        let req: GatewayRequest = serde_json::from_str(raw).unwrap();
+        let body = build_chat_request(&req, true).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "tool");
+        assert_eq!(msgs[0]["tool_call_id"], "call_1");
+        assert_eq!(msgs[0]["content"], "line one\nline two");
+    }
+
+    #[test]
+    fn test_top_level_input_text_item_uses_text_field() {
+        let raw = r#"{
+            "model": "test",
+            "stream": false,
+            "input": [
+                {"type": "input_text", "text": "hello from text"}
+            ]
+        }"#;
+
+        let req: GatewayRequest = serde_json::from_str(raw).unwrap();
+        let body = build_chat_request(&req, true).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "user");
+        assert_eq!(msgs[0]["content"], "hello from text");
+    }
+
+    #[test]
+    fn test_standalone_input_image_uses_top_level_image_url_and_detail() {
+        let raw = r#"{
+            "model": "test",
+            "stream": false,
+            "input": [
+                {
+                    "type": "input_image",
+                    "image_url": "data:image/png;base64,abc",
+                    "detail": "high"
+                }
+            ]
+        }"#;
+
+        let req: GatewayRequest = serde_json::from_str(raw).unwrap();
+        let body = build_chat_request(&req, false).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(
+            msgs[0]["content"][0]["image_url"],
+            json!({"url": "data:image/png;base64,abc", "detail": "high"})
+        );
+    }
+
+    #[test]
+    fn test_custom_tool_call_history_filtered_for_chat() {
+        let raw = r#"{
+            "model": "test",
+            "stream": false,
+            "input": [
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_patch",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch\n*** End Patch\n"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_patch",
+                    "name": "apply_patch",
+                    "output": [
+                        {"type": "input_text", "text": "Done"}
+                    ]
+                }
+            ]
+        }"#;
+
+        let req: GatewayRequest = serde_json::from_str(raw).unwrap();
+        let body = build_chat_request(&req, true).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+
+        assert!(msgs.is_empty());
+    }
+
+    #[test]
+    fn test_mixed_function_and_custom_tool_history_keeps_only_function_pair() {
+        let raw = r#"{
+            "model": "test",
+            "stream": false,
+            "input": [
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_custom",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch\n*** End Patch\n"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_function",
+                    "name": "get_weather",
+                    "arguments": "{\"city\":\"Shanghai\"}"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_custom",
+                    "name": "apply_patch",
+                    "output": "custom done"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_function",
+                    "output": "{\"temperature\":22}"
+                }
+            ]
+        }"#;
+
+        let req: GatewayRequest = serde_json::from_str(raw).unwrap();
+        let body = build_chat_request(&req, true).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "assistant");
+        let tool_calls = msgs[0]["tool_calls"].as_array().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["id"], "call_function");
+        assert_eq!(tool_calls[0]["function"]["name"], "get_weather");
+        assert_eq!(msgs[1]["role"], "tool");
+        assert_eq!(msgs[1]["tool_call_id"], "call_function");
+        assert_eq!(msgs[1]["content"], "{\"temperature\":22}");
+    }
+
+    #[test]
+    fn test_responses_builtin_tool_calls_filtered_for_chat() {
+        let raw = r#"{
+            "model": "test",
+            "stream": false,
+            "input": [
+                {"type": "web_search_call", "id": "ws_1", "status": "completed"},
+                {"type": "image_generation_call", "id": "ig_1", "status": "completed"},
+                {
+                    "type": "function_call",
+                    "call_id": "call_function",
+                    "name": "get_weather",
+                    "arguments": "{\"city\":\"Shanghai\"}"
+                }
+            ]
+        }"#;
+
+        let req: GatewayRequest = serde_json::from_str(raw).unwrap();
+        let body = build_chat_request(&req, true).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+
+        assert_eq!(msgs.len(), 1);
+        let tool_calls = msgs[0]["tool_calls"].as_array().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["id"], "call_function");
+    }
+
+    #[test]
     fn test_function_call_output_missing_output_errors() {
         let fco = make_item(ItemType::FunctionCallOutput);
         // output is None → should error
@@ -680,6 +1037,34 @@ mod tests {
         assert_eq!(msgs[0]["role"], "assistant");
         assert_eq!(msgs[0]["reasoning_content"], "I should call the tool");
         assert!(msgs[0]["tool_calls"].as_array().unwrap().len() == 1);
+    }
+
+    #[test]
+    fn test_reasoning_followed_by_assistant_message_merged() {
+        let mut reasoning = make_item(ItemType::Reasoning);
+        reasoning.summary = Some(vec![SummaryPart {
+            part_type: "summary_text".into(),
+            text: "Let me think about this.".into(),
+        }]);
+
+        let mut asst = make_item(ItemType::Message);
+        asst.role = Some("assistant".into());
+        asst.content = Some(ItemContent::Parts(vec![ContentPart {
+            part_type: "output_text".into(),
+            text: Some("The answer is 4.".into()),
+            image_url: None,
+            detail: None,
+            annotations: Some(Vec::new()),
+        }]));
+
+        let req = make_request(vec![reasoning, asst]);
+        let body = build_chat_request(&req, false).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0]["role"], "assistant");
+        assert_eq!(msgs[0]["reasoning_content"], "Let me think about this.");
+        assert_eq!(msgs[0]["content"], "The answer is 4.");
     }
 
     #[test]
@@ -1081,6 +1466,59 @@ mod tests {
         assert_eq!(tool["function"]["strict"], true);
         assert!(tool.get("name").is_none());
         assert!(tool.get("parameters").is_none());
+    }
+
+    #[test]
+    fn test_responses_namespace_tools_flatten_to_chat_functions() {
+        let mut req = make_request(vec![]);
+        req.tools = vec![json!({
+            "type": "namespace",
+            "name": "mcp__arthas__",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "excelPeek",
+                    "description": "Peek Excel",
+                    "parameters": {"type": "object"}
+                },
+                {
+                    "type": "function",
+                    "name": "datasetRegister",
+                    "parameters": {"type": "object"}
+                }
+            ]
+        })];
+
+        let body = build_chat_request(&req, false).unwrap();
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert_eq!(
+            tools[0]["function"]["name"],
+            "mcp__arthas__responses_unit__excelPeek"
+        );
+        assert_eq!(
+            tools[1]["function"]["name"],
+            "mcp__arthas__responses_unit__datasetRegister"
+        );
+    }
+
+    #[test]
+    fn test_namespaced_function_call_encoded_for_chat() {
+        let mut fc = make_item(ItemType::FunctionCall);
+        fc.call_id = Some("call_1".into());
+        fc.namespace = Some("mcp__arthas__".into());
+        fc.name = Some("excelPeek".into());
+        fc.arguments = Some(r#"{"path":"a.xlsx"}"#.into());
+
+        let req = make_request(vec![fc]);
+        let body = build_chat_request(&req, false).unwrap();
+        let msgs = body["messages"].as_array().unwrap();
+        let call = &msgs[0]["tool_calls"][0];
+
+        assert_eq!(
+            call["function"]["name"],
+            "mcp__arthas__responses_unit__excelPeek"
+        );
     }
 
     #[test]

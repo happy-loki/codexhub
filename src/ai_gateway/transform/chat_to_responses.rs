@@ -42,11 +42,17 @@ pub fn convert_chat_response(
                 id: Some(generate_item_id()),
                 role: None,
                 content: None,
+                text: None,
                 name: None,
+                namespace: None,
                 call_id: None,
                 arguments: None,
+                input: None,
                 output: None,
                 status: Some("completed".into()),
+                image_url: None,
+                detail: None,
+                action: None,
                 summary: Some(vec![SummaryPart {
                     part_type: "summary_text".into(),
                     text: reasoning_content.to_string(),
@@ -67,11 +73,17 @@ pub fn convert_chat_response(
                 id: Some(generate_item_id()),
                 role: Some("assistant".into()),
                 content: Some(ItemContent::Parts(vec![ContentPart::output_text(content)])),
+                text: None,
                 name: None,
+                namespace: None,
                 call_id: None,
                 arguments: None,
+                input: None,
                 output: None,
                 status: Some("completed".into()),
+                image_url: None,
+                detail: None,
+                action: None,
                 summary: None,
                 encrypted_content: None,
             });
@@ -82,19 +94,31 @@ pub fn convert_chat_response(
     if let Some(tool_calls) = message.get("tool_calls").and_then(|v| v.as_array()) {
         for tc in tool_calls {
             let func = tc.get("function").unwrap_or(&Value::Null);
+            let raw_name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let (namespace, name) = decode_responses_function_call_name(raw_name);
             output.push(ResponseItem {
                 item_type: ItemType::FunctionCall,
                 id: Some(generate_item_id()),
                 role: None,
                 content: None,
-                name: func.get("name").and_then(|v| v.as_str()).map(|s| s.into()),
+                text: None,
+                name: if name.is_empty() {
+                    None
+                } else {
+                    Some(name.to_string())
+                },
+                namespace: namespace.map(str::to_string),
                 call_id: tc.get("id").and_then(|v| v.as_str()).map(|s| s.into()),
                 arguments: func
                     .get("arguments")
                     .and_then(|v| v.as_str())
                     .map(|s| s.into()),
+                input: None,
                 output: None,
                 status: Some("completed".into()),
+                image_url: None,
+                detail: None,
+                action: None,
                 summary: None,
                 encrypted_content: None,
             });
@@ -128,6 +152,22 @@ pub fn convert_chat_response(
         usage,
         error: None,
     })
+}
+
+const RESPONSES_MCP_NAMESPACE_UNIT_MARKER: &str = "responses_unit__";
+
+fn decode_responses_function_call_name(name: &str) -> (Option<&str>, &str) {
+    let Some(idx) = name.find(RESPONSES_MCP_NAMESPACE_UNIT_MARKER) else {
+        return (None, name);
+    };
+
+    let namespace = &name[..idx];
+    let tool_name = &name[idx + RESPONSES_MCP_NAMESPACE_UNIT_MARKER.len()..];
+    if namespace.is_empty() || tool_name.is_empty() || !namespace.starts_with("mcp__") {
+        return (None, name);
+    }
+
+    (Some(namespace), tool_name)
 }
 
 fn convert_usage(usage_val: Option<&Value>) -> Option<Usage> {
@@ -272,6 +312,36 @@ mod tests {
         assert_eq!(resp.output[0].item_type, ItemType::FunctionCall);
         assert_eq!(resp.output[0].name.as_deref(), Some("get_weather"));
         assert_eq!(resp.output[0].call_id.as_deref(), Some("call_abc"));
+    }
+
+    #[test]
+    fn test_namespaced_tool_call_response_restores_responses_namespace() {
+        let chat_resp = json!({
+            "model": "deepseek-v4-flash",
+            "created": 1700000000,
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_abc",
+                        "type": "function",
+                        "function": {
+                            "name": "mcp__arthas__responses_unit__excelPeek",
+                            "arguments": "{\"path\":\"a.xlsx\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let resp = convert_chat_response(&chat_resp, "deepseek-v4-flash").unwrap();
+
+        assert_eq!(resp.output.len(), 1);
+        assert_eq!(resp.output[0].item_type, ItemType::FunctionCall);
+        assert_eq!(resp.output[0].namespace.as_deref(), Some("mcp__arthas__"));
+        assert_eq!(resp.output[0].name.as_deref(), Some("excelPeek"));
     }
 
     #[test]

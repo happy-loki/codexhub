@@ -50,11 +50,17 @@ where
             id: None,
             role: None,
             content: Some(ItemContent::Text(s)),
+            text: None,
             name: None,
+            namespace: None,
             call_id: None,
             arguments: None,
+            input: None,
             output: None,
             status: None,
+            image_url: None,
+            detail: None,
+            action: None,
             summary: None,
             encrypted_content: None,
         }]),
@@ -78,20 +84,38 @@ pub struct ResponseItem {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<ItemContent>,
+    /// input_text / output_text 的顶层 text 字段。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Responses namespace tools use namespace + name and are flattened for Chat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub namespace: Option<String>,
     /// function_call / function_call_output 的 call_id。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub call_id: Option<String>,
     /// function_call 的参数 JSON 字符串。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub arguments: Option<String>,
-    /// function_call_output 的结果。
+    /// custom_tool_call 的 freeform input。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub output: Option<String>,
+    pub input: Option<String>,
+    /// function_call_output / custom_tool_call_output 的结果。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output: Option<FunctionCallOutput>,
     /// item 状态。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
+    /// input_image / image_generation_call 的图片 URL 或 data URL。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+    /// input_image 的 detail。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// web_search_call / image_generation_call 的 action 元数据。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action: Option<Value>,
     /// reasoning item 的 summary。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub summary: Option<Vec<SummaryPart>>,
@@ -109,6 +133,10 @@ pub enum ItemType {
     InputImage,
     FunctionCall,
     FunctionCallOutput,
+    CustomToolCall,
+    CustomToolCallOutput,
+    WebSearchCall,
+    ImageGenerationCall,
     Reasoning,
     OutputText,
     #[serde(other)]
@@ -134,6 +162,8 @@ pub struct ContentPart {
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     /// output_text 的 annotations。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub annotations: Option<Vec<Value>>,
@@ -145,6 +175,7 @@ impl ContentPart {
             part_type: "output_text".into(),
             text: Some(text.into()),
             image_url: None,
+            detail: None,
             annotations: Some(Vec::new()),
         }
     }
@@ -154,9 +185,66 @@ impl ContentPart {
             part_type: "summary_text".into(),
             text: Some(text.into()),
             image_url: None,
+            detail: None,
             annotations: None,
         }
     }
+}
+
+// ─── FunctionCallOutput ────────────────────────────────────────
+
+/// Responses API tool output is either a plain string or structured content items.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum FunctionCallOutput {
+    Text(String),
+    ContentItems(Vec<FunctionCallOutputContentItem>),
+}
+
+impl FunctionCallOutput {
+    pub fn to_chat_tool_content(&self) -> String {
+        match self {
+            Self::Text(text) => text.clone(),
+            Self::ContentItems(items) => items
+                .iter()
+                .filter_map(|item| {
+                    let item_type = item.item_type.as_str();
+                    if matches!(item_type, "input_text" | "output_text" | "text") {
+                        item.text.as_deref().filter(|text| !text.trim().is_empty())
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        }
+    }
+}
+
+impl From<String> for FunctionCallOutput {
+    fn from(value: String) -> Self {
+        Self::Text(value)
+    }
+}
+
+impl From<&str> for FunctionCallOutput {
+    fn from(value: &str) -> Self {
+        Self::Text(value.to_string())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FunctionCallOutputContentItem {
+    #[serde(rename = "type")]
+    pub item_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encrypted_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<Value>,
 }
 
 // ─── SummaryPart ───────────────────────────────────────────────
