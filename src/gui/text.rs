@@ -446,6 +446,64 @@ impl GuiText {
         }
     }
 
+    pub(super) fn request_log_clear_old(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "清理3天之外",
+            GuiLocale::EnUs => "Clear Older Than 3 Days",
+        }
+    }
+
+    pub(super) fn request_log_clear_all(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "清理所有",
+            GuiLocale::EnUs => "Clear All",
+        }
+    }
+
+    pub(super) fn request_log_clear_old_confirm_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "清理请求日志",
+            GuiLocale::EnUs => "Clear Request Logs",
+        }
+    }
+
+    pub(super) fn request_log_clear_old_confirm_message(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "确定删除3天之前的请求日志吗？此操作不可撤销。",
+            GuiLocale::EnUs => {
+                "Delete request logs older than 3 days? This action cannot be undone."
+            }
+        }
+    }
+
+    pub(super) fn request_log_clear_all_confirm_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "清理请求日志",
+            GuiLocale::EnUs => "Clear Request Logs",
+        }
+    }
+
+    pub(super) fn request_log_clear_all_confirm_message(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "确定删除所有请求日志吗？此操作不可撤销。",
+            GuiLocale::EnUs => "Delete all request logs? This action cannot be undone.",
+        }
+    }
+
+    pub(super) fn request_log_clear_done(self, deleted: usize) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("已清理 {deleted} 条请求日志"),
+            GuiLocale::EnUs => format!("Deleted {deleted} request logs"),
+        }
+    }
+
+    pub(super) fn request_log_clear_failed(self, err: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("清理请求日志失败：{err}"),
+            GuiLocale::EnUs => format!("Failed to clear request logs: {err}"),
+        }
+    }
+
     pub(super) fn request_log_detail_title(self, id: i64) -> String {
         match self.locale {
             GuiLocale::ZhCn => format!("请求日志详情 #{id}"),

@@ -79,6 +79,15 @@ impl ApiClient {
         self.parse_response(path, &body)
     }
 
+    pub(super) fn delete_with_timeout<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<T, String> {
+        let body = self.request_text(self.http.delete(self.url(path)).timeout(timeout))?;
+        self.parse_response(path, &body)
+    }
+
     pub(super) fn request_text(
         &self,
         request: reqwest::blocking::RequestBuilder,
@@ -255,6 +264,18 @@ impl ApiClient {
             GUI_CONFIG_TIMEOUT,
         )
     }
+
+    pub(super) fn ai_gateway_clear_old_request_logs(
+        &self,
+    ) -> Result<ClearRequestLogsResponse, String> {
+        self.delete_with_timeout("/ai-gateway/request-logs/old?days=3", GUI_CONFIG_TIMEOUT)
+    }
+
+    pub(super) fn ai_gateway_clear_all_request_logs(
+        &self,
+    ) -> Result<ClearRequestLogsResponse, String> {
+        self.delete_with_timeout("/ai-gateway/request-logs", GUI_CONFIG_TIMEOUT)
+    }
 }
 
 fn join_optional<T>(handle: thread::JoinHandle<Option<T>>) -> Option<T> {
@@ -346,6 +367,12 @@ fn default_true() -> bool {
 pub(super) struct RequestLogsResponse {
     #[serde(default)]
     pub(super) logs: Vec<RequestLogItem>,
+}
+
+#[derive(Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ClearRequestLogsResponse {
+    pub(super) deleted: usize,
 }
 
 #[derive(Clone, Default, Deserialize, PartialEq)]

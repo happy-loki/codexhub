@@ -278,6 +278,19 @@ pub fn list_recent(db_path: &Path, limit: usize) -> rusqlite::Result<Vec<Request
     Ok(logs)
 }
 
+pub fn delete_older_than(db_path: &Path, cutoff_ms: i64) -> rusqlite::Result<usize> {
+    let conn = open(db_path)?;
+    conn.execute(
+        "DELETE FROM ai_gateway_request_logs WHERE created_at_ms < ?1",
+        params![cutoff_ms],
+    )
+}
+
+pub fn delete_all(db_path: &Path) -> rusqlite::Result<usize> {
+    let conn = open(db_path)?;
+    conn.execute("DELETE FROM ai_gateway_request_logs", [])
+}
+
 pub fn get_detail(db_path: &Path, id: i64) -> rusqlite::Result<Option<RequestLogDetail>> {
     let conn = open(db_path)?;
     conn.query_row(
@@ -753,6 +766,75 @@ mod tests {
             detail.response_json.as_deref(),
             Some(r#"{"status":"completed"}"#)
         );
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn sqlite_delete_older_than_keeps_recent_logs() {
+        let db_path = std::env::temp_dir().join(format!(
+            "codex-remote-request-log-test-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let now = now_ms();
+        for (request_id, created_at_ms) in [("old", now - 5_000), ("recent", now)] {
+            let record = RequestLogRecord {
+                request_id: request_id.to_string(),
+                model_id: "deepseek-v4-flash".to_string(),
+                stream: true,
+                channel: "deepseek".to_string(),
+                provider_type: "chat_completions".to_string(),
+                status: "completed".to_string(),
+                usage: LogUsage::default(),
+                cost_usd: None,
+                latency_ms: None,
+                ttft_ms: None,
+                created_at_ms,
+                error_message: None,
+                request_json: None,
+                upstream_request_json: None,
+                response_json: None,
+            };
+            insert_record(&db_path, &record).unwrap();
+        }
+
+        let deleted = delete_older_than(&db_path, now - 1_000).unwrap();
+        assert_eq!(deleted, 1);
+        let logs = list_recent(&db_path, 10).unwrap();
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].request_id, "recent");
+        let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn sqlite_delete_all_removes_every_log() {
+        let db_path = std::env::temp_dir().join(format!(
+            "codex-remote-request-log-test-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        for request_id in ["req-1", "req-2"] {
+            let record = RequestLogRecord {
+                request_id: request_id.to_string(),
+                model_id: "deepseek-v4-flash".to_string(),
+                stream: true,
+                channel: "deepseek".to_string(),
+                provider_type: "chat_completions".to_string(),
+                status: "completed".to_string(),
+                usage: LogUsage::default(),
+                cost_usd: None,
+                latency_ms: None,
+                ttft_ms: None,
+                created_at_ms: now_ms(),
+                error_message: None,
+                request_json: None,
+                upstream_request_json: None,
+                response_json: None,
+            };
+            insert_record(&db_path, &record).unwrap();
+        }
+
+        let deleted = delete_all(&db_path).unwrap();
+        assert_eq!(deleted, 2);
+        assert!(list_recent(&db_path, 10).unwrap().is_empty());
         let _ = std::fs::remove_file(db_path);
     }
 

@@ -138,6 +138,11 @@ pub struct RequestLogsQuery {
     limit: Option<usize>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ClearOldRequestLogsQuery {
+    days: Option<u64>,
+}
+
 /// GET /ai-gateway/request-logs
 pub async fn handle_request_logs(
     State(state): State<SharedState>,
@@ -149,6 +154,43 @@ pub async fn handle_request_logs(
 
     match request_log::list_recent(&db_path, query.limit.unwrap_or(200)) {
         Ok(logs) => Json(json!({ "logs": logs })).into_response(),
+        Err(err) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// DELETE /ai-gateway/request-logs
+pub async fn handle_clear_request_logs(State(state): State<SharedState>) -> impl IntoResponse {
+    let config = state.config.lock().await;
+    let db_path = request_log::database_path(&config);
+    drop(config);
+
+    match request_log::delete_all(&db_path) {
+        Ok(deleted) => Json(json!({ "deleted": deleted })).into_response(),
+        Err(err) => (
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+/// DELETE /ai-gateway/request-logs/old?days=3
+pub async fn handle_clear_old_request_logs(
+    State(state): State<SharedState>,
+    Query(query): Query<ClearOldRequestLogsQuery>,
+) -> impl IntoResponse {
+    let config = state.config.lock().await;
+    let db_path = request_log::database_path(&config);
+    drop(config);
+
+    let days = query.days.unwrap_or(3).clamp(1, 3650);
+    let cutoff_ms = request_log::now_ms().saturating_sub((days as i64) * 24 * 60 * 60 * 1000);
+    match request_log::delete_older_than(&db_path, cutoff_ms) {
+        Ok(deleted) => Json(json!({ "deleted": deleted })).into_response(),
         Err(err) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({ "error": err.to_string() })),

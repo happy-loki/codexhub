@@ -58,6 +58,7 @@ type ImActionResultStore = Arc<Mutex<Option<ImActionResult>>>;
 type RequestLogResultStore = Arc<Mutex<Option<Result<Vec<RequestLogItem>, String>>>>;
 type RequestLogDetailResultStore =
     Arc<Mutex<Option<(i64, Result<self::api::RequestLogDetail, String>)>>>;
+type RequestLogClearResultStore = Arc<Mutex<Option<Result<usize, String>>>>;
 
 mod ai_gateway;
 mod api;
@@ -618,8 +619,19 @@ fn build_ui() {
         .with_label(text.request_log_open_hint())
         .build();
     request_log_hint.set_foreground_color(Colour::rgb(64, 72, 86));
-    request_logs_sizer.add(
-        &request_log_hint,
+    let request_log_clear_old_button = Button::builder(&request_logs_page)
+        .with_label(text.request_log_clear_old())
+        .build();
+    let request_log_clear_all_button = Button::builder(&request_logs_page)
+        .with_label(text.request_log_clear_all())
+        .build();
+    let request_log_toolbar = BoxSizer::builder(Orientation::Horizontal).build();
+    request_log_toolbar.add(&request_log_hint, 0, SizerFlag::AlignCenterVertical, 0);
+    request_log_toolbar.add_stretch_spacer(1);
+    request_log_toolbar.add(&request_log_clear_old_button, 0, SizerFlag::Right, 8);
+    request_log_toolbar.add(&request_log_clear_all_button, 0, SizerFlag::Right, 0);
+    request_logs_sizer.add_sizer(
+        &request_log_toolbar,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
         10,
@@ -1172,6 +1184,8 @@ fn build_ui() {
     let request_log_in_flight = Arc::new(AtomicBool::new(false));
     let request_log_detail_result: RequestLogDetailResultStore = Arc::new(Mutex::new(None));
     let request_log_detail_in_flight = Arc::new(AtomicBool::new(false));
+    let request_log_clear_result: RequestLogClearResultStore = Arc::new(Mutex::new(None));
+    let request_log_clear_in_flight = Arc::new(AtomicBool::new(false));
     {
         let api = api.clone();
         let handles = handles.clone();
@@ -1190,6 +1204,66 @@ fn build_ui() {
             );
         });
     }
+    {
+        let api = api.clone();
+        let frame = frame;
+        let text = handles.text;
+        let request_log_clear_result = request_log_clear_result.clone();
+        let request_log_clear_in_flight = request_log_clear_in_flight.clone();
+        request_log_clear_old_button.on_click(move |_| {
+            if request_log_clear_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            if !confirm_clear_old_request_logs(&frame, text) {
+                request_log_clear_in_flight.store(false, Ordering::SeqCst);
+                return;
+            }
+            request_log_clear_old_button.enable(false);
+            request_log_clear_all_button.enable(false);
+            let thread_api = api.clone();
+            let request_log_clear_result = request_log_clear_result.clone();
+            let request_log_clear_in_flight = request_log_clear_in_flight.clone();
+            thread::spawn(move || {
+                let outcome = thread_api
+                    .ai_gateway_clear_old_request_logs()
+                    .map(|response| response.deleted);
+                if let Ok(mut slot) = request_log_clear_result.lock() {
+                    slot.replace(outcome);
+                }
+                request_log_clear_in_flight.store(false, Ordering::SeqCst);
+            });
+        });
+    }
+    {
+        let api = api.clone();
+        let frame = frame;
+        let text = handles.text;
+        let request_log_clear_result = request_log_clear_result.clone();
+        let request_log_clear_in_flight = request_log_clear_in_flight.clone();
+        request_log_clear_all_button.on_click(move |_| {
+            if request_log_clear_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            if !confirm_clear_all_request_logs(&frame, text) {
+                request_log_clear_in_flight.store(false, Ordering::SeqCst);
+                return;
+            }
+            request_log_clear_old_button.enable(false);
+            request_log_clear_all_button.enable(false);
+            let thread_api = api.clone();
+            let request_log_clear_result = request_log_clear_result.clone();
+            let request_log_clear_in_flight = request_log_clear_in_flight.clone();
+            thread::spawn(move || {
+                let outcome = thread_api
+                    .ai_gateway_clear_all_request_logs()
+                    .map(|response| response.deleted);
+                if let Ok(mut slot) = request_log_clear_result.lock() {
+                    slot.replace(outcome);
+                }
+                request_log_clear_in_flight.store(false, Ordering::SeqCst);
+            });
+        });
+    }
     force_request_log_refresh(&api, &request_log_result, &request_log_in_flight);
 
     let request_log_timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
@@ -1200,9 +1274,19 @@ fn build_ui() {
         let request_log_result = request_log_result.clone();
         let request_log_in_flight = request_log_in_flight.clone();
         let request_log_detail_result = request_log_detail_result.clone();
+        let request_log_clear_result = request_log_clear_result.clone();
         request_log_timer.on_tick(move |_| {
             apply_pending_request_logs(&handles, &request_log_result);
             apply_pending_request_log_detail(&frame, &handles, &request_log_detail_result);
+            if apply_pending_request_log_clear(
+                &frame,
+                handles.text,
+                &request_log_clear_old_button,
+                &request_log_clear_all_button,
+                &request_log_clear_result,
+            ) {
+                force_request_log_refresh(&api, &request_log_result, &request_log_in_flight);
+            }
             schedule_request_log_refresh(&api, &request_log_result, &request_log_in_flight);
         });
     }
@@ -2610,6 +2694,31 @@ fn apply_pending_request_logs(handles: &UiHandles, result_store: &RequestLogResu
     }
 }
 
+fn apply_pending_request_log_clear(
+    frame: &Frame,
+    text: GuiText,
+    clear_old_button: &Button,
+    clear_all_button: &Button,
+    result_store: &RequestLogClearResultStore,
+) -> bool {
+    let result = result_store.lock().ok().and_then(|mut slot| slot.take());
+    let Some(result) = result else {
+        return false;
+    };
+    clear_old_button.enable(true);
+    clear_all_button.enable(true);
+    match result {
+        Ok(deleted) => {
+            show_info(frame, &text.request_log_clear_done(deleted));
+            true
+        }
+        Err(err) => {
+            show_error(frame, &text.request_log_clear_failed(&err));
+            false
+        }
+    }
+}
+
 fn remote_connection_ready(remote: Option<&RemoteControlStatus>, source_kind: &str) -> bool {
     remote
         .map(|remote| {
@@ -2737,6 +2846,30 @@ fn confirm_delete_im_account(parent: &dyn WxWidget, text: GuiText, account_name:
         parent,
         &text.confirm_delete_im_account_message(account_name),
         text.confirm_delete_im_account_title(),
+    )
+    .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
+    .build()
+    .show_modal()
+        == ID_YES
+}
+
+fn confirm_clear_old_request_logs(parent: &dyn WxWidget, text: GuiText) -> bool {
+    MessageDialog::builder(
+        parent,
+        text.request_log_clear_old_confirm_message(),
+        text.request_log_clear_old_confirm_title(),
+    )
+    .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
+    .build()
+    .show_modal()
+        == ID_YES
+}
+
+fn confirm_clear_all_request_logs(parent: &dyn WxWidget, text: GuiText) -> bool {
+    MessageDialog::builder(
+        parent,
+        text.request_log_clear_all_confirm_message(),
+        text.request_log_clear_all_confirm_title(),
     )
     .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
     .build()
