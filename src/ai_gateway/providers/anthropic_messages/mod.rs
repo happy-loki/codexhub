@@ -22,6 +22,12 @@ use super::{apply_total_request_timeout, execute_stream_start, map_upstream_resp
 mod request;
 mod response;
 mod stream;
+mod stream_events;
+mod stream_items;
+mod stream_message;
+mod stream_response;
+mod stream_state;
+mod stream_tools;
 mod types;
 
 #[cfg(test)]
