@@ -292,7 +292,7 @@ fn extract_custom_tool_input(input: &Value) -> String {
 }
 
 fn convert_usage_value(usage: &Value) -> Usage {
-    let input = usage
+    let uncached_input = usage
         .get("input_tokens")
         .and_then(Value::as_i64)
         .unwrap_or(0);
@@ -304,17 +304,34 @@ fn convert_usage_value(usage: &Value) -> Usage {
         .get("cache_read_input_tokens")
         .and_then(Value::as_i64)
         .unwrap_or(0);
+    let cache_creation = anthropic_cache_creation_input_tokens(usage);
+    let input = uncached_input + cached + cache_creation;
     Usage {
         input_tokens: input,
         output_tokens: output,
         total_tokens: input + output,
         input_tokens_details: Some(InputTokensDetails {
             cached_tokens: cached,
+            cache_creation_tokens: cache_creation,
         }),
         output_tokens_details: Some(OutputTokensDetails {
             reasoning_tokens: 0,
         }),
     }
+}
+
+fn anthropic_cache_creation_input_tokens(usage: &Value) -> i64 {
+    usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            usage.get("cache_creation").and_then(|cache_creation| {
+                cache_creation
+                    .as_object()
+                    .map(|fields| fields.values().filter_map(Value::as_i64).sum::<i64>())
+            })
+        })
+        .unwrap_or(0)
 }
 
 fn chrono_timestamp() -> i64 {

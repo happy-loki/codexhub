@@ -209,7 +209,8 @@ fn converts_anthropic_text_response() {
         "usage": {
             "input_tokens": 10,
             "output_tokens": 3,
-            "cache_read_input_tokens": 4
+            "cache_read_input_tokens": 4,
+            "cache_creation_input_tokens": 6
         }
     });
 
@@ -225,10 +226,43 @@ fn converts_anthropic_text_response() {
     assert_eq!(parts[0].part_type, "output_text");
     assert_eq!(parts[0].text.as_deref(), Some("hello back"));
     let usage = converted.usage.unwrap();
-    assert_eq!(usage.input_tokens, 10);
+    assert_eq!(usage.input_tokens, 20);
     assert_eq!(usage.output_tokens, 3);
-    assert_eq!(usage.total_tokens, 13);
-    assert_eq!(usage.input_tokens_details.unwrap().cached_tokens, 4);
+    assert_eq!(usage.total_tokens, 23);
+    let details = usage.input_tokens_details.unwrap();
+    assert_eq!(details.cached_tokens, 4);
+    assert_eq!(details.cache_creation_tokens, 6);
+}
+
+#[test]
+fn converts_anthropic_cache_creation_breakdown_usage() {
+    let response = json!({
+        "id": "msg_123",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4-6",
+        "content": [{"type": "text", "text": "hello back"}],
+        "stop_reason": "end_turn",
+        "usage": {
+            "input_tokens": 9,
+            "output_tokens": 73,
+            "cache_read_input_tokens": 5699,
+            "cache_creation": {
+                "ephemeral_5m_input_tokens": 100,
+                "ephemeral_1h_input_tokens": 25
+            }
+        }
+    });
+
+    let converted =
+        convert_anthropic_response(&response, "fallback-model", &ToolNameMap::default());
+    let usage = converted.usage.unwrap();
+    assert_eq!(usage.input_tokens, 5833);
+    assert_eq!(usage.output_tokens, 73);
+    assert_eq!(usage.total_tokens, 5906);
+    let details = usage.input_tokens_details.unwrap();
+    assert_eq!(details.cached_tokens, 5699);
+    assert_eq!(details.cache_creation_tokens, 125);
 }
 
 #[test]
@@ -414,7 +448,7 @@ async fn streams_anthropic_thinking_as_responses_reasoning_sse() {
 async fn streams_anthropic_text_as_responses_sse() {
     let input = stream::iter(vec![
             Ok::<_, std::io::Error>(Bytes::from_static(
-                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0,\"cache_read_input_tokens\":3,\"cache_creation_input_tokens\":4}}}\n\n",
             )),
             Ok(Bytes::from_static(
                 b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
@@ -453,8 +487,16 @@ async fn streams_anthropic_text_as_responses_sse() {
         .find(|(event, _)| event == "response.completed")
         .unwrap();
     assert_eq!(completed.1["response"]["id"], "msg_1");
-    assert_eq!(completed.1["response"]["usage"]["input_tokens"], 2);
+    assert_eq!(completed.1["response"]["usage"]["input_tokens"], 9);
     assert_eq!(completed.1["response"]["usage"]["output_tokens"], 1);
+    assert_eq!(
+        completed.1["response"]["usage"]["input_tokens_details"]["cached_tokens"],
+        3
+    );
+    assert_eq!(
+        completed.1["response"]["usage"]["input_tokens_details"]["cache_creation_tokens"],
+        4
+    );
 }
 
 #[tokio::test]

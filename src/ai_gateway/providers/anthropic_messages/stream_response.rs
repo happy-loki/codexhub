@@ -133,12 +133,24 @@ impl AnthropicStreamState {
             .unwrap_or(0);
         existing["total_tokens"] = json!(input + output);
 
-        if let Some(cached) = usage
-            .get("input_tokens_details")
-            .and_then(|details| details.get("cached_tokens"))
-            .and_then(Value::as_i64)
-        {
-            existing["input_tokens_details"]["cached_tokens"] = json!(cached);
-        }
+        merge_input_detail(existing, &usage, "cached_tokens");
+        merge_input_detail(existing, &usage, "cache_creation_tokens");
+    }
+}
+
+fn merge_input_detail(existing: &mut Value, usage: &Value, field: &str) {
+    let Some(value) = usage
+        .get("input_tokens_details")
+        .and_then(|details| details.get(field))
+        .and_then(Value::as_i64)
+    else {
+        return;
+    };
+    let current = existing
+        .get("input_tokens_details")
+        .and_then(|details| details.get(field))
+        .and_then(Value::as_i64);
+    if value != 0 || current.is_none() {
+        existing["input_tokens_details"][field] = json!(value);
     }
 }

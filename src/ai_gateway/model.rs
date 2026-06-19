@@ -444,12 +444,18 @@ pub struct Usage {
 pub struct InputTokensDetails {
     #[serde(default)]
     pub cached_tokens: i64,
+    #[serde(default, skip_serializing_if = "is_zero_i64")]
+    pub cache_creation_tokens: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputTokensDetails {
     #[serde(default)]
     pub reasoning_tokens: i64,
+}
+
+fn is_zero_i64(value: &i64) -> bool {
+    *value == 0
 }
 
 // ─── 生成 gateway response id ──────────────────────────────────
