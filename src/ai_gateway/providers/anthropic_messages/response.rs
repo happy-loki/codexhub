@@ -13,12 +13,7 @@ pub(super) fn convert_anthropic_response(
     let output = response
         .get("content")
         .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|item| anthropic_content_to_response_item(item, tool_name_map))
-                .collect()
-        })
+        .map(|items| convert_anthropic_content(items, tool_name_map))
         .unwrap_or_default();
     let usage = response.get("usage").map(convert_usage_value);
     let status = match response.get("stop_reason").and_then(Value::as_str) {
@@ -44,6 +39,20 @@ pub(super) fn convert_anthropic_response(
         usage,
         error: None,
     }
+}
+
+fn convert_anthropic_content(items: &[Value], tool_name_map: &ToolNameMap) -> Vec<ResponseItem> {
+    let mut output = Vec::new();
+    for item in items {
+        if item.get("type").and_then(Value::as_str) == Some("web_search_tool_result") {
+            attach_web_search_result(&mut output, item);
+            continue;
+        }
+        if let Some(item) = anthropic_content_to_response_item(item, tool_name_map) {
+            output.push(item);
+        }
+    }
+    output
 }
 
 fn anthropic_content_to_response_item(
@@ -222,58 +231,78 @@ fn anthropic_content_to_response_item(
                 encrypted_content: None,
             })
         }
-        "web_search_tool_result" => Some(ResponseItem {
-            item_type: ItemType::WebSearchCall,
-            id: item
-                .get("tool_use_id")
-                .and_then(Value::as_str)
-                .map(str::to_string)
-                .or_else(|| Some(generate_item_id())),
-            role: None,
-            content: None,
-            text: None,
-            name: None,
-            namespace: None,
-            call_id: item
-                .get("tool_use_id")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            arguments: None,
-            input: None,
-            output: None,
-            status: Some(
-                if item
-                    .get("is_error")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    "failed"
-                } else {
-                    "completed"
-                }
-                .to_string(),
-            ),
-            execution: None,
-            tools: None,
-            image_url: None,
-            detail: None,
-            action: Some(json!({
-                "type": "web_search_tool_result",
-                "tool_use_id": item.get("tool_use_id").cloned().unwrap_or(Value::Null),
-                "content": item.get("content").cloned().unwrap_or(Value::Null),
-                "is_error": item.get("is_error").cloned().unwrap_or(Value::Bool(false)),
-            })),
-            summary: None,
-            encrypted_content: None,
-        }),
+        "web_search_tool_result" => None,
         _ => None,
     }
 }
 
+fn attach_web_search_result(output: &mut Vec<ResponseItem>, item: &Value) {
+    let tool_use_id = item.get("tool_use_id").and_then(Value::as_str);
+    let failed = item
+        .get("is_error")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let result = json!({
+        "type": "web_search_tool_result",
+        "tool_use_id": item.get("tool_use_id").cloned().unwrap_or(Value::Null),
+        "content": item.get("content").cloned().unwrap_or(Value::Null),
+        "is_error": item.get("is_error").cloned().unwrap_or(Value::Bool(false)),
+    });
+
+    if let Some(existing) = tool_use_id.and_then(|tool_use_id| {
+        output
+            .iter_mut()
+            .find(|candidate| candidate.call_id.as_deref() == Some(tool_use_id))
+    }) {
+        existing.status = Some(if failed { "failed" } else { "completed" }.to_string());
+        let mut action = existing
+            .action
+            .take()
+            .unwrap_or_else(|| json!({"type": "search", "query": ""}));
+        if let Some(action) = action.as_object_mut() {
+            action.insert("result".to_string(), result);
+        }
+        existing.action = Some(action);
+        return;
+    }
+
+    output.push(ResponseItem {
+        item_type: ItemType::WebSearchCall,
+        id: tool_use_id
+            .map(str::to_string)
+            .or_else(|| Some(generate_item_id())),
+        role: None,
+        content: None,
+        text: None,
+        name: None,
+        namespace: None,
+        call_id: tool_use_id.map(str::to_string),
+        arguments: None,
+        input: None,
+        output: None,
+        status: Some(if failed { "failed" } else { "completed" }.to_string()),
+        execution: None,
+        tools: None,
+        image_url: None,
+        detail: None,
+        action: Some(json!({
+            "type": "search",
+            "query": "",
+            "result": result,
+        })),
+        summary: None,
+        encrypted_content: None,
+    });
+}
+
 fn server_tool_action(item: &Value) -> Value {
     json!({
-        "type": "web_search",
-        "input": item.get("input").cloned().unwrap_or_else(|| json!({})),
+        "type": "search",
+        "query": item
+            .get("input")
+            .and_then(|input| input.get("query"))
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
     })
 }
 

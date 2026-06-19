@@ -130,9 +130,13 @@ pub(super) fn web_search_item(
     input: Value,
     result: Option<Value>,
 ) -> Value {
+    let query = input
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
     let mut action = json!({
-        "type": "web_search",
-        "input": input,
+        "type": "search",
+        "query": query,
     });
     if let Some(result) = result {
         action["result"] = result;

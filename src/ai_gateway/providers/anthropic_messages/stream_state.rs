@@ -106,7 +106,7 @@ impl AnthropicStreamState {
             Some("redacted_thinking") => {
                 self.handle_redacted_thinking(block.get("data").and_then(Value::as_str));
             }
-            Some("web_search_tool_result") => self.attach_web_search_result(index, block),
+            Some("web_search_tool_result") => self.attach_web_search_result(index, block, queue),
             _ => {}
         }
     }
@@ -135,7 +135,11 @@ impl AnthropicStreamState {
             Some("input_json_delta") => {
                 self.close_reasoning_item(queue);
                 if let Some(partial_json) = delta.get("partial_json").and_then(Value::as_str) {
-                    self.handle_tool_delta(index, partial_json, queue);
+                    if self.web_search_blocks.contains_key(&index) {
+                        self.handle_web_search_delta(index, partial_json);
+                    } else {
+                        self.handle_tool_delta(index, partial_json, queue);
+                    }
                 }
             }
             _ => {}
@@ -146,9 +150,6 @@ impl AnthropicStreamState {
         let index = event.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
         if self.content_blocks.contains_key(&index) {
             self.close_tool_block(index, queue);
-        }
-        if self.web_search_blocks.contains_key(&index) {
-            self.close_web_search_block(index, queue);
         }
     }
 }

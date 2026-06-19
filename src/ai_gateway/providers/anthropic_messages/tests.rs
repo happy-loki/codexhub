@@ -198,6 +198,23 @@ fn builds_anthropic_web_search_server_tool() {
 }
 
 #[test]
+fn preserves_native_anthropic_web_search_server_tool() {
+    let mut req = request(vec![message("user", "latest rust news")]);
+    req.tools = vec![json!({
+        "type": ANTHROPIC_WEB_SEARCH_TYPE,
+        "name": "web_search",
+        "max_uses": 3,
+        "allowed_domains": ["www.rust-lang.org"]
+    })];
+
+    let (body, _) = build_anthropic_request(&req, None).unwrap();
+    assert_eq!(body["tools"][0]["type"], ANTHROPIC_WEB_SEARCH_TYPE);
+    assert_eq!(body["tools"][0]["name"], "web_search");
+    assert_eq!(body["tools"][0]["max_uses"], 3);
+    assert_eq!(body["tools"][0]["allowed_domains"][0], "www.rust-lang.org");
+}
+
+#[test]
 fn builds_anthropic_thinking_from_reasoning() {
     let mut req = request(vec![message("user", "think carefully")]);
     req.reasoning = Some(Reasoning {
@@ -374,16 +391,15 @@ fn converts_anthropic_server_web_search_response() {
 
     let converted =
         convert_anthropic_response(&response, "fallback-model", &ToolNameMap::default());
-    assert_eq!(converted.output.len(), 2);
+    assert_eq!(converted.output.len(), 1);
     assert_eq!(converted.output[0].item_type, ItemType::WebSearchCall);
     assert_eq!(converted.output[0].call_id.as_deref(), Some("srvtoolu_123"));
     assert_eq!(
-        converted.output[0].action.as_ref().unwrap()["input"]["query"],
+        converted.output[0].action.as_ref().unwrap()["query"],
         "rust 2026"
     );
-    assert_eq!(converted.output[1].item_type, ItemType::WebSearchCall);
     assert_eq!(
-        converted.output[1].action.as_ref().unwrap()["content"][0]["url"],
+        converted.output[0].action.as_ref().unwrap()["result"]["content"][0]["url"],
         "https://www.rust-lang.org"
     );
 }
@@ -572,13 +588,19 @@ async fn streams_anthropic_web_search_as_responses_sse() {
                 b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
             )),
             Ok(Bytes::from_static(
-                b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtoolu_1\",\"name\":\"web_search\",\"input\":{\"query\":\"rust 2026\"}}}\n\n",
+                b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"srvtoolu_1\",\"name\":\"web_search\",\"input\":{}}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\": \\\"rust 2026\\\"}\"}}\n\n",
+            )),
+            Ok(Bytes::from_static(
+                b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
             )),
             Ok(Bytes::from_static(
                 b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"web_search_tool_result\",\"tool_use_id\":\"srvtoolu_1\",\"content\":[{\"type\":\"web_search_result\",\"title\":\"Rust\",\"url\":\"https://www.rust-lang.org\"}]}}\n\n",
             )),
             Ok(Bytes::from_static(
-                b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":1}\n\n",
             )),
             Ok(Bytes::from_static(
                 b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
@@ -611,7 +633,8 @@ async fn streams_anthropic_web_search_as_responses_sse() {
         })
         .unwrap();
     assert_eq!(done.1["item"]["call_id"], "srvtoolu_1");
-    assert_eq!(done.1["item"]["action"]["input"]["query"], "rust 2026");
+    assert_eq!(done.1["item"]["action"]["type"], "search");
+    assert_eq!(done.1["item"]["action"]["query"], "rust 2026");
     assert_eq!(
         done.1["item"]["action"]["result"]["content"][0]["url"],
         "https://www.rust-lang.org"

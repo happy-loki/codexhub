@@ -57,6 +57,11 @@ pub(super) fn build_anthropic_tools(
                         .map(|tool| vec![tool])
                         .unwrap_or_default()
                 }
+                Some(tool_type) if tool_type == ANTHROPIC_WEB_SEARCH_TYPE => {
+                    build_anthropic_web_search_tool(obj)
+                        .map(|tool| vec![tool])
+                        .unwrap_or_default()
+                }
                 _ => Vec::new(),
             }
         })
