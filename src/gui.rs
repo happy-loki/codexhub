@@ -391,13 +391,6 @@ fn build_ui() {
         DataViewColumnFlags::Resizable,
     );
     ai_gw_provider_list.associate_model(&*ai_gw_provider_model.borrow());
-    ai_gw_list_section.add(
-        &ai_gw_provider_list,
-        1,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
-        10,
-    );
-
     let ai_gw_new_button = Button::builder(&ai_gw_list_box)
         .with_label(text.ai_gw_add_channel())
         .build();
@@ -415,6 +408,12 @@ fn build_ui() {
     ai_gw_list_section.add_sizer(
         &ai_gw_list_actions,
         0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
+        10,
+    );
+    ai_gw_list_section.add(
+        &ai_gw_provider_list,
+        1,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
         10,
     );
