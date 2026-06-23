@@ -1740,18 +1740,6 @@ fn show_ai_gw_channel_dialog(
     panel.set_background_color(theme::theme().bg_card_alt);
     let root = BoxSizer::builder(Orientation::Vertical).build();
 
-    let title = StaticText::builder(&panel)
-        .with_label(text.ai_gw_channel_editor())
-        .build();
-    title.set_foreground_color(theme::theme().ink_primary);
-    title.set_font(&theme::font(theme::TextRole::Title));
-    root.add(
-        &title,
-        0,
-        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
-        18,
-    );
-
     let help = StaticText::builder(&panel)
         .with_label(text.ai_gw_channel_editor_help())
         .build();
