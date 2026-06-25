@@ -195,6 +195,85 @@ fn builds_anthropic_tool_result_message() {
 }
 
 #[test]
+fn builds_anthropic_tool_search_result_message_and_loaded_tools() {
+    let mut search = message("assistant", "ignored");
+    search.item_type = ItemType::ToolSearchCall;
+    search.content = None;
+    search.call_id = Some("tooluse_search_1".to_string());
+    search.execution = Some("client".to_string());
+    search.arguments = Some(crate::ai_gateway::model::JsonString::Value(json!({
+        "query": "web search browse internet news sports"
+    })));
+
+    let mut output = message("user", "ignored");
+    output.item_type = ItemType::ToolSearchOutput;
+    output.content = None;
+    output.call_id = Some("tooluse_search_1".to_string());
+    output.execution = Some("client".to_string());
+    output.status = Some("completed".to_string());
+    output.tools = Some(vec![json!({
+        "description": "Tools provided by the Codex app.",
+        "name": "codex_app",
+        "tools": [{
+            "defer_loading": true,
+            "description": "List recent Codex threads across the local host and connected remote hosts.",
+            "name": "list_threads",
+            "parameters": {
+                "additionalProperties": false,
+                "properties": {
+                    "limit": {"type": "number"},
+                    "query": {"type": "string"}
+                },
+                "type": "object"
+            },
+            "strict": false,
+            "type": "function"
+        }],
+        "type": "namespace"
+    })]);
+
+    let (body, map) = build_anthropic_request(
+        &request(vec![
+            message("user", "today world cup results"),
+            search,
+            output,
+        ]),
+        AnthropicProviderProfile::Anthropic,
+        None,
+    )
+    .unwrap();
+
+    assert_eq!(body["messages"][1]["role"], "assistant");
+    assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
+    assert_eq!(body["messages"][1]["content"][0]["id"], "tooluse_search_1");
+    assert_eq!(body["messages"][1]["content"][0]["name"], "tool_search");
+    assert_eq!(
+        body["messages"][1]["content"][0]["input"]["query"],
+        "web search browse internet news sports"
+    );
+    assert_eq!(body["messages"][2]["role"], "user");
+    assert_eq!(body["messages"][2]["content"][0]["type"], "tool_result");
+    assert_eq!(
+        body["messages"][2]["content"][0]["tool_use_id"],
+        "tooluse_search_1"
+    );
+    let result: Value = serde_json::from_str(
+        body["messages"][2]["content"][0]["content"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(result["status"], "completed");
+    assert_eq!(result["execution"], "client");
+    assert_eq!(result["tools"][0]["name"], "codex_app");
+
+    assert_eq!(body["tools"][0]["name"], "codex_app__codexns__list_threads");
+    let decoded = map.decode("codex_app__codexns__list_threads");
+    assert_eq!(decoded.namespace.as_deref(), Some("codex_app"));
+    assert_eq!(decoded.name, "list_threads");
+}
+
+#[test]
 fn builds_anthropic_tools_and_tool_choice() {
     let mut req = request(vec![message("user", "search docs")]);
     req.tools = vec![json!({

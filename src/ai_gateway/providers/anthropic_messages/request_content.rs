@@ -24,19 +24,29 @@ pub(super) fn build_anthropic_messages(
                     }));
                 }
             }
-            ItemType::FunctionCallOutput | ItemType::CustomToolCallOutput => {
+            ItemType::FunctionCallOutput
+            | ItemType::ToolSearchOutput
+            | ItemType::CustomToolCallOutput => {
                 let call_id = item.call_id.as_deref().unwrap_or("");
                 if call_id.is_empty() {
                     return Err(GatewayError::bad_request(
                         "anthropic_messages requires tool output call_id",
                     ));
                 }
+                let content = match item.item_type {
+                    ItemType::ToolSearchOutput => tool_search_output_to_anthropic_content(item),
+                    _ => item
+                        .output
+                        .as_ref()
+                        .map(|output| output.to_chat_tool_content())
+                        .unwrap_or_default(),
+                };
                 messages.push(json!({
                     "role": "user",
                     "content": [{
                         "type": "tool_result",
                         "tool_use_id": call_id,
-                        "content": item.output.as_ref().map(|output| output.to_chat_tool_content()).unwrap_or_default(),
+                        "content": content,
                     }],
                 }));
             }
@@ -58,6 +68,15 @@ pub(super) fn build_anthropic_messages(
         ));
     }
     Ok(messages)
+}
+
+fn tool_search_output_to_anthropic_content(item: &ResponseItem) -> String {
+    serde_json::to_string(&json!({
+        "status": item.status.as_deref().unwrap_or("completed"),
+        "execution": item.execution.as_deref().unwrap_or("client"),
+        "tools": item.tools.clone().unwrap_or_default(),
+    }))
+    .unwrap_or_else(|_| "{\"tools\":[]}".to_string())
 }
 
 fn response_tool_call_to_anthropic(
