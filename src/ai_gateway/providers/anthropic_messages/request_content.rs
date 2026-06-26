@@ -1,7 +1,10 @@
 use serde_json::{Value, json};
 
 use crate::ai_gateway::error::GatewayError;
-use crate::ai_gateway::model::{ContentPart, ItemContent, ItemType, JsonString, ResponseItem};
+use crate::ai_gateway::model::{
+    ContentPart, FunctionCallOutput, FunctionCallOutputContentItem, ItemContent, ItemType,
+    JsonString, ResponseItem,
+};
 use crate::ai_gateway::tool_names::ToolNameMap;
 
 pub(super) fn build_anthropic_messages(
@@ -34,12 +37,14 @@ pub(super) fn build_anthropic_messages(
                     ));
                 }
                 let content = match item.item_type {
-                    ItemType::ToolSearchOutput => tool_search_output_to_anthropic_content(item),
+                    ItemType::ToolSearchOutput => {
+                        Value::String(tool_search_output_to_anthropic_content(item))
+                    }
                     _ => item
                         .output
                         .as_ref()
-                        .map(|output| output.to_chat_tool_content())
-                        .unwrap_or_default(),
+                        .map(function_call_output_to_anthropic_content)
+                        .unwrap_or_else(|| Value::String(String::new())),
                 };
                 messages.push(json!({
                     "role": "user",
@@ -77,6 +82,43 @@ fn tool_search_output_to_anthropic_content(item: &ResponseItem) -> String {
         "tools": item.tools.clone().unwrap_or_default(),
     }))
     .unwrap_or_else(|_| "{\"tools\":[]}".to_string())
+}
+
+fn function_call_output_to_anthropic_content(output: &FunctionCallOutput) -> Value {
+    match output {
+        FunctionCallOutput::Text(text) => Value::String(text.clone()),
+        FunctionCallOutput::ContentItems(items) if tool_output_items_are_text_only(items) => {
+            Value::String(output.to_chat_tool_content())
+        }
+        FunctionCallOutput::ContentItems(items) => {
+            let blocks = items
+                .iter()
+                .filter_map(tool_output_content_item_to_anthropic)
+                .collect::<Vec<_>>();
+            if blocks.is_empty() {
+                Value::String(output.to_chat_tool_content())
+            } else {
+                Value::Array(blocks)
+            }
+        }
+    }
+}
+
+fn tool_output_items_are_text_only(items: &[FunctionCallOutputContentItem]) -> bool {
+    items.iter().all(|item| {
+        matches!(
+            item.item_type.as_str(),
+            "input_text" | "output_text" | "text"
+        )
+    })
+}
+
+fn tool_output_content_item_to_anthropic(item: &FunctionCallOutputContentItem) -> Option<Value> {
+    match item.item_type.as_str() {
+        "input_text" | "output_text" | "text" => text_block(item.text.as_deref().unwrap_or("")),
+        "input_image" | "image_url" => image_block(item.image_url.as_deref().unwrap_or(""), None),
+        _ => None,
+    }
 }
 
 fn response_tool_call_to_anthropic(

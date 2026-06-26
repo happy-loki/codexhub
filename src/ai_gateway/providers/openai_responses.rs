@@ -16,7 +16,7 @@ use crate::ai_gateway::request_log::{
 
 use super::{
     apply_total_request_timeout, ensure_success_response, execute_stream_start,
-    map_upstream_response,
+    execute_upstream_request,
 };
 
 /// OpenAI Responses API 透传：补齐 cache 字段后代理到上游。
@@ -92,10 +92,13 @@ pub async fn passthrough(
         )
         .await?
     } else {
-        map_upstream_response(
-            client.execute(upstream_req).await,
+        execute_upstream_request(
+            client,
+            upstream_req,
+            provider.timeout_secs,
             "upstream request failed",
-        )?
+        )
+        .await?
     };
 
     let upstream_resp = ensure_success_response(&provider.name, upstream_resp).await?;

@@ -22,7 +22,7 @@ use crate::ai_gateway::transform::responses_to_chat::build_chat_request_with_too
 
 use super::{
     apply_total_request_timeout, ensure_success_response, execute_stream_start,
-    map_upstream_response,
+    execute_upstream_request,
 };
 
 /// DeepSeek Chat Completions 出站处理。
@@ -84,10 +84,13 @@ pub async fn handle(
         )
         .await?
     } else {
-        map_upstream_response(
-            client.execute(upstream_req).await,
+        execute_upstream_request(
+            client,
+            upstream_req,
+            provider.timeout_secs,
             "deepseek upstream request failed",
-        )?
+        )
+        .await?
     };
 
     let upstream_resp = ensure_success_response(&provider.name, upstream_resp).await?;

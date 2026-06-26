@@ -19,7 +19,7 @@ use crate::ai_gateway::tool_names::ToolNameMap;
 
 use super::{
     apply_total_request_timeout, ensure_success_response, execute_stream_start,
-    map_upstream_response,
+    execute_upstream_request,
 };
 
 mod citations;
@@ -109,10 +109,13 @@ pub async fn handle(
         )
         .await?
     } else {
-        map_upstream_response(
-            client.execute(upstream_req).await,
+        execute_upstream_request(
+            client,
+            upstream_req,
+            provider.timeout_secs,
             "anthropic upstream request failed",
-        )?
+        )
+        .await?
     };
     let upstream_resp = ensure_success_response(&provider.name, upstream_resp).await?;
 

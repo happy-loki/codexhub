@@ -5,9 +5,11 @@ pub mod openai_responses;
 use std::{error::Error as _, time::Duration};
 
 use axum::http::StatusCode;
-use tracing::error;
+use tracing::{error, warn};
 
 use crate::ai_gateway::error::GatewayError;
+
+const UPSTREAM_TRANSPORT_MAX_RETRIES: usize = 2;
 
 pub(super) fn apply_total_request_timeout(
     builder: reqwest::RequestBuilder,
@@ -27,30 +29,86 @@ pub(super) async fn execute_stream_start(
     timeout_secs: u64,
     error_log: &'static str,
 ) -> Result<reqwest::Response, GatewayError> {
-    let response = tokio::time::timeout(provider_timeout(timeout_secs), client.execute(request))
-        .await
-        .map_err(|_| GatewayError::upstream_timeout())?;
-    map_upstream_response(response, error_log)
+    execute_upstream_request(client, request, timeout_secs, error_log).await
 }
 
-pub(super) fn map_upstream_response(
-    response: Result<reqwest::Response, reqwest::Error>,
+pub(super) async fn execute_upstream_request(
+    client: &reqwest::Client,
+    request: reqwest::Request,
+    timeout_secs: u64,
     error_log: &'static str,
 ) -> Result<reqwest::Response, GatewayError> {
-    response.map_err(|err| {
-        if err.is_timeout() {
-            GatewayError::upstream_timeout()
-        } else {
-            error!(error = %err, "{error_log}");
-            GatewayError::upstream(
+    let retry_template = request.try_clone();
+    let mut next_request = Some(request);
+    let mut retry_count = 0usize;
+
+    loop {
+        let Some(request) = next_request.take() else {
+            return Err(GatewayError::upstream(
                 StatusCode::BAD_GATEWAY,
-                format!("upstream error: {}", reqwest_error_summary(&err)),
-            )
+                "upstream request could not be retried",
+            ));
+        };
+
+        let response =
+            tokio::time::timeout(provider_timeout(timeout_secs), client.execute(request))
+                .await
+                .map_err(|_| GatewayError::upstream_timeout())?;
+
+        match response {
+            Ok(response) => return Ok(response),
+            Err(err) => {
+                if should_retry_transport_error(&err)
+                    && retry_count < UPSTREAM_TRANSPORT_MAX_RETRIES
+                    && let Some(template) = retry_template.as_ref()
+                    && let Some(retry_request) = template.try_clone()
+                {
+                    retry_count += 1;
+                    warn!(
+                        error = %reqwest_error_summary(&err),
+                        retry_count,
+                        max_retries = UPSTREAM_TRANSPORT_MAX_RETRIES,
+                        "{error_log}; retrying upstream transport error"
+                    );
+                    tokio::time::sleep(upstream_transport_retry_delay(retry_count)).await;
+                    next_request = Some(retry_request);
+                    continue;
+                }
+
+                return Err(map_reqwest_error(err, error_log));
+            }
         }
-    })
+    }
 }
 
-fn reqwest_error_summary(err: &reqwest::Error) -> String {
+fn map_reqwest_error(err: reqwest::Error, error_log: &'static str) -> GatewayError {
+    if err.is_timeout() {
+        GatewayError::upstream_timeout()
+    } else {
+        error!(error = %err, "{error_log}");
+        GatewayError::upstream(
+            StatusCode::BAD_GATEWAY,
+            format!("upstream error: {}", reqwest_error_summary(&err)),
+        )
+    }
+}
+
+fn should_retry_transport_error(err: &reqwest::Error) -> bool {
+    err.status().is_none()
+        && !err.is_timeout()
+        && !err.is_decode()
+        && (err.is_request() || err.is_connect() || err.is_body())
+}
+
+fn upstream_transport_retry_delay(retry_count: usize) -> Duration {
+    match retry_count {
+        0 | 1 => Duration::from_millis(200),
+        2 => Duration::from_millis(500),
+        _ => Duration::from_millis(1000),
+    }
+}
+
+pub(super) fn reqwest_error_summary(err: &reqwest::Error) -> String {
     let mut parts = vec![err.to_string()];
     if err.is_connect() {
         parts.push("kind=connect".to_string());

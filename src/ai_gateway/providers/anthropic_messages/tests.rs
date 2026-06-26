@@ -195,6 +195,80 @@ fn builds_anthropic_tool_result_message() {
 }
 
 #[test]
+fn builds_anthropic_tool_result_with_image_content_blocks() {
+    let image_url = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD";
+    let output = image_tool_result("toolu_image", image_url);
+
+    let (body, _) = build_anthropic_request(
+        &request(vec![message("user", "run"), output]),
+        AnthropicProviderProfile::Anthropic,
+        None,
+    )
+    .unwrap();
+
+    assert_anthropic_tool_result_image_content(&body);
+}
+
+#[test]
+fn builds_glm_tool_result_with_image_content_blocks() {
+    let image_url = "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD";
+    let output = image_tool_result("toolu_image", image_url);
+
+    let (body, _) = build_anthropic_request(
+        &request(vec![message("user", "run"), output]),
+        AnthropicProviderProfile::GlmAnthropic,
+        None,
+    )
+    .unwrap();
+
+    assert_anthropic_tool_result_image_content(&body);
+}
+
+fn image_tool_result(call_id: &str, image_url: &str) -> ResponseItem {
+    let mut output = message("user", "ignored");
+    output.item_type = ItemType::FunctionCallOutput;
+    output.content = None;
+    output.call_id = Some(call_id.to_string());
+    output.output = Some(FunctionCallOutput::ContentItems(vec![
+        FunctionCallOutputContentItem {
+            item_type: "input_text".to_string(),
+            text: Some("Wall time: 0.0060 seconds\nOutput:".to_string()),
+            image_url: None,
+            encrypted_content: None,
+            detail: None,
+        },
+        FunctionCallOutputContentItem {
+            item_type: "input_text".to_string(),
+            text: Some("有的！这是B站搜索结果的截图：".to_string()),
+            image_url: None,
+            encrypted_content: None,
+            detail: None,
+        },
+        FunctionCallOutputContentItem {
+            item_type: "input_image".to_string(),
+            text: None,
+            image_url: Some(image_url.to_string()),
+            encrypted_content: None,
+            detail: Some(json!("original")),
+        },
+    ]));
+    output
+}
+
+fn assert_anthropic_tool_result_image_content(body: &Value) {
+    let content = &body["messages"][1]["content"][0]["content"];
+    assert!(content.is_array());
+    assert_eq!(content[0]["type"], "text");
+    assert_eq!(content[0]["text"], "Wall time: 0.0060 seconds\nOutput:");
+    assert_eq!(content[1]["type"], "text");
+    assert_eq!(content[1]["text"], "有的！这是B站搜索结果的截图：");
+    assert_eq!(content[2]["type"], "image");
+    assert_eq!(content[2]["source"]["type"], "base64");
+    assert_eq!(content[2]["source"]["media_type"], "image/jpeg");
+    assert_eq!(content[2]["source"]["data"], "/9j/4AAQSkZJRgABAQAAAQABAAD");
+}
+
+#[test]
 fn builds_anthropic_tool_search_result_message_and_loaded_tools() {
     let mut search = message("assistant", "ignored");
     search.item_type = ItemType::ToolSearchCall;
