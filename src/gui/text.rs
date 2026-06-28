@@ -1826,6 +1826,48 @@ impl GuiText {
         }
     }
 
+    pub(super) fn update_download_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "下载更新",
+            GuiLocale::EnUs => "Downloading Update",
+        }
+    }
+
+    pub(super) fn update_download_preparing(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "正在连接下载服务器…",
+            GuiLocale::EnUs => "Connecting to the download server...",
+        }
+    }
+
+    pub(super) fn update_download_progress(self, downloaded: &str, total: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("正在下载更新包… {downloaded} / {total}"),
+            GuiLocale::EnUs => format!("Downloading the update... {downloaded} / {total}"),
+        }
+    }
+
+    pub(super) fn update_download_progress_unknown(self, downloaded: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("正在下载更新包… 已下载 {downloaded}"),
+            GuiLocale::EnUs => format!("Downloading the update... {downloaded} downloaded"),
+        }
+    }
+
+    pub(super) fn update_download_verifying(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "下载完成，正在校验更新包…",
+            GuiLocale::EnUs => "Download complete. Verifying the update...",
+        }
+    }
+
+    pub(super) fn update_download_cancelled(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "已取消更新下载。",
+            GuiLocale::EnUs => "The update download was cancelled.",
+        }
+    }
+
     pub(super) fn update_download_failed(self, url: &str, err: &str) -> String {
         match self.locale {
             GuiLocale::ZhCn => format!("下载更新包失败：{err}\n地址：{url}"),

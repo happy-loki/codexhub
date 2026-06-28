@@ -8,7 +8,7 @@ use std::{
     rc::Rc,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
 };
@@ -26,6 +26,8 @@ use super::{
     UPDATE_MANIFEST_URL, UPDATE_RELEASE_API_URL, UPDATE_RELEASE_PAGE_URL,
 };
 use super::{confirm_open_update_release, show_error, show_info};
+
+const DOWNLOAD_PROGRESS_RESOLUTION: i32 = 1000;
 
 #[derive(Debug)]
 struct LatestReleaseInfo {
@@ -98,6 +100,31 @@ struct UpdateDownload {
 struct DownloadedUpdate {
     path: PathBuf,
     url: String,
+}
+
+#[derive(Default)]
+struct DownloadProgress {
+    downloaded: AtomicU64,
+    total: AtomicU64,
+    cancel: AtomicBool,
+    result: Mutex<Option<Result<DownloadedUpdate, String>>>,
+}
+
+impl DownloadProgress {
+    fn snapshot(&self) -> (u64, u64) {
+        (
+            self.downloaded.load(Ordering::Relaxed),
+            self.total.load(Ordering::Relaxed),
+        )
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel.load(Ordering::Relaxed)
+    }
+
+    fn take_result(&self) -> Option<Result<DownloadedUpdate, String>> {
+        self.result.lock().ok().and_then(|mut slot| slot.take())
+    }
 }
 
 pub(super) fn check_for_updates_async(
@@ -455,21 +482,32 @@ fn download_and_install_update_async(
     text: GuiText,
     download: UpdateDownload,
 ) {
-    show_info(parent, text.update_download_started());
-
-    let result: Arc<Mutex<Option<Result<DownloadedUpdate, String>>>> = Arc::new(Mutex::new(None));
+    let progress = Arc::new(DownloadProgress::default());
     {
-        let result = result.clone();
+        let progress = progress.clone();
         thread::spawn(move || {
-            let update = download_update(text, &download).and_then(|update| {
+            let update = download_update(text, &download, &progress).and_then(|update| {
+                if progress.is_cancelled() {
+                    return Err(text.update_download_cancelled().to_string());
+                }
                 launch_downloaded_update(text, &update)?;
                 Ok(update)
             });
-            if let Ok(mut slot) = result.lock() {
+            if let Ok(mut slot) = progress.result.lock() {
                 slot.replace(update);
             }
         });
     }
+
+    let dialog = ProgressDialog::builder(
+        parent,
+        text.update_download_title(),
+        text.update_download_preparing(),
+        DOWNLOAD_PROGRESS_RESOLUTION,
+    )
+    .can_abort()
+    .smooth()
+    .build();
 
     let timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
     let timer = Timer::new(parent);
@@ -477,29 +515,59 @@ fn download_and_install_update_async(
         let parent = *parent;
         let timer_store = timer_store.clone();
         timer.on_tick(move |_| {
-            let update = result.lock().ok().and_then(|mut slot| slot.take());
-            let Some(update) = update else {
-                return;
-            };
-
-            if let Some(timer) = timer_store.borrow().as_ref() {
-                timer.stop();
+            // User pressed Cancel on the progress dialog: tell the worker to stop.
+            if dialog.was_cancelled() {
+                progress.cancel.store(true, Ordering::Relaxed);
             }
-            match update {
-                Ok(update) => show_info(
-                    &parent,
-                    &text.update_installer_started(&update.path.display().to_string()),
-                ),
-                Err(err) => show_error(&parent, &text.update_failed(&err)),
+
+            if let Some(result) = progress.take_result() {
+                if let Some(timer) = timer_store.borrow().as_ref() {
+                    timer.stop();
+                }
+                dialog.update(DOWNLOAD_PROGRESS_RESOLUTION, None);
+                match result {
+                    Ok(update) => show_info(
+                        &parent,
+                        &text.update_installer_started(&update.path.display().to_string()),
+                    ),
+                    Err(err) => {
+                        if progress.is_cancelled() {
+                            show_info(&parent, text.update_download_cancelled());
+                        } else {
+                            show_error(&parent, &text.update_failed(&err));
+                        }
+                    }
+                }
+                return;
+            }
+
+            let (downloaded, total) = progress.snapshot();
+            if total > 0 {
+                let ratio = (downloaded as f64 / total as f64).clamp(0.0, 1.0);
+                let value = (ratio * DOWNLOAD_PROGRESS_RESOLUTION as f64).round() as i32;
+                let message = text.update_download_progress(
+                    &format_download_bytes(downloaded),
+                    &format_download_bytes(total),
+                );
+                dialog.update(value.min(DOWNLOAD_PROGRESS_RESOLUTION - 1), Some(&message));
+            } else {
+                // Server did not report Content-Length: keep the bar pulsing.
+                let message =
+                    text.update_download_progress_unknown(&format_download_bytes(downloaded));
+                dialog.pulse(Some(&message));
             }
         });
     }
-    timer.start(250, false);
+    timer.start(150, false);
     timer_store.borrow_mut().replace(timer);
     gui_timers.track(&timer_store);
 }
 
-fn download_update(text: GuiText, download: &UpdateDownload) -> Result<DownloadedUpdate, String> {
+fn download_update(
+    text: GuiText,
+    download: &UpdateDownload,
+    progress: &DownloadProgress,
+) -> Result<DownloadedUpdate, String> {
     let url = download.url.trim();
     if url.is_empty() {
         return Err(text.empty_download_url().to_string());
@@ -520,6 +588,10 @@ fn download_update(text: GuiText, download: &UpdateDownload) -> Result<Downloade
         return Err(text.update_download_http_failed(url, &status.to_string()));
     }
 
+    if let Some(total) = response.content_length() {
+        progress.total.store(total, Ordering::Relaxed);
+    }
+
     let target_path = update_download_path(url, download.asset_type.as_deref())?;
     if let Some(parent) = target_path.parent() {
         fs::create_dir_all(parent).map_err(|err| {
@@ -532,7 +604,13 @@ fn download_update(text: GuiText, download: &UpdateDownload) -> Result<Downloade
     })?;
     let mut hasher = Sha256::new();
     let mut buffer = [0u8; 64 * 1024];
+    let mut downloaded: u64 = 0;
     loop {
+        if progress.is_cancelled() {
+            drop(file);
+            let _ = fs::remove_file(&target_path);
+            return Err(text.update_download_cancelled().to_string());
+        }
         let read = response
             .read(&mut buffer)
             .map_err(|err| text.update_download_failed(url, &err.to_string()))?;
@@ -543,6 +621,8 @@ fn download_update(text: GuiText, download: &UpdateDownload) -> Result<Downloade
             text.update_download_failed(&target_path.display().to_string(), &err.to_string())
         })?;
         hasher.update(&buffer[..read]);
+        downloaded += read as u64;
+        progress.downloaded.store(downloaded, Ordering::Relaxed);
     }
 
     let actual_sha256 = format!("{:x}", hasher.finalize());
@@ -556,6 +636,19 @@ fn download_update(text: GuiText, download: &UpdateDownload) -> Result<Downloade
         path: target_path,
         url: url.to_string(),
     })
+}
+
+fn format_download_bytes(bytes: u64) -> String {
+    const MIB: f64 = 1024.0 * 1024.0;
+    const KIB: f64 = 1024.0;
+    let bytes_f = bytes as f64;
+    if bytes_f >= MIB {
+        format!("{:.1} MB", bytes_f / MIB)
+    } else if bytes_f >= KIB {
+        format!("{:.0} KB", bytes_f / KIB)
+    } else {
+        format!("{bytes} B")
+    }
 }
 
 fn update_download_path(url: &str, asset_type: Option<&str>) -> Result<PathBuf, String> {
