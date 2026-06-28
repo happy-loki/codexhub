@@ -3054,11 +3054,12 @@ fn model_mapping_rows_from_config(
     upstream_models: &[String],
     aliases: &BTreeMap<String, String>,
 ) -> Vec<ModelMappingRow> {
+    let aliases = with_inferred_model_aliases(upstream_models, aliases);
     let mut rows: Vec<ModelMappingRow> = upstream_models
         .iter()
         .map(|upstream_model| ModelMappingRow {
             upstream_model: upstream_model.clone(),
-            codex_models: aliases_for_upstream_model(aliases, upstream_model),
+            codex_models: aliases_for_upstream_model(&aliases, upstream_model),
         })
         .collect();
     for upstream_model in aliases.values() {
@@ -3071,7 +3072,7 @@ fn model_mapping_rows_from_config(
         }
         rows.push(ModelMappingRow {
             upstream_model: upstream_model.clone(),
-            codex_models: aliases_for_upstream_model(aliases, upstream_model),
+            codex_models: aliases_for_upstream_model(&aliases, upstream_model),
         });
     }
     rows
@@ -3135,6 +3136,17 @@ fn build_model_aliases_for_save(
     explicit_aliases
 }
 
+fn with_inferred_model_aliases(
+    models: &[String],
+    aliases: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    let mut merged = aliases.clone();
+    for (codex_model, upstream_model) in inferred_model_aliases(models) {
+        merged.entry(codex_model).or_insert(upstream_model);
+    }
+    merged
+}
+
 fn inferred_model_aliases(models: &[String]) -> BTreeMap<String, String> {
     let mut aliases = BTreeMap::new();
     for model in models {
@@ -3147,7 +3159,49 @@ fn inferred_model_aliases(models: &[String]) -> BTreeMap<String, String> {
 }
 
 fn canonical_model_alias_key(model: &str) -> String {
-    model.trim().to_ascii_lowercase()
+    match model.trim().to_ascii_lowercase().as_str() {
+        "claude-opus-4-8" => "opus-4.8".to_string(),
+        "claude-sonnet-4-6" => "sonnet-4.6".to_string(),
+        model => model.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod model_mapping_tests {
+    use super::*;
+
+    #[test]
+    fn infers_anthropic_claude_model_aliases() {
+        let models = vec![
+            "claude-opus-4-8".to_string(),
+            "claude-sonnet-4-6".to_string(),
+        ];
+
+        let aliases = inferred_model_aliases(&models);
+
+        assert_eq!(
+            aliases.get("opus-4.8").map(String::as_str),
+            Some("claude-opus-4-8")
+        );
+        assert_eq!(
+            aliases.get("sonnet-4.6").map(String::as_str),
+            Some("claude-sonnet-4-6")
+        );
+    }
+
+    #[test]
+    fn shows_inferred_anthropic_aliases_in_mapping_rows() {
+        let models = vec![
+            "claude-opus-4-8".to_string(),
+            "claude-sonnet-4-6".to_string(),
+        ];
+        let rows = model_mapping_rows_from_config(&models, &BTreeMap::new());
+
+        assert_eq!(rows[0].upstream_model, "claude-opus-4-8");
+        assert_eq!(rows[0].codex_models, vec!["opus-4.8"]);
+        assert_eq!(rows[1].upstream_model, "claude-sonnet-4-6");
+        assert_eq!(rows[1].codex_models, vec!["sonnet-4.6"]);
+    }
 }
 
 fn fetch_remote_models(
