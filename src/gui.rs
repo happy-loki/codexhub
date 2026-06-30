@@ -11,6 +11,7 @@ use std::{
     time::Duration,
 };
 
+use tokio::sync::mpsc as tokio_mpsc;
 use wxdragon::widgets::dataview::{
     CustomDataViewVirtualListModel, DataViewAlign, DataViewColumnFlags, DataViewCtrl, Variant,
 };
@@ -52,7 +53,9 @@ const UPDATE_RELEASE_API_URL: &str =
     "https://api.github.com/repos/happy-loki/codexhub/releases/latest";
 const UPDATE_RELEASE_PAGE_URL: &str = "https://github.com/happy-loki/codexhub/releases/latest";
 const DASHBOARD_REFRESH_INTERVAL_MS: i32 = 2500;
-const DASHBOARD_RESULT_POLL_MS: i32 = 100;
+/// Poll interval for the short-lived "fetch models" dialog timer. This timer
+/// only runs while that modal dialog is open, so it does not affect idle CPU.
+const DIALOG_RESULT_POLL_MS: i32 = 150;
 const GUI_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const GUI_STATUS_TIMEOUT: Duration = Duration::from_millis(650);
 const GUI_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
@@ -80,12 +83,19 @@ type ModelMappingRows = Rc<RefCell<Vec<ModelMappingRow>>>;
 type ModelMappingModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
 
 type FrameTimerStore = Rc<RefCell<Option<Timer<Frame>>>>;
-type ImActionResultStore = Arc<Mutex<Option<ImActionResult>>>;
 type RequestLogResultStore = Arc<Mutex<Option<Result<Vec<RequestLogItem>, String>>>>;
 type RequestLogDetailResultStore =
     Arc<Mutex<Option<(i64, Result<self::api::RequestLogDetail, String>)>>>;
 type RequestLogClearResultStore = Arc<Mutex<Option<Result<usize, String>>>>;
 type FetchModelsResultStore = Arc<Mutex<Option<Result<(Vec<String>, String), String>>>>;
+
+/// Messages sent from background threads to the GUI thread via idle events
+enum GuiMessage {
+    CodexAction(CodexActionResult),
+    ImAction(ImActionResult),
+    AiGwAction(AiGwActionResult),
+    DashboardUpdate,
+}
 
 #[derive(Clone, PartialEq, Eq)]
 struct ModelMappingRow {
@@ -119,8 +129,8 @@ mod update;
 mod widgets;
 
 use self::ai_gateway::{
-    AiGwActionResult, AiGwActionResultStore, AiGwChannelToggle, AiGwProviderModel, AiGwProviderRow,
-    AiGwProviderRows, PendingAiGwChannelToggle, apply_pending_ai_gw_action, delete_ai_gw_provider,
+    AiGwActionResult, AiGwChannelToggle, AiGwProviderModel, AiGwProviderRow, AiGwProviderRows,
+    PendingAiGwChannelToggle, apply_pending_ai_gw_action, delete_ai_gw_provider,
     provider_logo_variant, provider_protocol_display, refresh_ai_gw_enable_logging,
     refresh_ai_gw_filter_image_generation, refresh_ai_gw_provider_list, save_ai_gw_provider,
     set_ai_gw_actions_enabled, set_ai_gw_provider_enabled, set_filter_image_generation_tool,
@@ -130,7 +140,7 @@ use self::api::{
     ApiClient, ConfigureTelegramBotRequest, DashboardSnapshot, DeleteImAccountRequest,
     RemoteControlStatus, RequestLogItem, SetImAccountEnabledRequest,
 };
-use self::codex_tab::{CodexActionResultStore, CodexTab};
+use self::codex_tab::{CodexActionResult, CodexTab};
 use self::daemon::{
     app_support_config_path, daemon_config_path, start_daemon_for_gui_async, stop_daemon_on_exit,
     stop_pending_startup_daemon,
@@ -266,6 +276,10 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     let api = ApiClient::new(default_base_url(), text);
     let gui_timers = GuiTimers::new();
 
+    // Event-driven async message handling: background threads send results over
+    // this channel and wake the idle loop, replacing the old polling timers.
+    let (gui_tx, gui_rx) = tokio_mpsc::unbounded_channel::<GuiMessage>();
+
     let frame = Frame::builder()
         .with_title("CodexHub")
         // Keep the first launch within smaller laptop work areas. The tab pages
@@ -299,6 +313,12 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
 
     let root = Panel::builder(&frame).build();
     root.set_background_color(app_theme.bg_app);
+    // wxMSW omits wxFULL_REPAINT_ON_RESIZE by default, so a resize only repaints
+    // the newly exposed strip and the rest of the window keeps stale pixels,
+    // smearing labels and bitmaps into vertical "ghost" streaks. Enable full
+    // repaint-on-resize for the frame, the root panel, and each notebook page.
+    enable_full_repaint_on_resize(&frame);
+    enable_full_repaint_on_resize(&root);
 
     let root_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
@@ -419,12 +439,14 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     let tab_icons = create_main_tab_icons(&notebook);
 
     let codex_tab = codex_tab::create(&notebook, text);
+    enable_full_repaint_on_resize(&codex_tab.page);
 
     // --- AI Gateway Tab ---
     let ai_gw_page = ScrolledWindow::builder(&notebook)
         .with_style(ScrolledWindowStyle::VScroll)
         .build();
     ai_gw_page.set_background_color(theme::theme().bg_card_alt);
+    enable_full_repaint_on_resize(&ai_gw_page);
     let ai_gw_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let (ai_gw_behavior_box, ai_gw_behavior_section) =
@@ -523,6 +545,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                             previous_enabled,
                         },
                     );
+                    wxdragon::wake_up_idle();
                     true
                 },
             ),
@@ -619,6 +642,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         .with_style(ScrolledWindowStyle::VScroll)
         .build();
     feishu_page.set_background_color(theme::theme().bg_card_alt);
+    enable_full_repaint_on_resize(&feishu_page);
     let feishu_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let im_access_hint = StaticText::builder(&feishu_page)
@@ -691,6 +715,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                             enabled,
                             previous_enabled,
                         });
+                    wxdragon::wake_up_idle();
                     true
                 },
             ),
@@ -806,6 +831,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     // --- Request Logs Tab ---
     let request_logs_page = Panel::builder(&notebook).build();
     request_logs_page.set_background_color(theme::theme().bg_card_alt);
+    enable_full_repaint_on_resize(&request_logs_page);
     let request_logs_sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let request_log_hint = StaticText::builder(&request_logs_page)
@@ -992,6 +1018,18 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     let frame_sizer = BoxSizer::builder(Orientation::Vertical).build();
     frame_sizer.add(&root, 1, SizerFlag::Expand, 0);
     frame.set_sizer(frame_sizer, true);
+    {
+        // Belt-and-suspenders for the resize ghosting: even with
+        // wxFULL_REPAINT_ON_RESIZE set above, force the whole client area to
+        // erase + repaint on every size event. wx coalesces these invalidations
+        // into a single paint, so this clears the vertical streaks without
+        // double-drawing or flicker.
+        let root = root;
+        frame.on_size(move |event| {
+            root.refresh(true, None);
+            event.skip(true);
+        });
+    }
 
     let handles = UiHandles {
         text,
@@ -1027,17 +1065,16 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     };
 
     let daemon_child: Rc<RefCell<Option<Child>>> = Rc::new(RefCell::new(None));
-    let dashboard_refresh = DashboardRefresh::new();
+    let dashboard_refresh = DashboardRefresh::new(gui_tx.clone());
     show_dashboard_starting(&handles);
 
-    let codex_action_result: CodexActionResultStore = Arc::new(Mutex::new(None));
     let codex_action_in_flight = Arc::new(AtomicBool::new(false));
     codex_tab::bind_actions(
         &api,
         &frame,
         &handles.codex_tab,
         &dashboard_refresh,
-        &codex_action_result,
+        &gui_tx,
         &codex_action_in_flight,
     );
 
@@ -1056,7 +1093,6 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         });
     }
 
-    let im_action_result: ImActionResultStore = Arc::new(Mutex::new(None));
     let im_action_in_flight = Arc::new(AtomicBool::new(false));
 
     {
@@ -1064,7 +1100,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
         let handles = handles.clone();
-        let im_action_result = im_action_result.clone();
+        let gui_tx = gui_tx.clone();
         let im_action_in_flight = im_action_in_flight.clone();
         delete_im_account_button.on_click(move |_| {
             if im_action_in_flight.swap(true, Ordering::SeqCst) {
@@ -1096,14 +1132,13 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                 account_id: account.account_id,
             };
             let thread_api = api.clone();
-            let im_action_result = im_action_result.clone();
+            let gui_tx = gui_tx.clone();
             let im_action_in_flight = im_action_in_flight.clone();
             thread::spawn(move || {
                 let outcome = thread_api.delete_im_account(&request);
-                if let Ok(mut slot) = im_action_result.lock() {
-                    slot.replace(ImActionResult::AccountDelete(outcome));
-                }
                 im_action_in_flight.store(false, Ordering::SeqCst);
+                let _ = gui_tx.send(GuiMessage::ImAction(ImActionResult::AccountDelete(outcome)));
+                wxdragon::wake_up_idle();
             });
             schedule_dashboard_refresh(&api, &dashboard_refresh);
         });
@@ -1114,7 +1149,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
         let handles = handles.clone();
-        let im_action_result = im_action_result.clone();
+        let gui_tx = gui_tx.clone();
         let im_action_in_flight = im_action_in_flight.clone();
         save_telegram_button.on_click(move |_| {
             if im_action_in_flight.swap(true, Ordering::SeqCst) {
@@ -1141,14 +1176,15 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                 bot_token: Some(token),
             };
             let thread_api = api.clone();
-            let im_action_result = im_action_result.clone();
+            let gui_tx = gui_tx.clone();
             let im_action_in_flight = im_action_in_flight.clone();
             thread::spawn(move || {
                 let outcome = thread_api.configure_telegram_bot(&request);
-                if let Ok(mut slot) = im_action_result.lock() {
-                    slot.replace(ImActionResult::TelegramConfigure(outcome));
-                }
                 im_action_in_flight.store(false, Ordering::SeqCst);
+                let _ = gui_tx.send(GuiMessage::ImAction(ImActionResult::TelegramConfigure(
+                    outcome,
+                )));
+                wxdragon::wake_up_idle();
             });
             schedule_dashboard_refresh(&api, &dashboard_refresh);
         });
@@ -1168,101 +1204,24 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         });
     }
 
-    let result_timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
-    let result_timer = Timer::new(&frame);
-    {
-        let handles = handles.clone();
-        let dashboard_refresh = dashboard_refresh.clone();
-        let api = api.clone();
-        let frame = frame;
-        let codex_action_result = codex_action_result.clone();
-        result_timer.on_tick(move |_| {
-            apply_pending_dashboard(&handles, &dashboard_refresh, &api, &frame);
-            codex_tab::apply_pending_action(
-                &api,
-                &handles.codex_tab,
-                handles.text,
-                &frame,
-                &dashboard_refresh,
-                &codex_action_result,
-            );
-        });
-    }
-    result_timer.start(DASHBOARD_RESULT_POLL_MS, false);
-    result_timer_store.borrow_mut().replace(result_timer);
-    gui_timers.track(&result_timer_store);
-
-    let im_action_timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
-    let im_action_timer = Timer::new(&frame);
-    {
-        let api = api.clone();
-        let handles = handles.clone();
-        let frame = frame;
-        let dashboard_refresh = dashboard_refresh.clone();
-        let im_action_result = im_action_result.clone();
-        let im_action_in_flight = im_action_in_flight.clone();
-        im_action_timer.on_tick(move |_| {
-            if !im_action_in_flight.load(Ordering::SeqCst)
-                && let Some(toggle) = handles.pending_im_toggle.borrow_mut().take()
-            {
-                if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
-                    revert_im_toggle(&handles, toggle.row, toggle.previous_enabled);
-                    return;
-                }
-                im_action_in_flight.store(true, Ordering::SeqCst);
-                let request = SetImAccountEnabledRequest {
-                    platform: toggle.platform,
-                    account_id: toggle.account_id,
-                    enabled: toggle.enabled,
-                };
-                let row = toggle.row;
-                let previous_enabled = toggle.previous_enabled;
-                let thread_api = api.clone();
-                let im_action_result = im_action_result.clone();
-                let im_action_in_flight = im_action_in_flight.clone();
-                thread::spawn(move || {
-                    let outcome = thread_api.set_im_account_enabled(&request);
-                    if let Ok(mut slot) = im_action_result.lock() {
-                        slot.replace(ImActionResult::AccountToggle {
-                            row,
-                            previous_enabled,
-                            result: outcome,
-                        });
-                    }
-                    im_action_in_flight.store(false, Ordering::SeqCst);
-                });
-            }
-            apply_pending_im_action(
-                &api,
-                &handles,
-                &frame,
-                &dashboard_refresh,
-                &im_action_result,
-            );
-        });
-    }
-    im_action_timer.start(DASHBOARD_RESULT_POLL_MS, false);
-    im_action_timer_store.borrow_mut().replace(im_action_timer);
-    gui_timers.track(&im_action_timer_store);
-
     // --- AI Gateway event handlers ---
-    let ai_gw_action_result: AiGwActionResultStore = Arc::new(Mutex::new(None));
     let ai_gw_action_in_flight = Arc::new(AtomicBool::new(false));
 
     {
         let api = api.clone();
         let dashboard_refresh = dashboard_refresh.clone();
-        let ai_gw_action_result = ai_gw_action_result.clone();
+        let gui_tx = gui_tx.clone();
         let input = handles.ai_gw_filter_image_generation;
         input.on_toggled(move |_| {
             let enabled = input.get_value();
             let worker_api = api.clone();
-            let ai_gw_action_result = ai_gw_action_result.clone();
+            let gui_tx = gui_tx.clone();
             thread::spawn(move || {
                 let outcome = set_filter_image_generation_tool(&worker_api, enabled);
-                if let Ok(mut slot) = ai_gw_action_result.lock() {
-                    slot.replace(AiGwActionResult::FilterImageGeneration(outcome));
-                }
+                let _ = gui_tx.send(GuiMessage::AiGwAction(
+                    AiGwActionResult::FilterImageGeneration(outcome),
+                ));
+                wxdragon::wake_up_idle();
             });
             schedule_dashboard_refresh(&api, &dashboard_refresh);
         });
@@ -1273,7 +1232,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
         let handles = handles.clone();
-        let ai_gw_action_result = ai_gw_action_result.clone();
+        let gui_tx = gui_tx.clone();
         let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
         ai_gw_new_button.on_click(move |_| {
             if ai_gw_action_in_flight.load(Ordering::SeqCst) {
@@ -1284,7 +1243,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                     &api,
                     &dashboard_refresh,
                     &handles,
-                    &ai_gw_action_result,
+                    &gui_tx,
                     &ai_gw_action_in_flight,
                     provider,
                 );
@@ -1297,7 +1256,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
         let handles = handles.clone();
-        let ai_gw_action_result = ai_gw_action_result.clone();
+        let gui_tx = gui_tx.clone();
         let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
         ai_gw_edit_button.on_click(move |_| {
             if ai_gw_action_in_flight.load(Ordering::SeqCst) {
@@ -1313,7 +1272,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                     &api,
                     &dashboard_refresh,
                     &handles,
-                    &ai_gw_action_result,
+                    &gui_tx,
                     &ai_gw_action_in_flight,
                     provider,
                 );
@@ -1326,7 +1285,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
         let handles = handles.clone();
-        let ai_gw_action_result = ai_gw_action_result.clone();
+        let gui_tx = gui_tx.clone();
         let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
         ai_gw_delete_button.on_click(move |_| {
             if ai_gw_action_in_flight.swap(true, Ordering::SeqCst) {
@@ -1344,13 +1303,12 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
             set_ai_gw_actions_enabled(&handles, false);
 
             let worker_api = api.clone();
-            let ai_gw_action_result = ai_gw_action_result.clone();
+            let gui_tx = gui_tx.clone();
             let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
             thread::spawn(move || {
                 let outcome = delete_ai_gw_provider(&worker_api, &name);
-                if let Ok(mut slot) = ai_gw_action_result.lock() {
-                    slot.replace(AiGwActionResult::Delete(outcome));
-                }
+                let _ = gui_tx.send(GuiMessage::AiGwAction(AiGwActionResult::Delete(outcome)));
+                wxdragon::wake_up_idle();
                 ai_gw_action_in_flight.store(false, Ordering::SeqCst);
             });
             schedule_dashboard_refresh(&api, &dashboard_refresh);
@@ -1362,7 +1320,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         let dashboard_refresh = dashboard_refresh.clone();
         let frame = frame;
         let handles = handles.clone();
-        let ai_gw_action_result = ai_gw_action_result.clone();
+        let gui_tx = gui_tx.clone();
         let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
         ai_gw_provider_list.on_item_activated(move |_| {
             if ai_gw_action_in_flight.load(Ordering::SeqCst) {
@@ -1378,7 +1336,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                     &api,
                     &dashboard_refresh,
                     &handles,
-                    &ai_gw_action_result,
+                    &gui_tx,
                     &ai_gw_action_in_flight,
                     provider,
                 );
@@ -1386,68 +1344,21 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         });
     }
 
-    let ai_gw_action_timer_store: FrameTimerStore = Rc::new(RefCell::new(None));
-    let ai_gw_action_timer = Timer::new(&frame);
-    {
-        let handles = handles.clone();
-        let frame = frame;
-        let dashboard_refresh = dashboard_refresh.clone();
-        let api = api.clone();
-        let ai_gw_action_result = ai_gw_action_result.clone();
-        let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
-        ai_gw_action_timer.on_tick(move |_| {
-            if !ai_gw_action_in_flight.load(Ordering::SeqCst)
-                && let Some(toggle) = handles.pending_ai_gw_channel_toggle.borrow_mut().take()
-            {
-                if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
-                    revert_ai_gw_toggle(&handles, toggle.row, toggle.previous_enabled);
-                    return;
-                }
-                ai_gw_action_in_flight.store(true, Ordering::SeqCst);
-                let row = toggle.row;
-                let previous_enabled = toggle.previous_enabled;
-                let name = toggle.name;
-                let enabled = toggle.enabled;
-                let worker_api = api.clone();
-                let ai_gw_action_result = ai_gw_action_result.clone();
-                let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
-                thread::spawn(move || {
-                    let outcome = set_ai_gw_provider_enabled(&worker_api, &name, enabled);
-                    if let Ok(mut slot) = ai_gw_action_result.lock() {
-                        slot.replace(AiGwActionResult::ChannelToggle {
-                            row,
-                            previous_enabled,
-                            result: outcome,
-                        });
-                    }
-                    ai_gw_action_in_flight.store(false, Ordering::SeqCst);
-                });
-            }
-            if apply_pending_ai_gw_action(&handles, &frame, &ai_gw_action_result) {
-                schedule_dashboard_refresh(&api, &dashboard_refresh);
-            }
-        });
-    }
-    ai_gw_action_timer.start(DASHBOARD_RESULT_POLL_MS, false);
-    ai_gw_action_timer_store
-        .borrow_mut()
-        .replace(ai_gw_action_timer);
-    gui_timers.track(&ai_gw_action_timer_store);
-
     // AI Gateway checkbox event handlers
     {
         let api = api.clone();
         let dashboard_refresh = dashboard_refresh.clone();
-        let ai_gw_action_result = ai_gw_action_result.clone();
+        let gui_tx = gui_tx.clone();
         ai_gw_filter_image_generation.on_toggled(move |event| {
             let enabled = event.is_checked();
             let worker_api = api.clone();
-            let ai_gw_action_result = ai_gw_action_result.clone();
+            let gui_tx = gui_tx.clone();
             thread::spawn(move || {
                 let outcome = set_filter_image_generation_tool(&worker_api, enabled);
-                if let Ok(mut slot) = ai_gw_action_result.lock() {
-                    slot.replace(AiGwActionResult::FilterImageGeneration(outcome));
-                }
+                let _ = gui_tx.send(GuiMessage::AiGwAction(
+                    AiGwActionResult::FilterImageGeneration(outcome),
+                ));
+                wxdragon::wake_up_idle();
             });
             schedule_dashboard_refresh(&api, &dashboard_refresh);
         });
@@ -1455,16 +1366,17 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     {
         let api = api.clone();
         let dashboard_refresh = dashboard_refresh.clone();
-        let ai_gw_action_result = ai_gw_action_result.clone();
+        let gui_tx = gui_tx.clone();
         ai_gw_enable_logging.on_toggled(move |event| {
             let enabled = event.is_checked();
             let worker_api = api.clone();
-            let ai_gw_action_result = ai_gw_action_result.clone();
+            let gui_tx = gui_tx.clone();
             thread::spawn(move || {
                 let outcome = set_request_logging_enabled(&worker_api, enabled);
-                if let Ok(mut slot) = ai_gw_action_result.lock() {
-                    slot.replace(AiGwActionResult::RequestLogging(outcome));
-                }
+                let _ = gui_tx.send(GuiMessage::AiGwAction(AiGwActionResult::RequestLogging(
+                    outcome,
+                )));
+                wxdragon::wake_up_idle();
             });
             schedule_dashboard_refresh(&api, &dashboard_refresh);
         });
@@ -1599,6 +1511,93 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     timer_store.borrow_mut().replace(timer);
     gui_timers.track(&timer_store);
 
+    // Event-driven message pump: replaces the old 100ms polling timers. Drains
+    // the channel of results posted by background threads and processes any
+    // pending data-view toggles. Idle events only fire after `wake_up_idle()`
+    // (called by the senders) or other UI activity, and `request_more(true)` is
+    // only used while messages remain, so the app sleeps at ~0% CPU when idle.
+    {
+        let api = api.clone();
+        let handles = handles.clone();
+        let frame = frame;
+        let dashboard_refresh = dashboard_refresh.clone();
+        let gui_tx = gui_tx.clone();
+        let im_action_in_flight = im_action_in_flight.clone();
+        let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
+        let mut gui_rx = gui_rx;
+        frame.on_idle(move |event| {
+            // Kick off any toggles queued from the data views.
+            process_pending_im_toggle(
+                &api,
+                &handles,
+                &frame,
+                &dashboard_refresh,
+                &gui_tx,
+                &im_action_in_flight,
+            );
+            process_pending_ai_gw_toggle(
+                &api,
+                &handles,
+                &frame,
+                &dashboard_refresh,
+                &gui_tx,
+                &ai_gw_action_in_flight,
+            );
+
+            // Drain a bounded batch of background results to keep the GUI snappy.
+            let mut processed = 0;
+            let mut needs_dashboard_refresh = false;
+            while processed < 20 {
+                match gui_rx.try_recv() {
+                    Ok(message) => {
+                        processed += 1;
+                        match message {
+                            GuiMessage::CodexAction(result) => {
+                                codex_tab::apply_pending_action(
+                                    &api,
+                                    &handles.codex_tab,
+                                    handles.text,
+                                    &frame,
+                                    &dashboard_refresh,
+                                    result,
+                                );
+                            }
+                            GuiMessage::ImAction(result) => {
+                                apply_pending_im_action(
+                                    &api,
+                                    &handles,
+                                    &frame,
+                                    &dashboard_refresh,
+                                    result,
+                                );
+                            }
+                            GuiMessage::AiGwAction(result) => {
+                                if matches!(result, AiGwActionResult::ChannelToggle { .. }) {
+                                    needs_dashboard_refresh = true;
+                                }
+                                apply_pending_ai_gw_action(&handles, &frame, result);
+                            }
+                            GuiMessage::DashboardUpdate => {
+                                apply_pending_dashboard(&handles, &dashboard_refresh, &api, &frame);
+                            }
+                        }
+                    }
+                    Err(tokio_mpsc::error::TryRecvError::Empty) => break,
+                    Err(tokio_mpsc::error::TryRecvError::Disconnected) => break,
+                }
+            }
+            if needs_dashboard_refresh {
+                schedule_dashboard_refresh(&api, &dashboard_refresh);
+            }
+
+            // Only keep spinning idle events while we still had a full batch to
+            // drain; otherwise let the loop sleep until the next wake-up.
+            if let WindowEventData::Idle(idle) = event {
+                idle.request_more(processed >= 20);
+            }
+        });
+    }
+
     start_daemon_for_gui_async(
         &api,
         &handles,
@@ -1647,6 +1646,15 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         &update_check_in_flight,
         &quitting,
     );
+}
+
+/// Enable `wxFULL_REPAINT_ON_RESIZE` (0x00010000) on a window so its whole
+/// client area is repainted on resize instead of only the newly exposed strip.
+/// Without it, wxMSW leaves stale pixels behind that smear into vertical
+/// "ghost" streaks while the window is being resized.
+fn enable_full_repaint_on_resize<W: WxWidget>(window: &W) {
+    const WXD_FULL_REPAINT_ON_RESIZE: i64 = 0x0001_0000;
+    window.set_style_raw(window.get_style_raw() | WXD_FULL_REPAINT_ON_RESIZE);
 }
 
 fn create_main_tab_icons(notebook: &Notebook) -> [Option<i32>; 4] {
@@ -1903,7 +1911,7 @@ fn start_ai_gw_provider_save(
     api: &ApiClient,
     dashboard_refresh: &DashboardRefresh,
     handles: &UiHandles,
-    result_store: &AiGwActionResultStore,
+    gui_tx: &tokio_mpsc::UnboundedSender<GuiMessage>,
     in_flight: &Arc<AtomicBool>,
     provider: ProviderConfig,
 ) {
@@ -1913,14 +1921,13 @@ fn start_ai_gw_provider_save(
     set_ai_gw_actions_enabled(handles, false);
 
     let worker_api = api.clone();
-    let result_store = result_store.clone();
+    let gui_tx = gui_tx.clone();
     let in_flight = in_flight.clone();
     thread::spawn(move || {
         let outcome = save_ai_gw_provider(&worker_api, provider);
-        if let Ok(mut slot) = result_store.lock() {
-            slot.replace(AiGwActionResult::Save(outcome));
-        }
         in_flight.store(false, Ordering::SeqCst);
+        let _ = gui_tx.send(GuiMessage::AiGwAction(AiGwActionResult::Save(outcome)));
+        wxdragon::wake_up_idle();
     });
     schedule_dashboard_refresh(api, dashboard_refresh);
 }
@@ -2516,7 +2523,7 @@ fn show_ai_gw_channel_dialog(
             }
         });
     }
-    fetch_models_timer.start(DASHBOARD_RESULT_POLL_MS, false);
+    fetch_models_timer.start(DIALOG_RESULT_POLL_MS, false);
     {
         let dialog = dialog;
         let fetch_models_closed = fetch_models_closed.clone();
@@ -3507,10 +3514,11 @@ struct DashboardRefresh {
     connection_prompt_shown: Arc<AtomicBool>,
     compatible_probe_hits: Arc<AtomicU64>,
     pending_startup_child: Arc<Mutex<Option<Child>>>,
+    gui_tx: tokio_mpsc::UnboundedSender<GuiMessage>,
 }
 
 impl DashboardRefresh {
-    fn new() -> Self {
+    fn new(gui_tx: tokio_mpsc::UnboundedSender<GuiMessage>) -> Self {
         Self {
             in_flight: Arc::new(AtomicBool::new(false)),
             result: Arc::new(Mutex::new(None)),
@@ -3521,6 +3529,7 @@ impl DashboardRefresh {
             connection_prompt_shown: Arc::new(AtomicBool::new(false)),
             compatible_probe_hits: Arc::new(AtomicU64::new(0)),
             pending_startup_child: Arc::new(Mutex::new(None)),
+            gui_tx,
         }
     }
 }
@@ -3552,6 +3561,90 @@ fn revert_ai_gw_toggle(handles: &UiHandles, row: usize, previous_enabled: bool) 
         .row_value_changed(row, 0);
 }
 
+/// Process a pending IM account enable/disable toggle queued from the data view.
+/// Runs on the idle loop instead of a polling timer; spawns the request and
+/// reports the outcome back through the GUI message channel.
+fn process_pending_im_toggle(
+    api: &ApiClient,
+    handles: &UiHandles,
+    frame: &Frame,
+    refresh: &DashboardRefresh,
+    gui_tx: &tokio_mpsc::UnboundedSender<GuiMessage>,
+    in_flight: &Arc<AtomicBool>,
+) {
+    if in_flight.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some(toggle) = handles.pending_im_toggle.borrow_mut().take() else {
+        return;
+    };
+    if !ensure_service_ready_for_action(api, frame, refresh) {
+        revert_im_toggle(handles, toggle.row, toggle.previous_enabled);
+        return;
+    }
+    in_flight.store(true, Ordering::SeqCst);
+    let request = SetImAccountEnabledRequest {
+        platform: toggle.platform,
+        account_id: toggle.account_id,
+        enabled: toggle.enabled,
+    };
+    let row = toggle.row;
+    let previous_enabled = toggle.previous_enabled;
+    let thread_api = api.clone();
+    let gui_tx = gui_tx.clone();
+    let in_flight = in_flight.clone();
+    thread::spawn(move || {
+        let outcome = thread_api.set_im_account_enabled(&request);
+        in_flight.store(false, Ordering::SeqCst);
+        let _ = gui_tx.send(GuiMessage::ImAction(ImActionResult::AccountToggle {
+            row,
+            previous_enabled,
+            result: outcome,
+        }));
+        wxdragon::wake_up_idle();
+    });
+}
+
+/// Process a pending AI Gateway channel enable/disable toggle queued from the
+/// data view. Idle-driven counterpart of the former polling timer.
+fn process_pending_ai_gw_toggle(
+    api: &ApiClient,
+    handles: &UiHandles,
+    frame: &Frame,
+    refresh: &DashboardRefresh,
+    gui_tx: &tokio_mpsc::UnboundedSender<GuiMessage>,
+    in_flight: &Arc<AtomicBool>,
+) {
+    if in_flight.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some(toggle) = handles.pending_ai_gw_channel_toggle.borrow_mut().take() else {
+        return;
+    };
+    if !ensure_service_ready_for_action(api, frame, refresh) {
+        revert_ai_gw_toggle(handles, toggle.row, toggle.previous_enabled);
+        return;
+    }
+    in_flight.store(true, Ordering::SeqCst);
+    let row = toggle.row;
+    let previous_enabled = toggle.previous_enabled;
+    let name = toggle.name;
+    let enabled = toggle.enabled;
+    let worker_api = api.clone();
+    let gui_tx = gui_tx.clone();
+    let in_flight = in_flight.clone();
+    thread::spawn(move || {
+        let outcome = set_ai_gw_provider_enabled(&worker_api, &name, enabled);
+        in_flight.store(false, Ordering::SeqCst);
+        let _ = gui_tx.send(GuiMessage::AiGwAction(AiGwActionResult::ChannelToggle {
+            row,
+            previous_enabled,
+            result: outcome,
+        }));
+        wxdragon::wake_up_idle();
+    });
+}
+
 fn schedule_dashboard_refresh(api: &ApiClient, refresh: &DashboardRefresh) -> bool {
     if refresh.in_flight.swap(true, Ordering::SeqCst) {
         return false;
@@ -3577,6 +3670,7 @@ fn spawn_dashboard_refresh(api: &ApiClient, refresh: &DashboardRefresh, generati
     let result = refresh.result.clone();
     let in_flight = refresh.in_flight.clone();
     let current_generation = refresh.generation.clone();
+    let gui_tx = refresh.gui_tx.clone();
     thread::spawn(move || {
         let snapshot = api.dashboard();
         if generation == current_generation.load(Ordering::SeqCst)
@@ -3585,6 +3679,8 @@ fn spawn_dashboard_refresh(api: &ApiClient, refresh: &DashboardRefresh, generati
             slot.replace((generation, snapshot));
         }
         in_flight.store(false, Ordering::SeqCst);
+        let _ = gui_tx.send(GuiMessage::DashboardUpdate);
+        wxdragon::wake_up_idle();
     });
 }
 

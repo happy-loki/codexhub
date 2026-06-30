@@ -3,7 +3,7 @@ use wxdragon::prelude::*;
 use super::api::{ApiClient, DashboardSnapshot, ImAccountItem};
 use super::text::GuiText;
 use super::widgets::{ImStatusPanel, StateTone, set_im_channel_row};
-use super::{DashboardRefresh, ImActionResult, ImActionResultStore, UiHandles, revert_im_toggle};
+use super::{DashboardRefresh, ImActionResult, UiHandles, revert_im_toggle};
 use super::{cached_dashboard_snapshot, force_dashboard_refresh, schedule_dashboard_refresh};
 use super::{show_error, show_info};
 
@@ -12,13 +12,8 @@ pub(super) fn apply_pending_im_action(
     handles: &UiHandles,
     frame: &Frame,
     refresh: &DashboardRefresh,
-    result: &ImActionResultStore,
-) -> bool {
-    let result = result.lock().ok().and_then(|mut slot| slot.take());
-    let Some(result) = result else {
-        return false;
-    };
-
+    result: ImActionResult,
+) {
     match result {
         ImActionResult::TelegramConfigure(Ok(_)) => {
             handles
@@ -70,7 +65,6 @@ pub(super) fn apply_pending_im_action(
             schedule_dashboard_refresh(api, refresh);
         }
     }
-    true
 }
 
 pub(super) struct SelectedImAccount {

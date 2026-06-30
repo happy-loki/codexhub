@@ -1,13 +1,14 @@
-﻿use std::{
+use std::{
     cell::Cell,
     rc::Rc,
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     thread,
 };
 
+use tokio::sync::mpsc::UnboundedSender;
 use wxdragon::prelude::*;
 
 use crate::ai_gateway::catalog::visible_catalog_model_options;
@@ -29,8 +30,6 @@ type CodexModelsInitialized = Rc<Cell<bool>>;
 type CodexConfigured = Rc<Cell<bool>>;
 type CodexHubReady = Rc<Cell<bool>>;
 type CodexServiceEnabled = Rc<Cell<bool>>;
-
-pub(super) type CodexActionResultStore = Arc<Mutex<Option<CodexActionResult>>>;
 
 #[derive(Clone)]
 pub(super) struct CodexTab {
@@ -246,12 +245,12 @@ pub(super) fn bind_actions(
     frame: &Frame,
     tab: &CodexTab,
     refresh: &DashboardRefresh,
-    result: &CodexActionResultStore,
+    gui_tx: &UnboundedSender<super::GuiMessage>,
     in_flight: &Arc<AtomicBool>,
 ) {
-    bind_inject_action(api, frame, tab, refresh, result, in_flight);
-    bind_save_models_action(api, frame, tab, refresh, result, in_flight);
-    bind_clear_action(api, frame, tab, refresh, result, in_flight);
+    bind_inject_action(api, frame, tab, refresh, gui_tx, in_flight);
+    bind_save_models_action(api, frame, tab, refresh, gui_tx, in_flight);
+    bind_clear_action(api, frame, tab, refresh, gui_tx, in_flight);
     bind_session_history_action(api, frame, tab, refresh);
 }
 
@@ -305,13 +304,8 @@ pub(super) fn apply_pending_action(
     text: GuiText,
     frame: &Frame,
     refresh: &DashboardRefresh,
-    result: &CodexActionResultStore,
-) -> bool {
-    let result = result.lock().ok().and_then(|mut slot| slot.take());
-    let Some(result) = result else {
-        return false;
-    };
-
+    result: CodexActionResult,
+) {
     tab.inject_button.set_label(text.inject_codex_access());
     tab.clear_button.set_label(text.clear_codex_access());
     tab.save_models_button.set_label(text.save_codex_models());
@@ -345,7 +339,6 @@ pub(super) fn apply_pending_action(
             force_dashboard_refresh(api, refresh);
         }
     }
-    true
 }
 
 fn refresh_config_buttons(tab: &CodexTab, service_enabled: bool) {
@@ -365,14 +358,14 @@ fn bind_inject_action(
     frame: &Frame,
     tab: &CodexTab,
     refresh: &DashboardRefresh,
-    result: &CodexActionResultStore,
+    gui_tx: &UnboundedSender<super::GuiMessage>,
     in_flight: &Arc<AtomicBool>,
 ) {
     let api = api.clone();
     let refresh = refresh.clone();
     let frame = *frame;
     let tab = tab.clone();
-    let result = result.clone();
+    let gui_tx = gui_tx.clone();
     let in_flight = in_flight.clone();
     let inject_button = tab.inject_button;
     inject_button.on_click(move |_| {
@@ -396,14 +389,15 @@ fn bind_inject_action(
             supports_websockets: false,
         };
         let thread_api = api.clone();
-        let result = result.clone();
+        let gui_tx = gui_tx.clone();
         let in_flight = in_flight.clone();
         thread::spawn(move || {
             let outcome = thread_api.configure_codex_app(&request);
-            if let Ok(mut slot) = result.lock() {
-                slot.replace(CodexActionResult::Inject(outcome));
-            }
             in_flight.store(false, Ordering::SeqCst);
+            let _ = gui_tx.send(super::GuiMessage::CodexAction(CodexActionResult::Inject(
+                outcome,
+            )));
+            wxdragon::wake_up_idle();
         });
         schedule_dashboard_refresh(&api, &refresh);
     });
@@ -414,14 +408,14 @@ fn bind_save_models_action(
     frame: &Frame,
     tab: &CodexTab,
     refresh: &DashboardRefresh,
-    result: &CodexActionResultStore,
+    gui_tx: &UnboundedSender<super::GuiMessage>,
     in_flight: &Arc<AtomicBool>,
 ) {
     let api = api.clone();
     let refresh = refresh.clone();
     let frame = *frame;
     let tab = tab.clone();
-    let result = result.clone();
+    let gui_tx = gui_tx.clone();
     let in_flight = in_flight.clone();
     let save_models_button = tab.save_models_button;
     save_models_button.on_click(move |_| {
@@ -437,14 +431,15 @@ fn bind_save_models_action(
         tab.save_models_button.enable(false);
         let selected_models = selected_visible_models(&tab);
         let thread_api = api.clone();
-        let result = result.clone();
+        let gui_tx = gui_tx.clone();
         let in_flight = in_flight.clone();
         thread::spawn(move || {
             let outcome = save_visible_models(&thread_api, selected_models);
-            if let Ok(mut slot) = result.lock() {
-                slot.replace(CodexActionResult::SaveModels(outcome));
-            }
             in_flight.store(false, Ordering::SeqCst);
+            let _ = gui_tx.send(super::GuiMessage::CodexAction(
+                CodexActionResult::SaveModels(outcome),
+            ));
+            wxdragon::wake_up_idle();
         });
         schedule_dashboard_refresh(&api, &refresh);
     });
@@ -455,14 +450,14 @@ fn bind_clear_action(
     frame: &Frame,
     tab: &CodexTab,
     refresh: &DashboardRefresh,
-    result: &CodexActionResultStore,
+    gui_tx: &UnboundedSender<super::GuiMessage>,
     in_flight: &Arc<AtomicBool>,
 ) {
     let api = api.clone();
     let refresh = refresh.clone();
     let frame = *frame;
     let tab = tab.clone();
-    let result = result.clone();
+    let gui_tx = gui_tx.clone();
     let in_flight = in_flight.clone();
     let clear_button = tab.clear_button;
     clear_button.on_click(move |_| {
@@ -480,14 +475,15 @@ fn bind_clear_action(
         tab.clear_button.set_label(tab.text.clearing_codex_access());
         tab.clear_button.enable(false);
         let thread_api = api.clone();
-        let result = result.clone();
+        let gui_tx = gui_tx.clone();
         let in_flight = in_flight.clone();
         thread::spawn(move || {
             let outcome = thread_api.uninstall_codex_app();
-            if let Ok(mut slot) = result.lock() {
-                slot.replace(CodexActionResult::Clear(outcome));
-            }
             in_flight.store(false, Ordering::SeqCst);
+            let _ = gui_tx.send(super::GuiMessage::CodexAction(CodexActionResult::Clear(
+                outcome,
+            )));
+            wxdragon::wake_up_idle();
         });
         schedule_dashboard_refresh(&api, &refresh);
     });

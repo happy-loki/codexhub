@@ -413,9 +413,24 @@ pub(super) fn topology_splitter<W: WxWidget>(parent: &W) -> StaticBitmap {
     splitter
 }
 
+/// Alpha-composite `fg` over the opaque `bg` and return an opaque RGBA tuple.
+/// Used so self-drawn topology bitmaps contain no translucent pixels.
+fn blend_over(fg: Colour, bg: Colour, alpha: u8) -> [u8; 4] {
+    let a = alpha as u16;
+    let inv = 255 - a;
+    let mix = |f: u8, b: u8| (((f as u16 * a) + (b as u16 * inv)) / 255) as u8;
+    [mix(fg.r, bg.r), mix(fg.g, bg.g), mix(fg.b, bg.b), 255]
+}
+
 pub(super) fn topology_connector_bitmap(width: usize, height: usize) -> Bitmap {
-    let mut canvas = IconCanvas::new_with_size(width, height, [0, 0, 0, 0]);
-    let colour = Theme::rgba(theme::theme().divider, 210);
+    // Composite the semi-transparent line colour onto the (opaque) card
+    // background so the produced bitmap is fully opaque. A bitmap with
+    // translucent or transparent pixels makes Windows StaticBitmap skip
+    // erasing the parent background on redraw, layering successive frames
+    // into a "ghost" of the vertical trunk line.
+    let t = theme::theme();
+    let mut canvas = IconCanvas::new_with_size(width, height, Theme::rgba(t.bg_card, 255));
+    let colour = blend_over(t.divider, t.bg_card, 210);
     let trunk_x = 30usize;
     let top_y = 33usize;
     let mid_y = height / 2;
@@ -428,8 +443,9 @@ pub(super) fn topology_connector_bitmap(width: usize, height: usize) -> Bitmap {
 }
 
 pub(super) fn topology_splitter_bitmap(width: usize, height: usize) -> Bitmap {
-    let mut canvas = IconCanvas::new_with_size(width, height, [0, 0, 0, 0]);
-    let colour = Theme::rgba(theme::theme().divider, 210);
+    let t = theme::theme();
+    let mut canvas = IconCanvas::new_with_size(width, height, Theme::rgba(t.bg_card, 255));
+    let colour = blend_over(t.divider, t.bg_card, 210);
     let trunk_x = 34usize;
     let top_y = 31usize;
     let mid_y = height / 2;

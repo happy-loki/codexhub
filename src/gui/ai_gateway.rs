@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex};
 
 use wxdragon::prelude::*;
 use wxdragon::widgets::dataview::CustomDataViewVirtualListModel;
@@ -16,7 +15,6 @@ use super::widgets::{ProviderLogoKind, provider_logo_bitmap};
 pub(super) type AiGwProviderRows = Rc<RefCell<Vec<AiGwProviderRow>>>;
 pub(super) type AiGwProviderModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
 pub(super) type PendingAiGwChannelToggle = Rc<RefCell<Option<AiGwChannelToggle>>>;
-pub(super) type AiGwActionResultStore = Arc<Mutex<Option<AiGwActionResult>>>;
 
 #[derive(Clone, PartialEq, Eq)]
 pub(super) struct AiGwProviderRow {
@@ -212,13 +210,8 @@ pub(super) fn provider_protocol_display(
 pub(super) fn apply_pending_ai_gw_action(
     handles: &UiHandles,
     frame: &Frame,
-    result_store: &AiGwActionResultStore,
-) -> bool {
-    let result = result_store.lock().ok().and_then(|mut slot| slot.take());
-    let Some(result) = result else {
-        return false;
-    };
-
+    result: AiGwActionResult,
+) {
     match result {
         AiGwActionResult::Save(Ok(())) => {
             handles
@@ -281,7 +274,6 @@ pub(super) fn apply_pending_ai_gw_action(
             super::show_error(frame, &handles.text.ai_gw_save_failed(&err));
         }
     }
-    true
 }
 
 pub(super) fn set_ai_gw_actions_enabled(handles: &UiHandles, enabled: bool) {
