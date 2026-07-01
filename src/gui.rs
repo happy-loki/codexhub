@@ -280,12 +280,20 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     // this channel and wake the idle loop, replacing the old polling timers.
     let (gui_tx, gui_rx) = tokio_mpsc::unbounded_channel::<GuiMessage>();
 
+    // Fit the initial window to the current screen work area so first-time users
+    // on small or scaled laptop displays never open into a window that is taller
+    // than the screen (which pushes the primary action buttons off-screen and
+    // forces scrolling to find them).
+    let frame_size = initial_frame_size();
     let frame = Frame::builder()
         .with_title("CodexHub")
         // Keep the first launch within smaller laptop work areas. The tab pages
         // own their scrolling, so the frame itself should not exceed the screen.
-        .with_size(Size::new(1180, 760))
+        .with_size(frame_size)
         .build();
+    // Never let the window shrink below a floor where the primary buttons stop
+    // fitting, but never force it larger than the screen work area either.
+    frame.set_min_size(min_frame_size(frame_size));
     app.set_top_window(&frame);
     frame.set_icon(&app_icon_bitmap(48));
     let update_check_in_flight = Arc::new(AtomicBool::new(false));
@@ -382,16 +390,16 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         &codex_status.panel,
         1,
         SizerFlag::Expand | SizerFlag::Bottom,
-        8,
+        4,
     );
     entry_column.add(
         &vscode_status.panel,
         1,
         SizerFlag::Expand | SizerFlag::Bottom,
-        8,
+        4,
     );
     entry_column.add(&cli_status.panel, 1, SizerFlag::Expand, 0);
-    status_row.add_sizer(&entry_column, 1, SizerFlag::Expand | SizerFlag::All, 8);
+    status_row.add_sizer(&entry_column, 1, SizerFlag::Expand | SizerFlag::All, 6);
     status_row.add(
         &entry_connector,
         0,
@@ -402,7 +410,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         &service_status.panel,
         1,
         SizerFlag::Expand | SizerFlag::All,
-        8,
+        6,
     );
     status_row.add(
         &bridge_connector,
@@ -410,22 +418,12 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         SizerFlag::AlignCenterVertical | SizerFlag::Left | SizerFlag::Right,
         2,
     );
-    status_row.add(&im_status.panel, 1, SizerFlag::Expand | SizerFlag::All, 8);
+    status_row.add(&im_status.panel, 1, SizerFlag::Expand | SizerFlag::All, 6);
     status_section.add_sizer(
         &status_row,
         0,
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
-        8,
-    );
-    let ai_gw_status_label = StaticText::builder(&status_box)
-        .with_label(&text.ai_gw_status_enabled(0))
-        .build();
-    ai_gw_status_label.set_foreground_color(theme::theme().ink_muted);
-    status_section.add(
-        &ai_gw_status_label,
-        0,
-        SizerFlag::Left | SizerFlag::Bottom,
-        8,
+        6,
     );
     root_sizer.add(
         &status_box,
@@ -1057,7 +1055,6 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         ai_gw_delete_button,
         ai_gw_new_button,
         ai_gw_edit_button,
-        ai_gw_status_label,
         request_log_list,
         request_log_rows,
         request_log_model,
@@ -1663,6 +1660,14 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     }
 
     frame.centre();
+    // On displays too small to show the preferred size, open maximized so the
+    // whole first screen (status overview + active tab actions) is visible
+    // without manual resizing.
+    if let Some((work_w, work_h)) = screen_work_area_size()
+        && (work_w < PREFERRED_FRAME_WIDTH || work_h < PREFERRED_FRAME_HEIGHT)
+    {
+        frame.maximize(true);
+    }
     frame.show(true);
     update::check_for_updates_silent_async(
         &frame,
@@ -1680,6 +1685,76 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
 fn enable_full_repaint_on_resize<W: WxWidget>(window: &W) {
     const WXD_FULL_REPAINT_ON_RESIZE: i64 = 0x0001_0000;
     window.set_style_raw(window.get_style_raw() | WXD_FULL_REPAINT_ON_RESIZE);
+}
+
+/// Preferred first-launch window size on a roomy display.
+const PREFERRED_FRAME_WIDTH: i32 = 1180;
+const PREFERRED_FRAME_HEIGHT: i32 = 760;
+/// Smallest window that still keeps the status overview and the primary tab
+/// action buttons reachable without hunting through scrollbars.
+const MIN_FRAME_WIDTH: i32 = 900;
+const MIN_FRAME_HEIGHT: i32 = 560;
+
+/// Compute the initial frame size, clamped to the current screen work area so
+/// the window never opens taller or wider than the usable desktop. On small or
+/// scaled laptops this keeps the bottom action row (e.g. "save models") inside
+/// the first screen instead of below a scrollbar the user has to discover.
+fn initial_frame_size() -> Size {
+    let preferred = Size::new(PREFERRED_FRAME_WIDTH, PREFERRED_FRAME_HEIGHT);
+    match screen_work_area_size() {
+        Some((work_w, work_h)) => {
+            // Leave a small margin so the title bar and window borders stay on
+            // screen even when the reported work area is flush with the frame.
+            let max_w = (work_w - 32).max(MIN_FRAME_WIDTH);
+            let max_h = (work_h - 48).max(MIN_FRAME_HEIGHT);
+            Size::new(preferred.width.min(max_w), preferred.height.min(max_h))
+        }
+        None => preferred,
+    }
+}
+
+/// Never let `set_min_size` demand more than the screen can show; otherwise the
+/// floor itself would force off-screen content on very small displays.
+fn min_frame_size(frame_size: Size) -> Size {
+    Size::new(
+        MIN_FRAME_WIDTH.min(frame_size.width),
+        MIN_FRAME_HEIGHT.min(frame_size.height),
+    )
+}
+
+/// Return the usable desktop work area (excluding taskbar/dock) in pixels.
+#[cfg(target_os = "windows")]
+fn screen_work_area_size() -> Option<(i32, i32)> {
+    use windows_sys::Win32::Foundation::RECT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{SPI_GETWORKAREA, SystemParametersInfoW};
+
+    let mut rect = RECT {
+        left: 0,
+        top: 0,
+        right: 0,
+        bottom: 0,
+    };
+    // SAFETY: `SystemParametersInfoW` fills the RECT we own; we only read it
+    // after checking the call succeeded.
+    let ok = unsafe {
+        SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            (&mut rect as *mut RECT).cast(),
+            0,
+        )
+    };
+    if ok == 0 {
+        return None;
+    }
+    let width = rect.right - rect.left;
+    let height = rect.bottom - rect.top;
+    (width > 0 && height > 0).then_some((width, height))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn screen_work_area_size() -> Option<(i32, i32)> {
+    None
 }
 
 fn create_main_tab_icons(notebook: &Notebook) -> [Option<i32>; 4] {
@@ -3252,6 +3327,22 @@ mod model_mapping_tests {
         assert_eq!(rows[1].upstream_model, "claude-sonnet-4-6");
         assert_eq!(rows[1].codex_models, vec!["sonnet-4.6"]);
     }
+
+    #[test]
+    fn min_frame_size_never_exceeds_actual_frame() {
+        // On a tiny window the floor must shrink with it, otherwise the min-size
+        // constraint would itself force off-screen content.
+        let tiny = Size::new(640, 400);
+        let floor = min_frame_size(tiny);
+        assert!(floor.width <= tiny.width);
+        assert!(floor.height <= tiny.height);
+
+        // On a roomy window the floor stays at the usable minimums.
+        let roomy = Size::new(1600, 1000);
+        let floor = min_frame_size(roomy);
+        assert_eq!(floor.width, MIN_FRAME_WIDTH);
+        assert_eq!(floor.height, MIN_FRAME_HEIGHT);
+    }
 }
 
 fn fetch_remote_models(
@@ -3520,7 +3611,6 @@ struct UiHandles {
     ai_gw_delete_button: Button,
     ai_gw_new_button: Button,
     ai_gw_edit_button: Button,
-    ai_gw_status_label: StaticText,
     // Request logs fields
     request_log_list: DataViewCtrl,
     request_log_rows: RequestLogRows,
@@ -4037,15 +4127,9 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
 
     // AI Gateway status
     if let Some(gw) = &snapshot.ai_gateway {
-        handles
-            .ai_gw_status_label
-            .set_label(&text.ai_gw_status_enabled(gw.providers.len()));
         refresh_ai_gw_provider_list(handles, Some(gw));
         codex_tab::initialize_visible_model_checks(&handles.codex_tab, gw);
     } else {
-        handles
-            .ai_gw_status_label
-            .set_label(&text.ai_gw_status_enabled(0));
         refresh_ai_gw_provider_list(handles, None);
     }
 }

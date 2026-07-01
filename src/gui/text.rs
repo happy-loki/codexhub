@@ -2695,13 +2695,6 @@ impl GuiText {
         }
     }
 
-    pub(super) fn ai_gw_status_enabled(self, count: usize) -> String {
-        match self.locale {
-            GuiLocale::ZhCn => format!("大模型接入: 已启用 ({count} 个大模型厂商)"),
-            GuiLocale::EnUs => format!("AI Gateway: Enabled ({count} channels)"),
-        }
-    }
-
     pub(super) fn ai_gw_provider_name(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "大模型厂商名称",

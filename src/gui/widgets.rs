@@ -16,6 +16,7 @@ pub(super) struct StatusPanel {
     pub(super) detail: StaticText,
     pub(super) extra: BoxSizer,
     pub(super) icon_kind: StatusIconKind,
+    icon_size: usize,
 }
 
 #[derive(Clone, Copy)]
@@ -226,59 +227,77 @@ fn build_status_panel<W: WxWidget>(
 ) -> StatusPanel {
     let t = theme::theme();
     let panel = flat_bordered_panel(parent, t.bg_card);
-    // Height fits three lines (title + state + detail) with headroom; the cards
-    // split the row evenly via proportion in the parent column.
-    panel.set_min_size(Size::new(230, 66));
+    let compact = !center_content;
+    let panel_height = if compact { 56 } else { 54 };
+    let icon_size = if compact { 28 } else { 34 };
+    let side_padding = if compact { 12 } else { 18 };
+    let icon_gap = if compact { 12 } else { 16 };
+    let title_gap = if compact { 2 } else { 4 };
+    let state_gap = if compact { 0 } else { 4 };
+    // These cards normally show two lines (title + state); the `detail` line is
+    // collapsed while empty (see `set_status_panel`). `set_min_size` is a hard
+    // allocation in wx, so it must match the two-line content height, otherwise
+    // a taller value just reserves the empty slack the status card showed at the
+    // bottom of each panel. The service card still fits its 3-line/detail state
+    // because it is stretched to the full row height by the parent sizer.
+    panel.set_min_size(Size::new(230, panel_height));
 
     let row = BoxSizer::builder(Orientation::Horizontal).build();
     if center_content {
         row.add_stretch_spacer(1);
     } else {
-        row.add_spacer(18);
+        row.add_spacer(side_padding);
     }
     let icon = StaticBitmap::builder(&panel)
-        .with_bitmap(Some(status_icon_bitmap(icon_kind, 34)))
+        .with_bitmap(Some(status_icon_bitmap(icon_kind, icon_size as usize)))
         .with_scale_mode(Some(ScaleMode::None))
-        .with_size(Size::new(34, 34))
+        .with_size(Size::new(icon_size, icon_size))
         .build();
-    icon.set_min_size(Size::new(34, 34));
+    icon.set_min_size(Size::new(icon_size, icon_size));
     row.add(
         &icon,
         0,
         SizerFlag::AlignCenterVertical | SizerFlag::Right,
-        16,
+        icon_gap,
     );
 
     let text_col = BoxSizer::builder(Orientation::Vertical).build();
-    text_col.add_stretch_spacer(1);
     let title_row = BoxSizer::builder(Orientation::Horizontal).build();
     let marker = StaticText::builder(&panel).with_label("●").build();
     marker.set_foreground_color(t.ink_muted);
     title_row.add(&marker, 0, SizerFlag::Right, 5);
     let title_label = StaticText::builder(&panel).with_label(title).build();
     title_label.set_foreground_color(t.ink_secondary);
-    title_row.add(&title_label, 0, SizerFlag::Bottom, 0);
-    text_col.add_sizer(&title_row, 0, SizerFlag::Bottom, 4);
-
     let state = StaticText::builder(&panel)
         .with_label(text.detecting())
         .build();
     state.set_foreground_color(t.ink_primary);
-    text_col.add(&state, 0, SizerFlag::Bottom, 4);
+    title_row.add(&title_label, 0, SizerFlag::Bottom, 0);
+    text_col.add_sizer(&title_row, 0, SizerFlag::Bottom, title_gap);
+    text_col.add(&state, 0, SizerFlag::Bottom, state_gap);
 
     let detail = StaticText::builder(&panel).with_label("").build();
     detail.set_foreground_color(t.ink_muted);
     detail.wrap(250);
+    // The detail line stays collapsed until it has text, so the common two-line
+    // state does not reserve an empty third row at the bottom of the card.
+    detail.hide();
     text_col.add(&detail, 0, SizerFlag::Expand, 0);
     let extra = BoxSizer::builder(Orientation::Vertical).build();
     text_col.add_sizer(&extra, 0, SizerFlag::Expand, 0);
-    text_col.add_stretch_spacer(1);
 
-    row.add_sizer(&text_col, 1, SizerFlag::Expand, 0);
+    // Compact status rows use the same top-aligned expansion as IM rows. Center
+    // alignment is fragile across fonts/DPI when the row is tight and can clip
+    // the first or second line.
+    if compact {
+        row.add_sizer(&text_col, 1, SizerFlag::Expand, 0);
+    } else {
+        row.add_sizer(&text_col, 1, SizerFlag::AlignCenterVertical, 0);
+    }
     if center_content {
         row.add_stretch_spacer(1);
     } else {
-        row.add_spacer(18);
+        row.add_spacer(side_padding);
     }
     let outer = BoxSizer::builder(Orientation::Vertical).build();
     outer.add_sizer(&row, 1, SizerFlag::Expand | SizerFlag::All, 2);
@@ -292,13 +311,14 @@ fn build_status_panel<W: WxWidget>(
         detail,
         extra,
         icon_kind,
+        icon_size: icon_size as usize,
     }
 }
 
 pub(super) fn im_status_panel<W: WxWidget>(parent: &W, text: GuiText) -> ImStatusPanel {
     let panel = Panel::builder(parent).build();
     panel.set_background_color(theme::theme().bg_app);
-    panel.set_min_size(Size::new(260, 190));
+    panel.set_min_size(Size::new(260, 156));
 
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     let feishu = im_channel_row(
@@ -335,7 +355,7 @@ pub(super) fn im_channel_row(
 ) -> ImChannelRow {
     let t = theme::theme();
     let row_panel = flat_bordered_panel(parent, t.bg_card);
-    row_panel.set_min_size(Size::new(250, 58));
+    row_panel.set_min_size(Size::new(250, 52));
     let row = BoxSizer::builder(Orientation::Horizontal).build();
 
     let icon = StaticBitmap::builder(&row_panel)
@@ -372,6 +392,7 @@ pub(super) fn im_channel_row(
     let detail = StaticText::builder(&row_panel).with_label("").build();
     detail.set_foreground_color(t.ink_muted);
     detail.wrap(220);
+    detail.hide();
     text_col.add(&detail, 0, SizerFlag::Expand, 0);
 
     row.add_sizer(&text_col, 1, SizerFlag::Expand, 0);
@@ -392,26 +413,28 @@ pub(super) fn im_channel_row(
 }
 
 pub(super) fn topology_connector<W: WxWidget>(parent: &W) -> StaticBitmap {
-    let bitmap = topology_connector_bitmap(72, 190);
+    let bitmap = topology_connector_bitmap(56, TOPOLOGY_HEIGHT);
     let connector = StaticBitmap::builder(parent)
         .with_bitmap(Some(bitmap))
         .with_scale_mode(Some(ScaleMode::None))
-        .with_size(Size::new(72, 190))
+        .with_size(Size::new(56, TOPOLOGY_HEIGHT as i32))
         .build();
-    connector.set_min_size(Size::new(72, 190));
+    connector.set_min_size(Size::new(56, TOPOLOGY_HEIGHT as i32));
     connector
 }
 
 pub(super) fn topology_splitter<W: WxWidget>(parent: &W) -> StaticBitmap {
-    let bitmap = topology_splitter_bitmap(72, 190);
+    let bitmap = topology_splitter_bitmap(56, TOPOLOGY_HEIGHT);
     let splitter = StaticBitmap::builder(parent)
         .with_bitmap(Some(bitmap))
         .with_scale_mode(Some(ScaleMode::None))
-        .with_size(Size::new(72, 190))
+        .with_size(Size::new(56, TOPOLOGY_HEIGHT as i32))
         .build();
-    splitter.set_min_size(Size::new(72, 190));
+    splitter.set_min_size(Size::new(56, TOPOLOGY_HEIGHT as i32));
     splitter
 }
+
+const TOPOLOGY_HEIGHT: usize = 176;
 
 /// Alpha-composite `fg` over the opaque `bg` and return an opaque RGBA tuple.
 /// Used so self-drawn topology bitmaps contain no translucent pixels.
@@ -431,37 +454,36 @@ pub(super) fn topology_connector_bitmap(width: usize, height: usize) -> Bitmap {
     let t = theme::theme();
     let mut canvas = IconCanvas::new_with_size(width, height, Theme::rgba(t.bg_card, 255));
     let colour = blend_over(t.divider, t.bg_card, 210);
-    let trunk_x = 30usize;
-    let top_y = 33usize;
-    let mid_y = height / 2;
-    let bottom_y = height.saturating_sub(33);
+    let trunk_x = width.saturating_mul(5) / 12;
+    let (top_y, mid_y, bottom_y) = topology_branch_positions(height);
+    let out_x = width.saturating_sub(1);
     canvas.draw_line(0, top_y, trunk_x, top_y, 2, colour);
     canvas.draw_line(0, bottom_y, trunk_x, bottom_y, 2, colour);
     canvas.draw_line(trunk_x, top_y, trunk_x, bottom_y, 2, colour);
-    canvas.draw_line(trunk_x, mid_y, width.saturating_sub(1), mid_y, 2, colour);
+    canvas.draw_line(trunk_x, mid_y, out_x, mid_y, 2, colour);
     Bitmap::from_rgba(&canvas.rgba, width as u32, height as u32).expect("topology connector bitmap")
+}
+
+fn topology_branch_positions(height: usize) -> (usize, usize, usize) {
+    let mid_y = height / 2;
+    let offset = height / 3;
+    let top_y = mid_y.saturating_sub(offset);
+    let bottom_y = (mid_y + offset).min(height.saturating_sub(1));
+    (top_y, mid_y, bottom_y)
 }
 
 pub(super) fn topology_splitter_bitmap(width: usize, height: usize) -> Bitmap {
     let t = theme::theme();
     let mut canvas = IconCanvas::new_with_size(width, height, Theme::rgba(t.bg_card, 255));
     let colour = blend_over(t.divider, t.bg_card, 210);
-    let trunk_x = 34usize;
-    let top_y = 31usize;
-    let mid_y = height / 2;
-    let bottom_y = height.saturating_sub(31);
+    let trunk_x = width.saturating_mul(5) / 12;
+    let (top_y, mid_y, bottom_y) = topology_branch_positions(height);
+    let out_x = width.saturating_sub(1);
     canvas.draw_line(0, mid_y, trunk_x, mid_y, 2, colour);
     canvas.draw_line(trunk_x, top_y, trunk_x, bottom_y, 2, colour);
-    canvas.draw_line(trunk_x, top_y, width.saturating_sub(1), top_y, 2, colour);
-    canvas.draw_line(trunk_x, mid_y, width.saturating_sub(1), mid_y, 2, colour);
-    canvas.draw_line(
-        trunk_x,
-        bottom_y,
-        width.saturating_sub(1),
-        bottom_y,
-        2,
-        colour,
-    );
+    canvas.draw_line(trunk_x, top_y, out_x, top_y, 2, colour);
+    canvas.draw_line(trunk_x, mid_y, out_x, mid_y, 2, colour);
+    canvas.draw_line(trunk_x, bottom_y, out_x, bottom_y, 2, colour);
     Bitmap::from_rgba(&canvas.rgba, width as u32, height as u32).expect("topology splitter bitmap")
 }
 
@@ -851,7 +873,7 @@ pub(super) fn set_status_panel(panel: &StatusPanel, state: &str, detail: &str, t
     if panel.title.get_foreground_color() != title_colour {
         panel
             .icon
-            .set_bitmap(&status_icon_bitmap(panel.icon_kind, 34));
+            .set_bitmap(&status_icon_bitmap(panel.icon_kind, panel.icon_size));
     }
     panel.title.set_foreground_color(title_colour);
     panel.marker.set_foreground_color(tone_colour);
@@ -860,6 +882,9 @@ pub(super) fn set_status_panel(panel: &StatusPanel, state: &str, detail: &str, t
     panel.detail.set_label(detail);
     panel.detail.set_foreground_color(t.ink_muted);
     panel.detail.wrap(220);
+    // Collapse the detail row while empty so the card keeps its compact
+    // two-line height instead of reserving a blank third line.
+    panel.detail.show(!detail.is_empty());
     panel.panel.layout();
     panel.panel.refresh(true, None);
     panel.panel.update();
@@ -882,6 +907,10 @@ pub(super) fn set_im_channel_row(row: &ImChannelRow, state: &str, detail: &str, 
     row.detail.set_label(detail);
     row.detail.set_foreground_color(t.ink_muted);
     row.detail.wrap(220);
+    row.detail.show(!detail.is_empty());
+    if let Some(parent) = row.state.get_parent() {
+        parent.layout();
+    }
 }
 
 pub(super) fn set_disabled_status_panel(panel: &StatusPanel, state: &str, detail: &str) {
@@ -894,7 +923,7 @@ pub(super) fn set_disabled_status_panel(panel: &StatusPanel, state: &str, detail
     if panel.title.get_foreground_color() != muted {
         panel
             .icon
-            .set_bitmap(&disabled_status_icon_bitmap(panel.icon_kind, 34));
+            .set_bitmap(&disabled_status_icon_bitmap(panel.icon_kind, panel.icon_size));
     }
     panel.title.set_foreground_color(muted);
     panel.marker.set_foreground_color(muted);
@@ -903,4 +932,8 @@ pub(super) fn set_disabled_status_panel(panel: &StatusPanel, state: &str, detail
     panel.detail.set_label(detail);
     panel.detail.set_foreground_color(muted);
     panel.detail.wrap(190);
+    panel.detail.show(!detail.is_empty());
+    panel.panel.layout();
+    panel.panel.refresh(true, None);
+    panel.panel.update();
 }
