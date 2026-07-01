@@ -978,7 +978,7 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
     if let Some(openai_curated) = find_openai_curated_marketplace_root(&codex_home) {
         upsert_local_marketplace(&mut doc, OPENAI_CURATED_MARKETPLACE_NAME, &openai_curated);
     }
-    disable_default_otel_exporter(&mut doc);
+    disable_default_otel_telemetry(&mut doc);
 
     let raw = normalize_config_toml_order(&doc.to_string());
     backup_existing(path)?;
@@ -1064,19 +1064,30 @@ fn upsert_enabled_plugins(doc: &mut toml_edit::DocumentMut, plugin_ids: &[&str])
     }
 }
 
-// The Codex app-server ships an OpenTelemetry exporter that, by default, pushes
-// metrics/logs to `https://ab.chatgpt.com/otlp/v1/metrics`. In networks that
-// cannot reach that host (e.g. mainland China without a VPN), each export
-// attempt blocks on a ~10s connect timeout and retries, which makes Codex
-// startup and restart feel extremely slow. codexhub runs the app fully against
-// a local backend, so this telemetry is never useful here; disable the exporter
-// unless the user has explicitly configured one of their own.
-fn disable_default_otel_exporter(doc: &mut toml_edit::DocumentMut) {
-    let otel = ensure_config_table(doc, "otel");
-    if otel.contains_key("exporter") {
-        return;
+// The Codex app-server ships an OpenTelemetry stack that, by default, pushes
+// metrics to `https://ab.chatgpt.com/otlp/v1/metrics` (the `Statsig` metrics
+// exporter). On networks that cannot reach that host (e.g. mainland China
+// without a VPN), each export attempt blocks on a ~10s connect timeout and
+// retries, which makes Codex startup and restart feel extremely slow.
+//
+// The metrics push is what actually hangs: in Codex's `otel_init`, the metrics
+// exporter defaults to `Statsig` and is gated by `analytics.enabled`, while the
+// log/trace exporters already default to `None`. codexhub runs the app fully
+// against a local backend, so none of this telemetry is useful here. We turn
+// the analytics gate off and pin every exporter to `none`, but only fill in
+// fields the user has not set so any deliberate override is preserved.
+fn disable_default_otel_telemetry(doc: &mut toml_edit::DocumentMut) {
+    let analytics = ensure_config_table(doc, "analytics");
+    if !analytics.contains_key("enabled") {
+        analytics["enabled"] = toml_edit::value(false);
     }
-    otel["exporter"] = toml_edit::value("none");
+
+    let otel = ensure_config_table(doc, "otel");
+    for key in ["exporter", "trace_exporter", "metrics_exporter"] {
+        if !otel.contains_key(key) {
+            otel[key] = toml_edit::value("none");
+        }
+    }
 }
 
 fn ensure_config_table<'a>(
@@ -2680,7 +2691,7 @@ enabled = false
     }
 
     #[test]
-    fn configure_codex_app_disables_default_otel_exporter() {
+    fn configure_codex_app_disables_default_otel_telemetry() {
         let codex_home = unique_temp_dir();
         let config_path = codex_home.join("config.toml");
 
@@ -2690,13 +2701,26 @@ enabled = false
         let doc = config
             .parse::<toml_edit::DocumentMut>()
             .expect("parse config");
+        let otel = doc
+            .get("otel")
+            .and_then(|item| item.as_table())
+            .expect("otel table present");
+        // The metrics exporter is the one that pushes to ab.chatgpt.com and
+        // hangs without a VPN; all three must be pinned to none.
+        for key in ["exporter", "trace_exporter", "metrics_exporter"] {
+            assert_eq!(
+                otel.get(key).and_then(|item| item.as_str()),
+                Some("none"),
+                "otel {key} should default to none to avoid blocking on ab.chatgpt.com"
+            );
+        }
         assert_eq!(
-            doc.get("otel")
+            doc.get("analytics")
                 .and_then(|item| item.as_table())
-                .and_then(|otel| otel.get("exporter"))
-                .and_then(|item| item.as_str()),
-            Some("none"),
-            "otel exporter should default to none to avoid blocking on ab.chatgpt.com"
+                .and_then(|analytics| analytics.get("enabled"))
+                .and_then(|item| item.as_bool()),
+            Some(false),
+            "analytics gate should be disabled so metrics are never exported"
         );
 
         let _ = std::fs::remove_dir_all(codex_home);
@@ -2734,6 +2758,12 @@ environment = "prod"
             otel.get("environment").and_then(|item| item.as_str()),
             Some("prod"),
             "other user otel settings must be preserved"
+        );
+        // Fields the user did not set are still filled with safe defaults.
+        assert_eq!(
+            otel.get("metrics_exporter").and_then(|item| item.as_str()),
+            Some("none"),
+            "metrics exporter should still be pinned to none"
         );
 
         let _ = std::fs::remove_dir_all(codex_home);
