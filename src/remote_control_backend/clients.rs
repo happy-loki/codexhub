@@ -1,4 +1,4 @@
-﻿use axum::{
+use axum::{
     Json,
     extract::{
         Path as AxumPath, State,
@@ -20,6 +20,8 @@ use super::{
     FEISHU_BRIDGE_CLIENT_ID, FEISHU_BRIDGE_ENV_ID, FEISHU_BRIDGE_INSTALLATION_ID,
     RemoteControlStatusResponse, format_rfc3339_utc, status_snapshot, unix_now_u64,
 };
+
+const CODEXHUB_REMOTE_DISPLAY_NAME: &str = "codexhub";
 
 #[derive(Debug, Deserialize)]
 pub(super) struct RenameEnvironmentRequest {
@@ -141,7 +143,7 @@ fn remote_control_environment_item(snapshot: &RemoteControlStatusResponse) -> Va
         .server_name
         .clone()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| format!("飞书 Bridge ({})", local_host_name()));
+        .unwrap_or_else(|| CODEXHUB_REMOTE_DISPLAY_NAME.to_string());
 
     json!({
         "id": FEISHU_BRIDGE_ENV_ID,
@@ -194,7 +196,7 @@ fn feishu_bridge_client_item(connected: bool) -> Value {
     remote_control_client_json(RemoteControlClientJson {
         client_id: FEISHU_BRIDGE_CLIENT_ID.to_string(),
         account_user_id: "user_codexhub_local__acct_codexhub_local".to_string(),
-        display_name: "飞书 Bridge".to_string(),
+        display_name: CODEXHUB_REMOTE_DISPLAY_NAME.to_string(),
         device_model: local_device_model(),
         device_type: local_device_type(),
         platform: local_client_platform(),
@@ -296,15 +298,6 @@ fn local_device_model() -> String {
     format!("{} {}", local_platform_os(), local_arch())
 }
 
-fn local_host_name() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "Codex App".to_string())
-}
-
 fn local_platform_os() -> String {
     match std::env::consts::OS {
         "macos" => "darwin".to_string(),
@@ -316,5 +309,69 @@ fn local_arch() -> String {
     match std::env::consts::ARCH {
         "aarch64" => "arm64".to_string(),
         other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn feishu_bridge_client_uses_codexhub_display_name() {
+        let client = feishu_bridge_client_item(true);
+
+        for key in [
+            "display_name",
+            "displayName",
+            "name",
+            "title",
+            "device_name",
+            "deviceName",
+        ] {
+            assert_eq!(client[key], CODEXHUB_REMOTE_DISPLAY_NAME);
+        }
+    }
+
+    #[test]
+    fn remote_control_environment_fallback_uses_codexhub_display_name() {
+        let environment = remote_control_environment_item(&RemoteControlStatusResponse {
+            connected: true,
+            initialized: true,
+            active_connection_id: None,
+            active_source_kind: None,
+            active_user_agent: None,
+            connections: Vec::new(),
+            client_id: FEISHU_BRIDGE_CLIENT_ID.to_string(),
+            stream_id: Some("stream-test".to_string()),
+            server_id: None,
+            environment_id: None,
+            server_name: None,
+            installation_id: None,
+            account_id: None,
+            current_thread_id: None,
+            current_turn_id: None,
+            last_error: None,
+            healthy: true,
+            stale: false,
+            connected_at_ms: None,
+            last_ws_inbound_at_ms: None,
+            last_ws_ping_at_ms: None,
+            last_ws_pong_at_ms: None,
+            last_app_ping_at_ms: None,
+            last_app_pong_at_ms: None,
+            last_app_pong_status: None,
+            last_initialize_sent_at_ms: None,
+        });
+
+        for key in [
+            "display_name",
+            "displayName",
+            "host_name",
+            "hostName",
+            "name",
+            "title",
+        ] {
+            assert_eq!(environment[key], CODEXHUB_REMOTE_DISPLAY_NAME);
+        }
     }
 }
