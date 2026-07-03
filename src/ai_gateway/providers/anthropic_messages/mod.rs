@@ -76,6 +76,7 @@ pub async fn handle(
 ) -> Result<Response<Body>, GatewayError> {
     let options = AnthropicProviderOptions::from_provider(provider)?;
     let (mut anthropic_body, tool_name_map) = build_anthropic_request(request, options.profile)?;
+    insert_metadata_user_id(&mut anthropic_body, ctx);
     let has_internal_web_search = has_web_search_client_tool(&anthropic_body);
     let url = options.messages_url(provider);
     debug!(
@@ -706,6 +707,27 @@ fn claude_code_metadata_user_id(ctx: &GatewayContext) -> String {
         "session_id": session_id
     })
     .to_string()
+}
+
+/// Attaches a stable `metadata.user_id` to the outbound request, mirroring
+/// Claude Code. Anthropic uses this opaque identifier for abuse detection and,
+/// in practice, as a stickiness hint that helps consecutive requests from the
+/// same session land on cache-warm capacity. The value is derived from the
+/// session id (falling back to the prompt cache key), so it stays identical
+/// across every turn of a conversation. An existing user_id is left untouched.
+fn insert_metadata_user_id(body: &mut Value, ctx: &GatewayContext) {
+    let Some(body) = body.as_object_mut() else {
+        return;
+    };
+    let metadata = body
+        .entry("metadata".to_string())
+        .or_insert_with(|| json!({}));
+    let Some(metadata) = metadata.as_object_mut() else {
+        return;
+    };
+    metadata
+        .entry("user_id".to_string())
+        .or_insert_with(|| json!(claude_code_metadata_user_id(ctx)));
 }
 
 fn claude_code_device_id(session_id: &str) -> String {

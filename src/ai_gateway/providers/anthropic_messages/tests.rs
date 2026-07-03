@@ -7,7 +7,8 @@ use super::types::{ANTHROPIC_CLAUDE_CODE_BETA, ANTHROPIC_WEB_SEARCH_TYPE, CLAUDE
 use super::{
     WebSearchToolUse, anthropic_message_from_sse, append_tool_results, bearer_authorization,
     build_anthropic_upstream_request, emit_injected_web_search_call, find_web_search_tool_uses,
-    internal_web_search_body, merge_anthropic_betas, raw_sse_has_first_content_token,
+    insert_metadata_user_id, internal_web_search_body, merge_anthropic_betas,
+    raw_sse_has_first_content_token,
 };
 use crate::ai_gateway::config::{ProviderConfig, ProviderType};
 use crate::ai_gateway::context::GatewayContext;
@@ -1591,6 +1592,39 @@ fn builds_internal_web_search_body_like_claude_code() {
             .unwrap_or_default(),
         64
     );
+}
+
+#[test]
+fn injects_stable_metadata_user_id_into_main_request() {
+    let mut headers = HeaderMap::new();
+    headers.insert("session_id", HeaderValue::from_static("session-123"));
+    let ctx = GatewayContext::extract(&headers, None);
+
+    let mut body = json!({"model": "claude-opus-4-8", "messages": []});
+    insert_metadata_user_id(&mut body, &ctx);
+
+    // Claude Code ships metadata.user_id on the main request too; mirror it so
+    // consecutive turns of one session share a stable stickiness hint.
+    let metadata_user = body["metadata"]["user_id"].as_str().unwrap();
+    let metadata: Value = serde_json::from_str(metadata_user).unwrap();
+    assert_eq!(metadata["session_id"], "session-123");
+    assert_eq!(metadata["account_uuid"], "");
+    assert_eq!(metadata["device_id"].as_str().unwrap().len(), 64);
+}
+
+#[test]
+fn preserves_existing_metadata_user_id() {
+    let ctx = GatewayContext::extract(&HeaderMap::new(), Some("cache-key"));
+    let mut body = json!({
+        "model": "claude-opus-4-8",
+        "messages": [],
+        "metadata": {"user_id": "caller-supplied"}
+    });
+
+    insert_metadata_user_id(&mut body, &ctx);
+
+    // An id the caller already set must not be overwritten.
+    assert_eq!(body["metadata"]["user_id"], "caller-supplied");
 }
 
 #[test]
