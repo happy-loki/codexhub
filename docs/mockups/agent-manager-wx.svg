@@ -1,0 +1,194 @@
+<svg width="1360" height="860" viewBox="0 0 1360 860" xmlns="http://www.w3.org/2000/svg" font-family="Segoe UI, Tahoma, sans-serif">
+  <!-- Rendered to match src/gui/theme.rs light tokens and flat_bordered_panel (square 1px borders). -->
+  <rect width="1360" height="860" fill="rgb(237,240,245)"/>
+
+  <!-- Title bar -->
+  <rect x="0" y="0" width="1360" height="36" fill="rgb(248,250,252)"/>
+  <rect x="0" y="35" width="1360" height="1" fill="rgb(208,214,222)"/>
+  <text x="16" y="23" font-size="13" font-weight="bold" fill="rgb(23,28,36)">CodexHub</text>
+  <!-- Notebook tabs -->
+  <rect x="120" y="10" width="70" height="26" fill="rgb(255,255,255)"/>
+  <rect x="120" y="10" width="70" height="2" fill="rgb(36,99,235)"/>
+  <text x="140" y="27" font-size="12" fill="rgb(23,28,36)">Agents</text>
+  <text x="210" y="27" font-size="12" fill="rgb(124,133,146)">Gateway</text>
+  <text x="286" y="27" font-size="12" fill="rgb(124,133,146)">Logs</text>
+
+  <!-- ================= LEFT: agent list card ================= -->
+  <rect x="16" y="52" width="300" height="792" fill="rgb(255,255,255)" stroke="rgb(208,214,222)"/>
+  <text x="30" y="78" font-size="12" font-weight="bold" fill="rgb(23,28,36)">Local Agents</text>
+
+  <!-- toolbar: search + buttons -->
+  <rect x="30" y="90" width="272" height="30" fill="rgb(255,255,255)" stroke="rgb(208,214,222)"/>
+  <text x="42" y="110" font-size="12" fill="rgb(124,133,146)">Search agents</text>
+  <rect x="30" y="128" width="86" height="30" fill="rgb(36,99,235)"/>
+  <text x="52" y="148" font-size="12" fill="rgb(255,255,255)">+ New</text>
+  <rect x="124" y="128" width="100" height="30" fill="rgb(255,255,255)" stroke="rgb(208,214,222)"/>
+  <text x="140" y="148" font-size="12" fill="rgb(82,91,105)">Templates</text>
+
+  <!-- selected row -->
+  <rect x="30" y="172" width="272" height="52" fill="rgb(244,247,251)" stroke="rgb(36,99,235)"/>
+  <circle cx="46" cy="192" r="4" fill="rgb(28,127,89)"/>
+  <text x="58" y="192" font-size="12" font-weight="bold" fill="rgb(23,28,36)">Code Reviewer</text>
+  <text x="58" y="210" font-size="10" fill="rgb(124,133,146)">code-reviewer.toml</text>
+
+  <rect x="30" y="224" width="272" height="46" fill="rgb(255,255,255)"/>
+  <rect x="30" y="269" width="272" height="1" fill="rgb(237,240,245)"/>
+  <circle cx="46" cy="244" r="4" fill="rgb(124,133,146)"/>
+  <text x="58" y="244" font-size="12" fill="rgb(23,28,36)">Doc Writer</text>
+  <text x="58" y="261" font-size="10" fill="rgb(124,133,146)">doc-writer.toml</text>
+
+  <rect x="30" y="270" width="272" height="46" fill="rgb(255,255,255)"/>
+  <rect x="30" y="315" width="272" height="1" fill="rgb(237,240,245)"/>
+  <circle cx="46" cy="290" r="4" fill="rgb(124,133,146)"/>
+  <text x="58" y="290" font-size="12" fill="rgb(23,28,36)">Test Engineer</text>
+  <text x="58" y="307" font-size="10" fill="rgb(124,133,146)">test-engineer.toml</text>
+
+  <rect x="30" y="316" width="272" height="46" fill="rgb(255,255,255)"/>
+  <rect x="30" y="361" width="272" height="1" fill="rgb(237,240,245)"/>
+  <circle cx="46" cy="336" r="4" fill="rgb(124,133,146)"/>
+  <text x="58" y="336" font-size="12" fill="rgb(23,28,36)">Bug Fixer</text>
+  <text x="58" y="353" font-size="10" fill="rgb(124,133,146)">bug-fixer.toml</text>
+
+  <rect x="30" y="362" width="272" height="46" fill="rgb(255,255,255)"/>
+  <circle cx="46" cy="382" r="4" fill="rgb(124,133,146)"/>
+  <text x="58" y="382" font-size="12" fill="rgb(23,28,36)">Explorer</text>
+  <text x="58" y="399" font-size="10" fill="rgb(124,133,146)">explorer.toml (built-in)</text>
+
+  <!-- ================= CENTER: configuration card ================= -->
+  <rect x="328" y="52" width="612" height="792" fill="rgb(255,255,255)" stroke="rgb(208,214,222)"/>
+  <text x="344" y="78" font-size="12" font-weight="bold" fill="rgb(23,28,36)">Agent Configuration</text>
+  <text x="344" y="96" font-size="10" fill="rgb(124,133,146)">~/.codex/agents/code-reviewer.toml</text>
+
+  <!-- Name / Model row -->
+  <text x="344" y="128" font-size="10" fill="rgb(82,91,105)">Name</text>
+  <rect x="344" y="134" width="270" height="30" fill="rgb(255,255,255)" stroke="rgb(208,214,222)"/>
+  <text x="356" y="154" font-size="12" fill="rgb(23,28,36)">code-reviewer</text>
+  <text x="640" y="128" font-size="10" fill="rgb(82,91,105)">Model</text>
+  <rect x="640" y="134" width="284" height="30" fill="rgb(255,255,255)" stroke="rgb(208,214,222)"/>
+  <text x="652" y="154" font-size="12" fill="rgb(23,28,36)">gpt-5-codex</text>
+  <path d="M905 145 l6 6 l6 -6" fill="none" stroke="rgb(124,133,146)" stroke-width="1.5"/>
+
+  <!-- Description -->
+  <text x="344" y="188" font-size="10" fill="rgb(82,91,105)">Description</text>
+  <rect x="344" y="194" width="580" height="30" fill="rgb(255,255,255)" stroke="rgb(208,214,222)"/>
+  <text x="356" y="214" font-size="12" fill="rgb(23,28,36)">Professional code review: defects, performance, security.</text>
+
+  <!-- Reasoning effort segmented + approval -->
+  <text x="344" y="248" font-size="10" fill="rgb(82,91,105)">Reasoning effort</text>
+  <rect x="344" y="254" width="240" height="30" fill="rgb(238,241,245)" stroke="rgb(208,214,222)"/>
+  <rect x="504" y="254" width="80" height="30" fill="rgb(36,99,235)"/>
+  <text x="366" y="274" font-size="11" fill="rgb(124,133,146)">low</text>
+  <text x="426" y="274" font-size="11" fill="rgb(124,133,146)">medium</text>
+  <text x="524" y="274" font-size="11" fill="rgb(255,255,255)">high</text>
+  <text x="616" y="248" font-size="10" fill="rgb(82,91,105)">Approval policy</text>
+  <rect x="616" y="254" width="308" height="30" fill="rgb(255,255,255)" stroke="rgb(208,214,222)"/>
+  <text x="628" y="274" font-size="12" fill="rgb(23,28,36)">on-request</text>
+  <path d="M905 265 l6 6 l6 -6" fill="none" stroke="rgb(124,133,146)" stroke-width="1.5"/>
+
+  <!-- Developer instructions -->
+  <text x="344" y="308" font-size="10" fill="rgb(82,91,105)">Developer instructions</text>
+  <rect x="344" y="314" width="580" height="150" fill="rgb(255,255,255)" stroke="rgb(208,214,222)"/>
+  <text x="356" y="336" font-size="12" fill="rgb(23,28,36)">You are a senior code reviewer.</text>
+  <text x="356" y="358" font-size="12" fill="rgb(23,28,36)">Focus on correctness, security, and performance.</text>
+  <text x="356" y="380" font-size="12" fill="rgb(23,28,36)">Report findings first, with file references and</text>
+  <text x="356" y="402" font-size="12" fill="rgb(23,28,36)">concrete fixes.</text>
+
+  <!-- TOML preview (Scintilla code_bg light = white, keys/strings tokens) -->
+  <text x="344" y="492" font-size="10" fill="rgb(82,91,105)">TOML preview</text>
+  <rect x="344" y="498" width="580" height="330" fill="rgb(255,255,255)" stroke="rgb(208,214,222)"/>
+  <rect x="344" y="498" width="34" height="330" fill="rgb(243,246,250)"/>
+  <rect x="377" y="498" width="1" height="330" fill="rgb(208,214,222)"/>
+  <g font-family="Consolas, monospace" font-size="12">
+    <text x="360" y="520" fill="rgb(94,103,117)">1</text>
+    <text x="390" y="520" fill="rgb(26,84,160)">name</text><text x="430" y="520" fill="rgb(92,99,112)"> = </text><text x="452" y="520" fill="rgb(20,124,74)">"code-reviewer"</text>
+    <text x="360" y="542" fill="rgb(94,103,117)">2</text>
+    <text x="390" y="542" fill="rgb(26,84,160)">description</text><text x="470" y="542" fill="rgb(92,99,112)"> = </text><text x="492" y="542" fill="rgb(20,124,74)">"Professional code review..."</text>
+    <text x="360" y="564" fill="rgb(94,103,117)">3</text>
+    <text x="390" y="564" fill="rgb(26,84,160)">model</text><text x="435" y="564" fill="rgb(92,99,112)"> = </text><text x="457" y="564" fill="rgb(20,124,74)">"gpt-5-codex"</text>
+    <text x="360" y="586" fill="rgb(94,103,117)">4</text>
+    <text x="390" y="586" fill="rgb(26,84,160)">model_reasoning_effort</text><text x="565" y="586" fill="rgb(92,99,112)"> = </text><text x="587" y="586" fill="rgb(20,124,74)">"high"</text>
+    <text x="360" y="608" fill="rgb(94,103,117)">5</text>
+    <text x="390" y="608" fill="rgb(26,84,160)">approval_policy</text><text x="510" y="608" fill="rgb(92,99,112)"> = </text><text x="532" y="608" fill="rgb(20,124,74)">"on-request"</text>
+    <text x="360" y="630" fill="rgb(94,103,117)">6</text>
+    <text x="360" y="652" fill="rgb(94,103,117)">7</text>
+    <text x="390" y="652" fill="rgb(26,84,160)">developer_instructions</text><text x="565" y="652" fill="rgb(92,99,112)"> = </text><text x="587" y="652" fill="rgb(151,71,0)">"""</text>
+    <text x="360" y="674" fill="rgb(94,103,117)">8</text>
+    <text x="390" y="674" fill="rgb(38,45,56)">You are a senior code reviewer.</text>
+    <text x="360" y="696" fill="rgb(94,103,117)">9</text>
+    <text x="390" y="696" fill="rgb(38,45,56)">Focus on correctness, security,</text>
+    <text x="360" y="718" fill="rgb(94,103,117)">10</text>
+    <text x="390" y="718" fill="rgb(38,45,56)">and performance.</text>
+    <text x="360" y="740" fill="rgb(94,103,117)">11</text>
+    <text x="390" y="740" fill="rgb(151,71,0)">"""</text>
+  </g>
+  <!-- save / clone buttons -->
+  <rect x="762" y="792" width="76" height="30" fill="rgb(255,255,255)" stroke="rgb(208,214,222)"/>
+  <text x="782" y="812" font-size="12" fill="rgb(82,91,105)">Clone</text>
+  <rect x="848" y="792" width="76" height="30" fill="rgb(36,99,235)"/>
+  <text x="872" y="812" font-size="12" fill="rgb(255,255,255)">Save</text>
+
+  <!-- ================= RIGHT: interaction monitor card ================= -->
+  <rect x="952" y="52" width="392" height="792" fill="rgb(255,255,255)" stroke="rgb(208,214,222)"/>
+  <text x="968" y="78" font-size="12" font-weight="bold" fill="rgb(23,28,36)">Agent Interaction</text>
+  <text x="968" y="96" font-size="10" fill="rgb(124,133,146)">Session #a7f3  -  live</text>
+
+  <!-- stat row -->
+  <rect x="968" y="110" width="176" height="60" fill="rgb(248,250,252)" stroke="rgb(208,214,222)"/>
+  <text x="982" y="132" font-size="10" fill="rgb(124,133,146)">Active agents</text>
+  <text x="982" y="158" font-size="20" font-weight="bold" fill="rgb(23,28,36)">4</text>
+  <rect x="1152" y="110" width="176" height="60" fill="rgb(248,250,252)" stroke="rgb(208,214,222)"/>
+  <text x="1166" y="132" font-size="10" fill="rgb(124,133,146)">Total tokens</text>
+  <text x="1166" y="158" font-size="20" font-weight="bold" fill="rgb(23,28,36)">18.4k</text>
+
+  <text x="968" y="198" font-size="10" fill="rgb(82,91,105)">Call tree</text>
+
+  <!-- connector lines: drawn like topology_connector_bitmap (divider colour, 2px) -->
+  <g stroke="rgb(150,159,172)" stroke-width="2">
+    <line x1="984" y1="230" x2="984" y2="452"/>
+    <line x1="984" y1="252" x2="1010" y2="252"/>
+    <line x1="984" y1="330" x2="1010" y2="330"/>
+    <line x1="1030" y1="330" x2="1030" y2="408"/>
+    <line x1="1030" y1="408" x2="1056" y2="408"/>
+  </g>
+
+  <!-- Main Agent node -->
+  <rect x="968" y="212" width="360" height="52" fill="rgb(248,250,252)" stroke="rgb(208,214,222)"/>
+  <circle cx="986" cy="238" r="4" fill="rgb(28,127,89)"/>
+  <text x="1000" y="234" font-size="12" font-weight="bold" fill="rgb(23,28,36)">Main Agent</text>
+  <text x="1000" y="252" font-size="10" fill="rgb(124,133,146)">completed  -  2m 34s  -  8.2k tokens</text>
+
+  <!-- Code Reviewer node (indented) -->
+  <rect x="1010" y="290" width="318" height="52" fill="rgb(255,255,255)" stroke="rgb(208,214,222)"/>
+  <circle cx="1028" cy="316" r="4" fill="rgb(28,127,89)"/>
+  <text x="1042" y="312" font-size="12" font-weight="bold" fill="rgb(23,28,36)">Code Reviewer</text>
+  <text x="1042" y="330" font-size="10" fill="rgb(124,133,146)">completed  -  45s  -  3.1k tokens</text>
+
+  <!-- Test Engineer node (deeper) -->
+  <rect x="1056" y="382" width="272" height="52" fill="rgb(255,255,255)" stroke="rgb(208,214,222)"/>
+  <circle cx="1074" cy="408" r="4" fill="rgb(28,127,89)"/>
+  <text x="1088" y="404" font-size="12" font-weight="bold" fill="rgb(23,28,36)">Test Engineer</text>
+  <text x="1088" y="422" font-size="10" fill="rgb(124,133,146)">completed  -  18s  -  1.7k tokens</text>
+
+  <!-- Doc Writer node (running) -->
+  <rect x="1010" y="460" width="318" height="52" fill="rgb(255,255,255)" stroke="rgb(208,214,222)"/>
+  <line x1="984" y1="486" x2="1010" y2="486" stroke="rgb(150,159,172)" stroke-width="2"/>
+  <circle cx="1028" cy="486" r="4" fill="rgb(36,99,235)"/>
+  <text x="1042" y="482" font-size="12" font-weight="bold" fill="rgb(23,28,36)">Doc Writer</text>
+  <text x="1042" y="500" font-size="10" fill="rgb(124,133,146)">running  -  1m 12s  -  2.6k tokens</text>
+
+  <!-- detail panel -->
+  <text x="968" y="556" font-size="10" fill="rgb(82,91,105)">Selected node</text>
+  <rect x="968" y="562" width="360" height="266" fill="rgb(248,250,252)" stroke="rgb(208,214,222)"/>
+  <text x="982" y="586" font-size="12" font-weight="bold" fill="rgb(23,28,36)">Doc Writer</text>
+  <rect x="1070" y="572" width="70" height="22" fill="rgb(255,255,255)" stroke="rgb(36,99,235)"/>
+  <text x="1082" y="587" font-size="10" fill="rgb(36,99,235)">running</text>
+  <text x="982" y="612" font-size="10" fill="rgb(124,133,146)">Input preview</text>
+  <text x="982" y="632" font-family="Consolas, monospace" font-size="11" fill="rgb(38,45,56)">Summarize review findings and</text>
+  <text x="982" y="650" font-family="Consolas, monospace" font-size="11" fill="rgb(38,45,56)">prepare the release notes...</text>
+  <text x="982" y="682" font-size="10" fill="rgb(124,133,146)">Output (streaming)</text>
+  <text x="982" y="702" font-family="Consolas, monospace" font-size="11" fill="rgb(38,45,56)">## Summary</text>
+  <text x="982" y="720" font-family="Consolas, monospace" font-size="11" fill="rgb(38,45,56)">The reviewer flagged 3 issues in</text>
+  <text x="982" y="738" font-family="Consolas, monospace" font-size="11" fill="rgb(38,45,56)">the auth module...</text>
+  <text x="982" y="772" font-size="10" fill="rgb(124,133,146)">Tokens</text>
+  <text x="982" y="792" font-size="12" fill="rgb(23,28,36)">in 1.2k  /  out 1.4k</text>
+</svg>
