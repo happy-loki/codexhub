@@ -272,7 +272,7 @@ fn fetch_github_latest_release(
 fn fetch_update_text(text: GuiText, client: &Client, url: &str) -> Result<String, String> {
     let response = client
         .get(url)
-        .header("User-Agent", "codexhub")
+        .header("User-Agent", "codex-remote-gateway")
         .header("Accept", "application/json")
         .send()
         .map_err(|err| {
@@ -562,7 +562,7 @@ fn download_and_install_update_async(
                             &text.update_installer_started(&update.path.display().to_string()),
                         );
                         // The installer needs to replace the running executable.
-                        // Quit CodexHub (and its backend daemon) so the MSI no
+                        // Quit Codex Remote Gateway (and its backend daemon) so the MSI no
                         // longer sees the app holding files open, which would
                         // otherwise trigger Windows "close the running app"
                         // prompts (once per running process).
@@ -619,7 +619,7 @@ fn download_update(
         .map_err(|err| text.update_client_failed(&err.to_string()))?;
     let mut response = client
         .get(url)
-        .header("User-Agent", "codexhub")
+        .header("User-Agent", "codex-remote-gateway")
         .send()
         .map_err(|err| text.update_download_failed(url, &err.to_string()))?;
     let status = response.status();
@@ -707,33 +707,33 @@ fn update_download_path(url: &str, asset_type: Option<&str>) -> Result<PathBuf, 
         })
         .collect::<String>();
     Ok(std::env::temp_dir()
-        .join("CodexHubUpdates")
+        .join("CodexRemoteGatewayUpdates")
         .join(safe_filename))
 }
 
 fn default_update_filename(asset_type: Option<&str>) -> &'static str {
     match asset_type.unwrap_or_default().to_ascii_lowercase().as_str() {
-        "msi" => "CodexHub-update.msi",
-        "dmg" => "CodexHub-update.dmg",
-        "app-zip" => "CodexHub-update.app.zip",
-        "zip" => "CodexHub-update.zip",
+        "msi" => "CodexRemoteGateway-update.msi",
+        "dmg" => "CodexRemoteGateway-update.dmg",
+        "app-zip" => "CodexRemoteGateway-update.app.zip",
+        "zip" => "CodexRemoteGateway-update.zip",
         _ => default_platform_update_filename(),
     }
 }
 
 #[cfg(target_os = "windows")]
 fn default_platform_update_filename() -> &'static str {
-    "CodexHub-update.msi"
+    "CodexRemoteGateway-update.msi"
 }
 
 #[cfg(target_os = "macos")]
 fn default_platform_update_filename() -> &'static str {
-    "CodexHub-update.dmg"
+    "CodexRemoteGateway-update.dmg"
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 fn default_platform_update_filename() -> &'static str {
-    "CodexHub-update"
+    "CodexRemoteGateway-update"
 }
 
 fn launch_downloaded_update(text: GuiText, update: &DownloadedUpdate) -> Result<(), String> {

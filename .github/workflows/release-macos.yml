@@ -65,7 +65,7 @@ jobs:
       - name: Build App Bundle
         run: |
           set -euo pipefail
-          APP_NAME="CodexHub"
+          APP_NAME="Codex Remote Gateway"
           APP="target/dist/$APP_NAME.app"
           CONTENTS="$APP/Contents"
           MACOS="$CONTENTS/MacOS"
@@ -76,17 +76,17 @@ jobs:
 
           # Build wxWidgets as universal (arm64 + x86_64) and compile for native arch
           export WX_OSX_ARCHITECTURES="arm64;x86_64"
-          PATH="$(brew --prefix)/bin:$PATH" cargo build --release --features gui --bin codexhub --target aarch64-apple-darwin
+          PATH="$(brew --prefix)/bin:$PATH" cargo build --release --features gui --bin codex-remote-gateway --target aarch64-apple-darwin
 
           # Compile for Intel (wxWidgets libs are already fat, no rebuild needed)
-          PATH="$(brew --prefix)/bin:$PATH" cargo build --release --features gui --bin codexhub --target x86_64-apple-darwin
+          PATH="$(brew --prefix)/bin:$PATH" cargo build --release --features gui --bin codex-remote-gateway --target x86_64-apple-darwin
 
           # Create universal binary
           mkdir -p target/release
           lipo -create \
-            target/aarch64-apple-darwin/release/codexhub \
-            target/x86_64-apple-darwin/release/codexhub \
-            -output target/release/codexhub
+            target/aarch64-apple-darwin/release/codex-remote-gateway \
+            target/x86_64-apple-darwin/release/codex-remote-gateway \
+            -output target/release/codex-remote-gateway
 
           CARGO_VERSION="$(sed -n 's/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
           if [ -z "$CARGO_VERSION" ]; then
@@ -100,8 +100,8 @@ jobs:
           fi
           {
             echo "APP_VERSION=$APP_VERSION"
-            echo "MACOS_DMG_NAME=CodexHub-$APP_VERSION-macos-$MACOS_FILE_SLUG.dmg"
-            echo "MACOS_APP_ZIP_NAME=CodexHub-$APP_VERSION-macos-$MACOS_FILE_SLUG.app.zip"
+            echo "MACOS_DMG_NAME=CodexRemoteGateway-$APP_VERSION-macos-$MACOS_FILE_SLUG.dmg"
+            echo "MACOS_APP_ZIP_NAME=CodexRemoteGateway-$APP_VERSION-macos-$MACOS_FILE_SLUG.app.zip"
           } >> "$GITHUB_ENV"
 
           rm -rf "$APP"
@@ -111,7 +111,7 @@ jobs:
           /usr/libexec/PlistBuddy -c "Set :CFBundleVersion ${GITHUB_RUN_NUMBER:-1}" "$CONTENTS/Info.plist"
           cp "packaging/macos/AppIcon.icns" "$RESOURCES/AppIcon.icns"
           cp packaging/brand/*.png "$RESOURCES/brand/"
-          cp "target/release/codexhub" "$MACOS/$APP_NAME"
+          cp "target/release/codex-remote-gateway" "$MACOS/$APP_NAME"
           chmod +x "$MACOS/$APP_NAME"
 
       - name: Sign And Notarize
@@ -126,11 +126,11 @@ jobs:
           APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
         run: |
           set -euo pipefail
-          APP="target/dist/CodexHub.app"
-          DMG="target/dist/CodexHub.dmg"
+          APP="target/dist/Codex Remote Gateway.app"
+          DMG="target/dist/Codex Remote Gateway.dmg"
           DMG_STAGING="target/dist/dmg"
           ZIP="target/dist/${MACOS_APP_ZIP_NAME}"
-          NOTARY_ZIP="target/dist/CodexHub-notary.zip"
+          NOTARY_ZIP="target/dist/Codex Remote Gateway-notary.zip"
           ENTITLEMENTS="packaging/macos/entitlements.plist"
 
           if [ -n "${APPLE_API_KEY_P8:-}" ]; then
@@ -173,10 +173,10 @@ jobs:
 
           rm -rf "$DMG_STAGING"
           mkdir -p "$DMG_STAGING"
-          ditto "$APP" "$DMG_STAGING/CodexHub.app"
+          ditto "$APP" "$DMG_STAGING/Codex Remote Gateway.app"
           ln -s /Applications "$DMG_STAGING/Applications"
 
-          hdiutil create -volname "CodexHub" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG"
+          hdiutil create -volname "Codex Remote Gateway" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG"
           codesign --force --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "$DMG"
           notary_submit "$DMG"
           xcrun stapler staple "$DMG"
@@ -253,10 +253,10 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexHub-macOS-${{ matrix.file_slug }}
+          name: CodexRemoteGateway-macOS-${{ matrix.file_slug }}
           path: |
-            target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.dmg
-            target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.app.zip
+            target/dist/CodexRemoteGateway-*-macos-${{ matrix.file_slug }}.dmg
+            target/dist/CodexRemoteGateway-*-macos-${{ matrix.file_slug }}.app.zip
             target/dist/${{ matrix.manifest_name }}
 
       - name: Publish GitHub Release
@@ -268,6 +268,6 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
-            target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.dmg
-            target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.app.zip
+            target/dist/CodexRemoteGateway-*-macos-${{ matrix.file_slug }}.dmg
+            target/dist/CodexRemoteGateway-*-macos-${{ matrix.file_slug }}.app.zip
             target/dist/${{ matrix.manifest_name }}

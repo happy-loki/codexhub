@@ -1,4 +1,4 @@
-CodexHub v0.3.22
+Codex Remote Gateway v0.3.22
 
 这是一个大版本累积更新，涵盖了 AI Gateway 路由与流式、GUI 性能与桌面体验、macOS 构建体系、Anthropic/Claude Code 对齐等多个方向的改进。
 

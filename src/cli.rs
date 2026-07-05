@@ -1,4 +1,4 @@
-﻿use std::path::PathBuf;
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -58,13 +58,15 @@ impl Cli {
             Some("configure-codex-app") => parse_configure_codex_app(&remaining[1..])?,
             Some("uninstall-codex-app") => parse_uninstall_codex_app(&remaining[1..])?,
             Some("install-shim") | Some("uninstall-shim") | Some("shim") => anyhow::bail!(
-                "CLI shim support has been removed. Use `codexhub configure-codex-app` and Codex App remote-control instead."
+                "CLI shim support has been removed. Use `codex-remote-gateway configure-codex-app` and Codex App remote-control instead."
             ),
             Some("-h") | Some("--help") | Some("help") => {
                 print_help();
                 std::process::exit(0);
             }
-            Some(other) => anyhow::bail!("unknown command `{other}`. Run `codexhub help`."),
+            Some(other) => {
+                anyhow::bail!("unknown command `{other}`. Run `codex-remote-gateway help`.")
+            }
         };
 
         Ok(Self {
@@ -152,16 +154,16 @@ fn parse_uninstall_codex_app(args: &[String]) -> anyhow::Result<Command> {
 
 pub fn print_help() {
     println!(
-        r#"codexhub
+        r#"codex-remote-gateway
 
 Usage:
-  codexhub [--config PATH] gui
-  codexhub [--config PATH] daemon
-  codexhub [--config PATH] on
-  codexhub [--config PATH] off
-  codexhub [--config PATH] status
-  codexhub [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
-  codexhub [--config PATH] uninstall-codex-app [--codex-home PATH]
+  codex-remote-gateway [--config PATH] gui
+  codex-remote-gateway [--config PATH] daemon
+  codex-remote-gateway [--config PATH] on
+  codex-remote-gateway [--config PATH] off
+  codex-remote-gateway [--config PATH] status
+  codex-remote-gateway [--config PATH] configure-codex-app [--codex-home PATH] [--provider-name NAME] [--provider-base-url URL] [--provider-key TOKEN] [--model MODEL]
+  codex-remote-gateway [--config PATH] uninstall-codex-app [--codex-home PATH]
 
 Default command is gui when built with the gui feature, otherwise daemon.
 "#

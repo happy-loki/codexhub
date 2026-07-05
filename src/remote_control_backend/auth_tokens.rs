@@ -118,7 +118,7 @@ fn local_chatgpt_jwt(account_id: &str, plan_type: &str) -> String {
                 "id": account_id,
                 "is_default": true,
                 "role": "owner",
-                "title": "CodexHub Local"
+                "title": "Codex Remote Gateway Local"
             }]
         },
         "scp": ["openid", "profile", "email", "offline_access"],

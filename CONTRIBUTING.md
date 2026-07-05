@@ -1,6 +1,6 @@
 ﻿# Contributing
 
-Thanks for considering contributing to `codexhub`.
+Thanks for considering contributing to `codex-remote-gateway`.
 
 This project sits between Codex App remote-control and Feishu IM, so small protocol changes can affect message routing and approval behavior. Please keep changes conservative and easy to review.
 
@@ -23,7 +23,7 @@ cargo test approval
 - Keep Codex as the source of truth.
 - Do not change Codex cwd, model, sandbox, approval policy, or environment from the bridge.
 - Prefer forwarding official app-server protocol payloads instead of inventing bridge-specific semantics.
-- Keep Codex App launch clean: configuration should point it at the local backend, but `codexhub` should not wrap or launch Codex.
+- Keep Codex App launch clean: configuration should point it at the local backend, but `codex-remote-gateway` should not wrap or launch Codex.
 - Feishu UI should be compact and stateful; avoid repeated explanatory messages when card state can show the result.
 
 ## Pull Request Checklist

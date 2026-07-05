@@ -192,8 +192,8 @@ impl ImText {
 
     pub(crate) fn remote_not_connected(self) -> &'static str {
         self.choose(
-            "Codex remote-control 还没有连接。请在项目目录运行 codex，确认它已经通过 remote-control 连接到 codexhub。",
-            "Codex remote-control is not connected yet. Run codex in the project directory and make sure it is connected to codexhub through remote-control.",
+            "Codex remote-control 还没有连接。请在项目目录运行 codex，确认它已经通过 remote-control 连接到 codex-remote-gateway。",
+            "Codex remote-control is not connected yet. Run codex in the project directory and make sure it is connected to codex-remote-gateway through remote-control.",
         )
     }
 

@@ -130,7 +130,7 @@ pub fn restore_remote_control() -> Result<VsCodeExtensionPatchReport> {
             extension_js: Some(extension_js),
             backup_path: Some(backup_path),
             action: "no_backup".to_string(),
-            message: "没有找到 CodexHub 创建的插件备份，未还原。".to_string(),
+            message: "没有找到 Codex Remote Gateway 创建的插件备份，未还原。".to_string(),
         });
     }
 
@@ -155,7 +155,7 @@ pub fn restore_remote_control() -> Result<VsCodeExtensionPatchReport> {
             extension_js: Some(extension_js),
             backup_path: Some(backup_path),
             action: "skipped_unmanaged".to_string(),
-            message: "当前插件文件不像 CodexHub 写入的版本，未自动还原。".to_string(),
+            message: "当前插件文件不像 Codex Remote Gateway 写入的版本，未自动还原。".to_string(),
         });
     }
 

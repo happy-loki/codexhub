@@ -1,4 +1,4 @@
-﻿# codexhub
+﻿# codex-remote-gateway
 
 [中文说明](README.md)
 
@@ -13,7 +13,7 @@
 | Built-in AI Gateway | Keep Codex App on its native Responses entry while routing model calls to OpenAI, DeepSeek, Anthropic/Claude, Zhipu GLM, or compatible providers from the local GUI. |
 
 <p align="center">
-  <img src="docs/assets/product/main.png" alt="CodexHub GUI status and config UI" width="900">
+  <img src="docs/assets/product/main.png" alt="Codex Remote Gateway GUI status and config UI" width="900">
 </p>
 <p align="center">
   <img src="docs/assets/product/codex-app-chat.png" alt="Codex App session sync and image result" width="900">
@@ -22,7 +22,7 @@
   <img src="docs/assets/product/deepseek.jpg" alt="Codex App using DeepSeek through AI Gateway" width="900">
 </p>
 
-AI Gateway is a local model entry built into `codexhub`. Codex App keeps sending normal Responses-style requests, while `codexhub` routes them to the provider you configured and converts the result back into the shape Codex expects. Providers, visible models, model aliases, request logs, and image-generation-tool filtering are managed in the GUI.
+AI Gateway is a local model entry built into `codex-remote-gateway`. Codex App keeps sending normal Responses-style requests, while `codex-remote-gateway` routes them to the provider you configured and converts the result back into the shape Codex expects. Providers, visible models, model aliases, request logs, and image-generation-tool filtering are managed in the GUI.
 
 <p align="center">
   <img src="docs/assets/product/feishu-mobile-image.jpg" alt="Feishu mobile Codex image result" width="360">
@@ -46,15 +46,15 @@ For Codex App and the VS Code extension, the usual flow is: download the app -> 
 
 ### 1. Install
 
-Download `CodexHub.dmg` from GitHub Releases, drag it to Applications, then open it. On Windows, run `codexhub.exe` from the release package. On Linux, download `CodexHub Linux x86_64.AppImage`, make it executable, then double-click it.
+Download `Codex Remote Gateway.dmg` from GitHub Releases, drag it to Applications, then open it. On Windows, run `codex-remote-gateway.exe` from the release package. On Linux, download `Codex Remote Gateway Linux x86_64.AppImage`, make it executable, then double-click it.
 
-If macOS warns that the app was downloaded from the internet, confirm the system prompt. If your Linux desktop does not mark the AppImage as executable automatically, run `chmod +x "CodexHub Linux x86_64.AppImage"` once. The app does not install startup items and does not run in the background automatically.
+If macOS warns that the app was downloaded from the internet, confirm the system prompt. If your Linux desktop does not mark the AppImage as executable automatically, run `chmod +x "Codex Remote Gateway Linux x86_64.AppImage"` once. The app does not install startup items and does not run in the background automatically.
 
 Later, use `Help -> Check for Updates` to manually check GitHub Releases for a newer version. The MVP only opens the download page; it does not silently replace the local app.
 
 ### 2. Open The App
 
-Open `CodexHub`. The GUI starts the local backend automatically and stops the backend it started when the GUI exits.
+Open `Codex Remote Gateway`. The GUI starts the local backend automatically and stops the backend it started when the GUI exits.
 
 Continue when the status overview shows the local service is running.
 
@@ -84,7 +84,7 @@ If a provider rejects Codex's image generation tool, enable `Filter image genera
 
 ### 5. Write Codex Config
 
-Click `Write Codex Config` on the `Codex 接入` page. This points Codex App and the Codex VS Code extension at the local `codexhub` service and routes model requests through the local AI Gateway.
+Click `Write Codex Config` on the `Codex 接入` page. This points Codex App and the Codex VS Code extension at the local `codex-remote-gateway` service and routes model requests through the local AI Gateway.
 
 To go back to the previous Codex connection, click `Restore Codex Config`. The restore action is shown only after Codex config has been written.
 
@@ -92,17 +92,17 @@ To go back to the previous Codex connection, click `Restore Codex Config`. The r
 
 Open Codex App or the Codex VS Code extension normally, then enable remote-control / control this computer.
 
-When connected, `CodexHub` shows the Codex control channel as connected.
+When connected, `Codex Remote Gateway` shows the Codex control channel as connected.
 
-You do not need to see a remote device list in Codex App's connection settings. This project uses a local backend plus IM bridge. If the `CodexHub` status overview is normal, you can use it directly from the connected IM channel.
+You do not need to see a remote device list in Codex App's connection settings. This project uses a local backend plus IM bridge. If the `Codex Remote Gateway` status overview is normal, you can use it directly from the connected IM channel.
 
-If Codex App, the Codex VS Code extension, and Codex CLI are connected to `CodexHub` at the same time, new or resumed IM sessions choose the execution endpoint by fixed priority: Codex App > Codex VS Code extension > Codex CLI. After a session is bound, later messages keep using the selected endpoint until the IM session exits or binds again.
+If Codex App, the Codex VS Code extension, and Codex CLI are connected to `Codex Remote Gateway` at the same time, new or resumed IM sessions choose the execution endpoint by fixed priority: Codex App > Codex VS Code extension > Codex CLI. After a session is bound, later messages keep using the selected endpoint until the IM session exits or binds again.
 
 ### 7. Use Codex CLI
 
 If you want Codex CLI to work with Feishu / Telegram / WeChat, you do not need to replace the `codex` command or install a wrapper. Use the same three-step flow on macOS, Windows, and Linux.
 
-1. Open the `CodexHub` desktop app, finish IM channel setup and Codex access, and keep it running.
+1. Open the `Codex Remote Gateway` desktop app, finish IM channel setup and Codex access, and keep it running.
 
 2. Open a terminal in the project directory and start Codex app-server:
 
@@ -128,7 +128,7 @@ The WeChat path depends on a context token issued by the WeChat client. During l
 
 ## AI Gateway
 
-AI Gateway solves one practical problem: Codex expects its native model entry, but users often want to use more model providers. After providers are configured in the GUI, Codex App still sees a normal model list; `codexhub` handles provider routing and protocol conversion locally.
+AI Gateway solves one practical problem: Codex expects its native model entry, but users often want to use more model providers. After providers are configured in the GUI, Codex App still sees a normal model list; `codex-remote-gateway` handles provider routing and protocol conversion locally.
 
 Current highlights:
 
@@ -171,7 +171,7 @@ This does not uninstall Codex and does not delete Codex session history.
 
 ## Project Boundary
 
-`codexhub` only supports the clean official Codex remote-control path.
+`codex-remote-gateway` only supports the clean official Codex remote-control path.
 
 It does not:
 
@@ -198,7 +198,7 @@ official Codex app-server
   |
   | outbound remote-control websocket
   v
-codexhub local backend
+codex-remote-gateway local backend
   |
   | Feishu websocket events
   | Feishu message/card APIs
@@ -232,7 +232,7 @@ Thread binding model:
 ```powershell
 cargo fmt
 cargo test
-cargo build --release --features gui --bin codexhub
+cargo build --release --features gui --bin codex-remote-gateway
 ```
 
 Useful status endpoints while the daemon is running:

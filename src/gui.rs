@@ -34,24 +34,21 @@ const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
 #[cfg(not(target_os = "windows"))]
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
 const CODEX_APP_GUI_UNSUPPORTED: bool = !(cfg!(target_os = "macos") || cfg!(target_os = "windows"));
-const PROJECT_HOME_URL: &str = "https://github.com/happy-loki/codexhub";
+const PROJECT_HOME_URL: &str = "https://github.com/xuweizhengo/codex-remote-gateway";
 #[cfg(target_os = "windows")]
-const UPDATE_MANIFEST_URL: &str =
-    "https://github.com/happy-loki/codexhub/releases/latest/download/latest-windows.json";
+const UPDATE_MANIFEST_URL: &str = "https://github.com/xuweizhengo/codex-remote-gateway/releases/latest/download/latest-windows.json";
 #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const UPDATE_MANIFEST_URL: &str =
-    "https://github.com/happy-loki/codexhub/releases/latest/download/latest-macos-intel.json";
+const UPDATE_MANIFEST_URL: &str = "https://github.com/xuweizhengo/codex-remote-gateway/releases/latest/download/latest-macos-intel.json";
 #[cfg(all(target_os = "macos", not(target_arch = "x86_64")))]
-const UPDATE_MANIFEST_URL: &str =
-    "https://github.com/happy-loki/codexhub/releases/latest/download/latest-macos.json";
+const UPDATE_MANIFEST_URL: &str = "https://github.com/xuweizhengo/codex-remote-gateway/releases/latest/download/latest-macos.json";
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-const UPDATE_MANIFEST_URL: &str =
-    "https://github.com/happy-loki/codexhub/releases/latest/download/latest-linux.json";
+const UPDATE_MANIFEST_URL: &str = "https://github.com/xuweizhengo/codex-remote-gateway/releases/latest/download/latest-linux.json";
 const LEGACY_UPDATE_MANIFEST_URL: &str =
-    "https://github.com/happy-loki/codexhub/releases/latest/download/latest.json";
+    "https://github.com/xuweizhengo/codex-remote-gateway/releases/latest/download/latest.json";
 const UPDATE_RELEASE_API_URL: &str =
-    "https://api.github.com/repos/happy-loki/codexhub/releases/latest";
-const UPDATE_RELEASE_PAGE_URL: &str = "https://github.com/happy-loki/codexhub/releases/latest";
+    "https://api.github.com/repos/xuweizhengo/codex-remote-gateway/releases/latest";
+const UPDATE_RELEASE_PAGE_URL: &str =
+    "https://github.com/xuweizhengo/codex-remote-gateway/releases/latest";
 const DASHBOARD_REFRESH_INTERVAL_MS: i32 = 10_000;
 const REQUEST_LOG_REFRESH_INTERVAL_MS: i32 = 5_000;
 const REQUEST_LOG_TAB_INDEX: i32 = 3;
@@ -205,7 +202,7 @@ struct GuiSingleInstanceGuard {
 #[cfg(target_os = "windows")]
 impl GuiSingleInstanceGuard {
     fn acquire() -> Option<Self> {
-        let name: Vec<u16> = "Local\\CodexHubGuiSingleInstance"
+        let name: Vec<u16> = "Local\\CodexRemoteGatewayGuiSingleInstance"
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
@@ -242,7 +239,8 @@ struct GuiSingleInstanceGuard {
 #[cfg(not(target_os = "windows"))]
 impl GuiSingleInstanceGuard {
     fn acquire() -> Option<Self> {
-        SingleInstanceChecker::new("com.codexhub.gui", None).map(|checker| Self { checker })
+        SingleInstanceChecker::new("com.xuweizhengo.codex-remote-gateway.gui", None)
+            .map(|checker| Self { checker })
     }
 
     fn is_another_running(&self) -> bool {
@@ -252,7 +250,7 @@ impl GuiSingleInstanceGuard {
 
 pub fn run() {
     let Some(single_instance_guard) = GuiSingleInstanceGuard::acquire() else {
-        eprintln!("failed to create CodexHub GUI single instance checker");
+        eprintln!("failed to create Codex Remote Gateway GUI single instance checker");
         return;
     };
     if single_instance_guard.is_another_running() {
@@ -260,7 +258,7 @@ pub fn run() {
     }
 
     if let Err(err) = wxdragon::main(|app| build_ui(app, single_instance_guard)) {
-        eprintln!("failed to start CodexHub GUI: {err:?}");
+        eprintln!("failed to start Codex Remote Gateway GUI: {err:?}");
     }
 }
 
@@ -288,7 +286,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     // forces scrolling to find them).
     let frame_size = initial_frame_size();
     let frame = Frame::builder()
-        .with_title("CodexHub")
+        .with_title("Codex Remote Gateway")
         // Keep the first launch within smaller laptop work areas. The tab pages
         // own their scrolling, so the frame itself should not exceed the screen.
         .with_size(frame_size)
@@ -1922,7 +1920,7 @@ fn install_system_menu(
             text.check_updates_help(),
         )
         .append_separator()
-        .append_item(ID_ABOUT, text.about(), "About CodexHub")
+        .append_item(ID_ABOUT, text.about(), "About Codex Remote Gateway")
         .build();
     let menu_bar = MenuBar::builder()
         .append(file_menu, text.file_menu())
@@ -4347,7 +4345,7 @@ fn remote_active_ready(remote: Option<&RemoteControlStatus>, source_kind: &str) 
 }
 
 fn show_about_dialog(parent: &Frame) {
-    let dialog = Dialog::builder(parent, "About CodexHub")
+    let dialog = Dialog::builder(parent, "About Codex Remote Gateway")
         .with_style(DialogStyle::DefaultDialogStyle)
         .with_size(520, 260)
         .build();
@@ -4359,7 +4357,10 @@ fn show_about_dialog(parent: &Frame) {
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
 
     let title = StaticText::builder(&panel)
-        .with_label(&format!("CodexHub {}", env!("CARGO_PKG_VERSION")))
+        .with_label(&format!(
+            "Codex Remote Gateway {}",
+            env!("CARGO_PKG_VERSION")
+        ))
         .build();
     title.set_foreground_color(theme::theme().ink_primary);
     title.set_font(&theme::font(theme::TextRole::Title));
@@ -4417,14 +4418,14 @@ fn show_about_dialog(parent: &Frame) {
 }
 
 fn show_info(parent: &dyn WxWidget, message: &str) {
-    MessageDialog::builder(parent, message, "CodexHub")
+    MessageDialog::builder(parent, message, "Codex Remote Gateway")
         .with_style(MessageDialogStyle::OK | MessageDialogStyle::IconInformation)
         .build()
         .show_modal();
 }
 
 fn show_error(parent: &dyn WxWidget, message: &str) {
-    MessageDialog::builder(parent, message, "CodexHub")
+    MessageDialog::builder(parent, message, "Codex Remote Gateway")
         .with_style(MessageDialogStyle::OK | MessageDialogStyle::IconError)
         .build()
         .show_modal();

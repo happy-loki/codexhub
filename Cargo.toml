@@ -1,5 +1,5 @@
 [package]
-name = "codexhub"
+name = "codex-remote-gateway"
 version = "0.3.22"
 edition = "2024"
 license = "Apache-2.0"
@@ -56,5 +56,5 @@ wxdragon-sys = { path = "vendor/wxdragon/rust/wxdragon-sys" }
 wxdragon-macros = { path = "vendor/wxdragon/rust/wxdragon-macros" }
 
 [[bin]]
-name = "codexhub"
+name = "codex-remote-gateway"
 path = "src/main.rs"

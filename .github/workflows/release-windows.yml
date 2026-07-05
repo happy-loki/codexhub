@@ -60,8 +60,8 @@ jobs:
 
           "APP_VERSION=$appVersion" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "PRODUCT_VERSION=$productVersion" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "WINDOWS_ZIP_NAME=CodexHub-$appVersion-windows-x64.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "WINDOWS_MSI_NAME=CodexHub-$appVersion-windows-x64.msi" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "WINDOWS_ZIP_NAME=CodexRemoteGateway-$appVersion-windows-x64.zip" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "WINDOWS_MSI_NAME=CodexRemoteGateway-$appVersion-windows-x64.msi" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
       - name: Reset wxWidgets CMake Cache
         shell: pwsh
@@ -74,7 +74,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          cargo build --release --features gui --bin codexhub
+          cargo build --release --features gui --bin codex-remote-gateway
 
       - name: Sign Binaries
         if: env.HAS_WINDOWS_CODESIGN == 'true'
@@ -96,7 +96,7 @@ jobs:
           }
 
           $files = @(
-            "target\release\codexhub.exe"
+            "target\release\codex-remote-gateway.exe"
           )
           foreach ($file in $files) {
             & $signtool.FullName sign `
@@ -114,21 +114,21 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $distRoot = "target\dist"
-          $zipDist = Join-Path $distRoot "CodexHub Windows x64"
+          $zipDist = Join-Path $distRoot "Codex Remote Gateway Windows x64"
           $msiSource = "target\msi-source"
           Remove-Item -Recurse -Force $distRoot -ErrorAction SilentlyContinue
           Remove-Item -Recurse -Force $msiSource -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force $zipDist | Out-Null
           New-Item -ItemType Directory -Force $msiSource | Out-Null
 
-          Copy-Item "target\release\codexhub.exe" (Join-Path $zipDist "CodexHub.exe")
+          Copy-Item "target\release\codex-remote-gateway.exe" (Join-Path $zipDist "Codex Remote Gateway.exe")
           Copy-Item "README.md" $zipDist
           Copy-Item "README.en.md" $zipDist
           if (Test-Path "config.example.toml") {
             Copy-Item "config.example.toml" $zipDist
           }
 
-          Copy-Item "target\release\codexhub.exe" (Join-Path $msiSource "CodexHub.exe")
+          Copy-Item "target\release\codex-remote-gateway.exe" (Join-Path $msiSource "Codex Remote Gateway.exe")
           Copy-Item "README.md" $msiSource
           Copy-Item "README.en.md" $msiSource
           Copy-Item "config.example.toml" $msiSource
@@ -159,7 +159,7 @@ jobs:
           }
           $sourceDir = (Resolve-Path "target\msi-source").Path
           $msiPath = Join-Path "target\dist" $env:WINDOWS_MSI_NAME
-          & $wix build "packaging\windows\CodexHub.wxs" `
+          & $wix build "packaging\windows\CodexRemoteGateway.wxs" `
             -acceptEula wix7 `
             -arch x64 `
             -d "ProductVersion=$env:PRODUCT_VERSION" `
@@ -245,11 +245,11 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
             <channel>
-              <title>CodexHub Windows Updates</title>
+              <title>Codex Remote Gateway Windows Updates</title>
               <link>$xmlReleaseUrl</link>
-              <description>CodexHub Windows update feed</description>
+              <description>Codex Remote Gateway Windows update feed</description>
               <item>
-                <title>CodexHub $xmlShortVersion</title>
+                <title>Codex Remote Gateway $xmlShortVersion</title>
                 <link>$xmlReleaseUrl</link>
                 <pubDate>$pubDate</pubDate>
                 <sparkle:releaseNotesLink>$xmlReleaseUrl</sparkle:releaseNotesLink>
@@ -268,10 +268,10 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexHub-Windows
+          name: CodexRemoteGateway-Windows
           path: |
-            target/dist/CodexHub-*-windows-x64.zip
-            target/dist/CodexHub-*-windows-x64.msi
+            target/dist/CodexRemoteGateway-*-windows-x64.zip
+            target/dist/CodexRemoteGateway-*-windows-x64.msi
             target/dist/latest-windows.json
             target/dist/appcast-windows.xml
 
@@ -284,7 +284,7 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
-            target/dist/CodexHub-*-windows-x64.zip
-            target/dist/CodexHub-*-windows-x64.msi
+            target/dist/CodexRemoteGateway-*-windows-x64.zip
+            target/dist/CodexRemoteGateway-*-windows-x64.msi
             target/dist/latest-windows.json
             target/dist/appcast-windows.xml

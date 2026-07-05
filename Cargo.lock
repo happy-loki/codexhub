@@ -326,8 +326,8 @@ dependencies = [
 ]
 
 [[package]]
-name = "codexhub"
-version = "0.3.21"
+name = "codex-remote-gateway"
+version = "0.3.22"
 dependencies = [
  "aes",
  "anyhow",

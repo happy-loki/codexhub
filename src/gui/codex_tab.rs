@@ -28,7 +28,7 @@ type CodexModelSlugs = Rc<Vec<String>>;
 type CodexModelChecks = Rc<Vec<CheckBox>>;
 type CodexModelsInitialized = Rc<Cell<bool>>;
 type CodexConfigured = Rc<Cell<bool>>;
-type CodexHubReady = Rc<Cell<bool>>;
+type CodexRemoteReady = Rc<Cell<bool>>;
 type CodexServiceEnabled = Rc<Cell<bool>>;
 type FastStartupSyncing = Rc<Cell<bool>>;
 
@@ -45,7 +45,7 @@ pub(super) struct CodexTab {
     model_slugs: CodexModelSlugs,
     models_initialized: CodexModelsInitialized,
     configured: CodexConfigured,
-    remote_ready: CodexHubReady,
+    remote_ready: CodexRemoteReady,
     service_enabled: CodexServiceEnabled,
     local_connection_mode: Rc<Cell<LocalConnectionMode>>,
     fast_startup_syncing: FastStartupSyncing,

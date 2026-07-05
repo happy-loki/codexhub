@@ -269,7 +269,7 @@ pub(super) fn stop_daemon_by_port(api: &ApiClient) {
         if let Some(value) = line.strip_prefix('p') {
             pid = Some(value.to_string());
         } else if let Some(command) = line.strip_prefix('c')
-            && command.contains("codexhub")
+            && is_codex_remote_gateway_command(command)
         {
             if let Some(pid) = pid.take() {
                 let _ = Command::new("kill").arg(pid).status();
@@ -312,7 +312,7 @@ pub(super) fn stop_daemon_by_port(api: &ApiClient) {
     }
 
     for pid in pids {
-        if windows_pid_is_codexhub(&pid) {
+        if windows_pid_is_codex_remote_gateway(&pid) {
             let mut command = Command::new("taskkill");
             command.args(["/PID", &pid, "/F", "/T"]);
             hide_command_window(&mut command);
@@ -329,7 +329,7 @@ pub(super) fn netstat_addr_has_port(addr: &str, port: u16) -> bool {
 }
 
 #[cfg(windows)]
-pub(super) fn windows_pid_is_codexhub(pid: &str) -> bool {
+pub(super) fn windows_pid_is_codex_remote_gateway(pid: &str) -> bool {
     let filter = format!("PID eq {pid}");
     let mut command = Command::new("tasklist");
     command.args(["/FI", &filter, "/FO", "CSV", "/NH"]);
@@ -339,7 +339,13 @@ pub(super) fn windows_pid_is_codexhub(pid: &str) -> bool {
     };
     String::from_utf8_lossy(&output.stdout)
         .to_ascii_lowercase()
-        .contains("codexhub")
+        .split(',')
+        .any(is_codex_remote_gateway_command)
+}
+
+fn is_codex_remote_gateway_command(command: &str) -> bool {
+    let command = command.to_ascii_lowercase();
+    command.contains("codex-remote-gateway") || command.contains("codexhub")
 }
 
 #[cfg(all(not(unix), not(windows)))]
@@ -403,7 +409,7 @@ pub(super) fn app_support_config_path() -> PathBuf {
 pub(super) fn platform_app_support_config_path() -> PathBuf {
     let legacy = env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/CodexHub/config.toml"));
+        .map(|home| home.join("Library/Application Support/Codex Remote Gateway/config.toml"));
     if let Some(path) = legacy.filter(|path| path.exists()) {
         return path;
     }
@@ -412,14 +418,30 @@ pub(super) fn platform_app_support_config_path() -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
-    base.join("CodexHub").join("config.toml")
+    let preferred = base.join("Codex Remote Gateway").join("config.toml");
+    if preferred.exists() {
+        return preferred;
+    }
+    let legacy = base.join("CodexHub").join("config.toml");
+    if legacy.exists() {
+        return legacy;
+    }
+    preferred
 }
 
 #[cfg(not(target_os = "windows"))]
 pub(super) fn platform_app_support_config_path() -> PathBuf {
     let base = env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join("Library/Application Support/CodexHub"))
+        .map(|home| {
+            let preferred = home.join("Library/Application Support/Codex Remote Gateway");
+            if preferred.exists() {
+                preferred
+            } else {
+                let legacy = home.join("Library/Application Support/CodexHub");
+                if legacy.exists() { legacy } else { preferred }
+            }
+        })
         .or_else(|| env::current_dir().ok())
         .unwrap_or_else(|| PathBuf::from("."));
     base.join("config.toml")
@@ -444,7 +466,7 @@ pub(super) fn adjacent_config_from_current_exe() -> Option<PathBuf> {
         .filter(|path| {
             // Only use the exe-adjacent config when its directory is writable.
             // Installed builds under protected locations such as
-            // `C:\\Program Files\\CodexHub` ship a default `config.toml` next to
+            // `C:\\Program Files\\Codex Remote Gateway` ship a default `config.toml` next to
             // the exe, but the directory is read-only for normal-privilege
             // processes, so saving config there fails with HTTP 500. In that
             // case fall through to the per-user app-support path instead.
@@ -461,7 +483,7 @@ fn config_directory_is_writable(dir: &Path) -> bool {
         .duration_since(UNIX_EPOCH)
         .map(|value| value.as_nanos())
         .unwrap_or(0);
-    let probe = dir.join(format!(".codexhub-write-probe-{nanos}"));
+    let probe = dir.join(format!(".codex-remote-gateway-write-probe-{nanos}"));
     match std::fs::File::create(&probe) {
         Ok(_) => {
             let _ = std::fs::remove_file(&probe);

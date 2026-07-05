@@ -5,17 +5,17 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>
-  <string>CodexHub</string>
+  <string>Codex Remote Gateway</string>
   <key>CFBundleExecutable</key>
-  <string>CodexHub</string>
+  <string>Codex Remote Gateway</string>
   <key>CFBundleIconFile</key>
   <string>AppIcon</string>
   <key>CFBundleIdentifier</key>
-  <string>com.codexhub.app</string>
+  <string>com.xuweizhengo.codex-remote-gateway</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>CodexHub</string>
+  <string>Codex Remote Gateway</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>

@@ -58,29 +58,29 @@ jobs:
       - name: Build Release
         run: |
           set -euo pipefail
-          cargo build --release --features gui --bin codexhub
-          strip target/release/codexhub
+          cargo build --release --features gui --bin codex-remote-gateway
+          strip target/release/codex-remote-gateway
 
       - name: Package Tarball
         run: |
           set -euo pipefail
           DIST_ROOT="target/dist"
-          PACKAGE_DIR="$DIST_ROOT/CodexHub Linux x86_64"
+          PACKAGE_DIR="$DIST_ROOT/Codex Remote Gateway Linux x86_64"
           rm -rf "$DIST_ROOT"
           mkdir -p \
             "$PACKAGE_DIR/bin" \
             "$PACKAGE_DIR/share/applications" \
             "$PACKAGE_DIR/share/icons/hicolor/256x256/apps"
 
-          cp target/release/codexhub "$PACKAGE_DIR/bin/codexhub"
-          cp packaging/linux/codexhub.desktop "$PACKAGE_DIR/share/applications/codexhub.desktop"
-          cp packaging/icons/dolphin-rounded-256.png "$PACKAGE_DIR/share/icons/hicolor/256x256/apps/codexhub.png"
+          cp target/release/codex-remote-gateway "$PACKAGE_DIR/bin/codex-remote-gateway"
+          cp packaging/linux/codex-remote-gateway.desktop "$PACKAGE_DIR/share/applications/codex-remote-gateway.desktop"
+          cp packaging/icons/dolphin-rounded-256.png "$PACKAGE_DIR/share/icons/hicolor/256x256/apps/codex-remote-gateway.png"
           cp README.md README.en.md "$PACKAGE_DIR/"
           if [ -f config.example.toml ]; then
             cp config.example.toml "$PACKAGE_DIR/"
           fi
 
-          tar -C "$DIST_ROOT" -czf "$DIST_ROOT/CodexHub Linux x86_64.tar.gz" "CodexHub Linux x86_64"
+          tar -C "$DIST_ROOT" -czf "$DIST_ROOT/Codex Remote Gateway Linux x86_64.tar.gz" "Codex Remote Gateway Linux x86_64"
 
       - name: Build AppImage
         env:
@@ -95,10 +95,10 @@ jobs:
             "$APPDIR/usr/share/applications" \
             "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 
-          cp target/release/codexhub "$APPDIR/usr/bin/codexhub"
-          cp packaging/linux/codexhub.desktop "$APPDIR/usr/share/applications/codexhub.desktop"
-          cp packaging/icons/dolphin-rounded-256.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/codexhub.png"
-          desktop-file-validate "$APPDIR/usr/share/applications/codexhub.desktop"
+          cp target/release/codex-remote-gateway "$APPDIR/usr/bin/codex-remote-gateway"
+          cp packaging/linux/codex-remote-gateway.desktop "$APPDIR/usr/share/applications/codex-remote-gateway.desktop"
+          cp packaging/icons/dolphin-rounded-256.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/codex-remote-gateway.png"
+          desktop-file-validate "$APPDIR/usr/share/applications/codex-remote-gateway.desktop"
 
           wget -q "https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage"
           wget -q "https://raw.githubusercontent.com/linuxdeploy/linuxdeploy-plugin-gtk/master/linuxdeploy-plugin-gtk.sh"
@@ -107,24 +107,24 @@ jobs:
           export LINUXDEPLOY_OUTPUT_VERSION="${VERSION#v}"
           ./linuxdeploy-x86_64.AppImage \
             --appdir "$APPDIR" \
-            --executable "$APPDIR/usr/bin/codexhub" \
-            --desktop-file "$APPDIR/usr/share/applications/codexhub.desktop" \
-            --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/codexhub.png" \
+            --executable "$APPDIR/usr/bin/codex-remote-gateway" \
+            --desktop-file "$APPDIR/usr/share/applications/codex-remote-gateway.desktop" \
+            --icon-file "$APPDIR/usr/share/icons/hicolor/256x256/apps/codex-remote-gateway.png" \
             --plugin gtk \
             --output appimage
 
           rm -f linuxdeploy-x86_64.AppImage linuxdeploy-plugin-gtk.sh
           APPIMAGE="$(find . -maxdepth 1 -name '*.AppImage' -print -quit)"
           test -n "$APPIMAGE"
-          mv "$APPIMAGE" "$DIST_ROOT/CodexHub Linux x86_64.AppImage"
+          mv "$APPIMAGE" "$DIST_ROOT/Codex Remote Gateway Linux x86_64.AppImage"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CodexHub-Linux
+          name: CodexRemoteGateway-Linux
           path: |
-            target/dist/CodexHub Linux x86_64.AppImage
-            target/dist/CodexHub Linux x86_64.tar.gz
+            target/dist/Codex Remote Gateway Linux x86_64.AppImage
+            target/dist/Codex Remote Gateway Linux x86_64.tar.gz
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -135,5 +135,5 @@ jobs:
           prerelease: ${{ contains(github.ref_name, '-') }}
           make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
           files: |
-            target/dist/CodexHub Linux x86_64.AppImage
-            target/dist/CodexHub Linux x86_64.tar.gz
+            target/dist/Codex Remote Gateway Linux x86_64.AppImage
+            target/dist/Codex Remote Gateway Linux x86_64.tar.gz

@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Codex Remote Gateway"
+    Manufacturer="xuweizhengo"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="{42B4BF3C-E660-4C83-96AA-56A4426B96A2}"
+    Scope="perMachine"
+    Compressed="yes">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="CodexRemoteGatewayIcon" SourceFile="$(var.SourceDir)\AppIcon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="CodexRemoteGatewayIcon" />
+
+    <StandardDirectory Id="ProgramFiles6432Folder">
+      <Directory Id="INSTALLFOLDER" Name="Codex Remote Gateway">
+        <Component Id="CodexRemoteGatewayExecutable" Guid="{12277B76-8F43-441F-AFFD-63FB150BB29E}">
+          <File Id="CodexRemoteGatewayExe" Source="$(var.SourceDir)\Codex Remote Gateway.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="CodexRemoteGatewayReadme" Guid="{E92E4DFB-DB47-4059-AC08-2BFA1E8FFF4C}">
+          <File Id="ReadmeMd" Source="$(var.SourceDir)\README.md" KeyPath="yes" />
+        </Component>
+        <Component Id="CodexRemoteGatewayReadmeEn" Guid="{6859DAFC-B8CA-4F9E-B320-3B44494CD1D3}">
+          <File Id="ReadmeEnMd" Source="$(var.SourceDir)\README.en.md" KeyPath="yes" />
+        </Component>
+        <Component Id="CodexRemoteGatewayConfigExample" Guid="{0C195660-3D69-4675-A47D-2B2F97B01084}">
+          <File Id="ConfigExampleToml" Source="$(var.SourceDir)\config.example.toml" KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ApplicationProgramsFolder" Name="Codex Remote Gateway">
+        <Component Id="CodexRemoteGatewayStartMenuShortcut" Guid="{7F8F4957-5919-4CD2-8B22-7598FB648600}">
+          <Shortcut
+            Id="CodexRemoteGatewayStartMenuShortcut"
+            Name="Codex Remote Gateway"
+            Description="Open Codex Remote Gateway"
+            Target="[INSTALLFOLDER]Codex Remote Gateway.exe"
+            WorkingDirectory="INSTALLFOLDER"
+            Icon="CodexRemoteGatewayIcon" />
+          <RemoveFolder Id="RemoveApplicationProgramsFolder" On="uninstall" />
+          <RegistryValue
+            Root="HKLM"
+            Key="Software\CodexRemoteGateway"
+            Name="StartMenuShortcut"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="CodexRemoteGatewayDesktopShortcut" Guid="{807CD976-6CCB-49F8-B0D2-E01493319A63}">
+        <Shortcut
+          Id="CodexRemoteGatewayDesktopShortcut"
+          Name="Codex Remote Gateway"
+          Description="Open Codex Remote Gateway"
+          Target="[INSTALLFOLDER]Codex Remote Gateway.exe"
+          WorkingDirectory="INSTALLFOLDER"
+          Icon="CodexRemoteGatewayIcon" />
+        <RegistryValue
+          Root="HKLM"
+          Key="Software\CodexRemoteGateway"
+          Name="DesktopShortcut"
+          Type="integer"
+          Value="1"
+          KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="Codex Remote Gateway" Level="1">
+      <ComponentRef Id="CodexRemoteGatewayExecutable" />
+      <ComponentRef Id="CodexRemoteGatewayReadme" />
+      <ComponentRef Id="CodexRemoteGatewayReadmeEn" />
+      <ComponentRef Id="CodexRemoteGatewayConfigExample" />
+      <ComponentRef Id="CodexRemoteGatewayStartMenuShortcut" />
+      <ComponentRef Id="CodexRemoteGatewayDesktopShortcut" />
+    </Feature>
+  </Package>
+</Wix>

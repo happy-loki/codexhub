@@ -96,7 +96,7 @@ pub async fn listen_polling(
                         let _ = api
                             .send_text(
                                 &chat_id,
-                                "当前 Telegram 私聊未授权。请在本机 CodexHub 配置 allowedChatIds。",
+                                "当前 Telegram 私聊未授权。请在本机 Codex Remote Gateway 配置 allowedChatIds。",
                             )
                             .await;
                     }

@@ -148,7 +148,7 @@ impl WechatApi {
         if !self.is_configured() {
             return Err(anyhow!("wechat bot_token is empty"));
         }
-        let client_id = next_client_id("codexhub-wechat");
+        let client_id = next_client_id("codex-remote-gateway-wechat");
         let mut msg = json!({
             "from_user_id": "",
             "to_user_id": to_user_id,
@@ -283,7 +283,7 @@ impl WechatApi {
         context_token: &str,
         uploaded: &UploadedImage,
     ) -> Result<String> {
-        let client_id = next_client_id("codexhub-wechat-image");
+        let client_id = next_client_id("codex-remote-gateway-wechat-image");
         let msg = ImageMessage {
             from_user_id: "",
             to_user_id,
@@ -633,7 +633,7 @@ fn build_common_headers() -> Result<HeaderMap> {
 fn base_info() -> Value {
     json!({
         "channel_version": env!("CARGO_PKG_VERSION"),
-        "bot_agent": format!("CodexHub/{}", env!("CARGO_PKG_VERSION")),
+        "bot_agent": format!("Codex Remote Gateway/{}", env!("CARGO_PKG_VERSION")),
     })
 }
 

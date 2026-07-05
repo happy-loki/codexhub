@@ -1,5 +1,5 @@
 bind = "127.0.0.1:3847"
-statePath = "codexhub-state.json"
+statePath = "codex-remote-gateway-state.json"
 
 [feishu]
 enabled = true
