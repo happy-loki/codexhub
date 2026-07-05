@@ -24,7 +24,7 @@ mod codex_app;
 mod im_api;
 mod oauth;
 mod onboarding;
-mod plugins;
+pub(crate) mod plugins;
 
 pub async fn start_bridge_if_ready(state: &SharedState, event_message: &'static str) -> bool {
     im_api::start_bridge_task(state, im_api::BridgeStartMode::KeepExisting, event_message).await

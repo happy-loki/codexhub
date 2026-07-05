@@ -31,6 +31,7 @@ const CODEX_APP_PRIMARY_DB: &str = "codex.db";
 const CODEX_APP_DEV_DB: &str = "codex-dev.db";
 const CODEX_APP_REMOTE_CONTROL_FEATURE: &str = "remote_control";
 const CODEX_MODELS_CACHE_FILE: &str = "models_cache.json";
+const CODEX_CONNECTOR_DIRECTORY_CACHE_DIR: &str = "cache/codex_app_directory";
 const SQLITE_WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(2);
 const SQLITE_INSPECT_BUSY_TIMEOUT: Duration = Duration::from_millis(150);
 const CODEXHUB_HOME_ENV: &str = "CODEXHUB_HOME";
@@ -39,7 +40,6 @@ const OPENAI_CURATED_MARKETPLACE_NAME: &str = "openai-curated";
 const CODEXHUB_BUNDLED_REMOTE_ID_PREFIX: &str = "plugins~codexhub-bundled-";
 const REMOTE_PLUGIN_INSTALL_METADATA_FILE: &str = ".codex-remote-plugin-install.json";
 const PLUGIN_BLOCKING_FEATURE_FLAGS: &[&str] = &[
-    "apps",
     "plugins",
     "computer_use",
     "browser_use",
@@ -238,6 +238,12 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
         "[codex_app_config] event=clear_legacy_bundled_plugin_state_done removed_identity_files={} removed_catalog_files={}",
         legacy_plugin_cleanup.removed_remote_identity_files,
         legacy_plugin_cleanup.removed_remote_catalog_files
+    ));
+
+    chain_log::write_line("[codex_app_config] event=clear_connector_directory_cache_start");
+    let removed_connector_cache = clear_connector_directory_cache(&codex_home)?;
+    chain_log::write_line(format!(
+        "[codex_app_config] event=clear_connector_directory_cache_done removed_files={removed_connector_cache}"
     ));
 
     chain_log::write_line("[codex_app_config] event=remote_control_switch_start");
@@ -1107,10 +1113,12 @@ fn write_config_toml(path: &Path, options: &ConfigureCodexAppOptions) -> Result<
     }
 
     remove_disabled_plugin_feature_flags(&mut doc);
+    disable_host_owned_codex_apps(&mut doc);
     remove_legacy_openai_bundled_marketplace(&mut doc);
     upsert_enabled_plugins(&mut doc, REQUIRED_OPENAI_BUNDLED_PLUGIN_IDS);
     if let Some(openai_curated) = find_openai_curated_marketplace_root(&codex_home) {
         upsert_local_marketplace(&mut doc, OPENAI_CURATED_MARKETPLACE_NAME, &openai_curated);
+        filter_curated_marketplace_manifests(&openai_curated);
     }
     disable_default_otel_telemetry(&mut doc);
 
@@ -1138,6 +1146,18 @@ fn remove_disabled_plugin_feature_flags(doc: &mut toml_edit::DocumentMut) {
     if remove_features {
         doc.remove("features");
     }
+}
+
+// The `codex_apps` MCP is a host-owned server Codex auto-registers whenever the
+// `apps` feature is enabled and the session uses a Codex backend. Its transport
+// is a ChatGPT-hosted streamable HTTP endpoint (e.g. `.../backend-api/wham/apps`),
+// which codexhub does not implement, so startup logs an `MCP client for
+// `codex_apps` failed to start` error and the Apps/Connectors that depend on
+// OpenAI's remote services are surfaced but unusable. codexhub runs fully against
+// a local backend, so we turn the feature off to skip the registration entirely.
+fn disable_host_owned_codex_apps(doc: &mut toml_edit::DocumentMut) {
+    let features = ensure_config_table(doc, "features");
+    features["apps"] = toml_edit::value(false);
 }
 
 fn remove_legacy_openai_bundled_marketplace(doc: &mut toml_edit::DocumentMut) {
@@ -1284,6 +1304,112 @@ fn openai_curated_marketplace_exists(path: &Path) -> bool {
         .join("plugins")
         .join("marketplace.json")
         .is_file()
+}
+
+// Codex reads a `source_type = "local"` marketplace straight off disk from
+// `.agents/plugins/{marketplace,api_marketplace}.json`, so our HTTP-level
+// plugin filtering (which only affects the discovery API) never touches what
+// the app actually enumerates. The curated catalog ships ~180 entries, and the
+// large majority depend on OpenAI's remote Apps/Connector backend (`.app.json`)
+// or a hosted HTTP MCP server (`.mcp.json` with a bare `url`/`http`/`sse`
+// transport). None of those work against codexhub's local gateway, so we prune
+// them from the on-disk manifests, leaving only skill-only plugins and plugins
+// whose `.mcp.json` launches a local stdio `command`.
+//
+// This rewrites provisioned state Codex regenerates; the curated checkout has
+// no git remote, and uninstall only drops the config.toml marketplace entry, so
+// pruning here matches how codexhub already treats `.tmp/plugins`.
+fn filter_curated_marketplace_manifests(marketplace_root: &Path) {
+    const MANIFEST_RELATIVE_PATHS: &[&str] = &["marketplace.json", "api_marketplace.json"];
+    for relative in MANIFEST_RELATIVE_PATHS {
+        let manifest_path = marketplace_root
+            .join(".agents")
+            .join("plugins")
+            .join(relative);
+        if !manifest_path.is_file() {
+            continue;
+        }
+        match filter_one_curated_manifest(marketplace_root, &manifest_path) {
+            Ok(Some((total, kept))) => chain_log::write_line(format!(
+                "[codex_app_config] event=curated_manifest_filtered path={} total={} kept={} removed={}",
+                manifest_path.display(),
+                total,
+                kept,
+                total.saturating_sub(kept)
+            )),
+            Ok(None) => {}
+            Err(err) => chain_log::write_line(format!(
+                "[codex_app_config] event=curated_manifest_filter_failed path={} error={}",
+                manifest_path.display(),
+                err
+            )),
+        }
+    }
+}
+
+// Returns `Some((total, kept))` when the manifest changed and was rewritten, or
+// `None` when nothing needed pruning.
+fn filter_one_curated_manifest(
+    marketplace_root: &Path,
+    manifest_path: &Path,
+) -> Result<Option<(usize, usize)>> {
+    let contents = std::fs::read_to_string(manifest_path)
+        .with_context(|| format!("failed to read {}", manifest_path.display()))?;
+    let mut manifest: serde_json::Value = serde_json::from_str(&contents)
+        .with_context(|| format!("failed to parse {}", manifest_path.display()))?;
+    let Some(plugins) = manifest.get_mut("plugins").and_then(|item| item.as_array_mut()) else {
+        return Ok(None);
+    };
+
+    let total = plugins.len();
+    plugins.retain(|plugin| !curated_manifest_plugin_requires_remote_backend(marketplace_root, plugin));
+    let kept = plugins.len();
+    if kept == total {
+        return Ok(None);
+    }
+
+    let mut serialized = serde_json::to_string_pretty(&manifest)
+        .with_context(|| format!("failed to serialize {}", manifest_path.display()))?;
+    serialized.push('\n');
+    std::fs::write(manifest_path, serialized)
+        .with_context(|| format!("failed to write {}", manifest_path.display()))?;
+    Ok(Some((total, kept)))
+}
+
+fn curated_manifest_plugin_requires_remote_backend(
+    marketplace_root: &Path,
+    plugin: &serde_json::Value,
+) -> bool {
+    let Some(dir) = curated_manifest_plugin_dir(marketplace_root, plugin) else {
+        // If we cannot resolve the plugin directory we keep it rather than risk
+        // hiding a usable plugin.
+        return false;
+    };
+    crate::web::plugins::plugin_dir_requires_remote_backend(&dir)
+}
+
+fn curated_manifest_plugin_dir(
+    marketplace_root: &Path,
+    plugin: &serde_json::Value,
+) -> Option<PathBuf> {
+    let raw_path = plugin
+        .get("source")
+        .and_then(|source| source.get("path"))
+        .and_then(|value| value.as_str())?;
+    let relative = raw_path.trim_start_matches("./").replace('\\', "/");
+    if relative.is_empty() {
+        return None;
+    }
+
+    let mut dir = marketplace_root.to_path_buf();
+    for segment in relative.split('/') {
+        match segment {
+            "" | "." => continue,
+            ".." => return None,
+            segment => dir.push(segment),
+        }
+    }
+    Some(dir)
 }
 
 fn normalize_config_toml_order(raw: &str) -> String {
@@ -2237,6 +2363,49 @@ pub(crate) fn clear_codex_models_cache(codex_home: Option<PathBuf>) -> Result<bo
     }
 }
 
+// Codex caches the remote connector/App directory (Gmail, Google Drive, GitHub,
+// ...) on disk under `cache/codex_app_directory/<hash>.json`. That cache has no
+// TTL: `codex_connectors::cached_directory_connectors` returns a disk `Hit`
+// verbatim, so a stale catalog captured under an official ChatGPT backend keeps
+// surfacing thousands of unusable Apps even after codexhub starts serving an
+// empty `/api/connectors/directory/list`. We wipe the cache during the initial
+// "初始化 Codex 配置" flow so a codex-app restart repopulates it from codexhub's
+// (empty) directory instead. This is pure cache, so the uninstall/restore path
+// intentionally leaves it alone.
+fn clear_connector_directory_cache(codex_home: &Path) -> Result<usize> {
+    let cache_dir = codex_home.join(CODEX_CONNECTOR_DIRECTORY_CACHE_DIR);
+    let entries = match std::fs::read_dir(&cache_dir) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(err) => {
+            return Err(err)
+                .with_context(|| format!("failed to read {}", cache_dir.display()));
+        }
+    };
+
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_file = entry.file_type().map(|kind| kind.is_file()).unwrap_or(false);
+        let is_json = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
+        if !is_file || !is_json {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed += 1,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed to remove {}", path.display()));
+            }
+        }
+    }
+    Ok(removed)
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 struct LegacyBundledPluginStateCleanup {
     removed_remote_identity_files: usize,
@@ -2348,8 +2517,8 @@ mod tests {
         assert!(!config.contains("disable_response_storage"));
         assert!(!config.contains("network_access"));
         assert!(!config.contains("windows_wsl_setup_acknowledged"));
-        assert!(!config.contains("[features]"));
-        assert!(!config.contains("apps = false"));
+        assert!(config.contains("[features]"));
+        assert!(config.contains("apps = false"));
         assert!(!config.contains("image_generation = false"));
         assert!(config.contains("[model_providers.ai-codex]"));
         assert!(config.contains("base_url = \"https://api.example.invalid\""));
@@ -2694,7 +2863,7 @@ env_key = "AI_GATEWAY_API_KEY"
     }
 
     #[test]
-    fn configure_codex_app_preserves_explicit_apps_feature() {
+    fn configure_codex_app_forces_apps_feature_off() {
         let codex_home = unique_temp_dir();
         let config_path = codex_home.join("config.toml");
         std::fs::write(
@@ -2729,9 +2898,11 @@ name = "old-provider"
 
         let config = std::fs::read_to_string(report.config_path).expect("read config");
         assert!(config.contains("[features]"));
-        assert!(config.contains("apps = true"));
+        // codexhub always disables the host-owned `codex_apps` MCP, even when the
+        // user previously enabled the `apps` feature explicitly.
+        assert!(config.contains("apps = false"));
+        assert!(!config.contains("apps = true"));
         assert!(config.contains("image_generation = true"));
-        assert!(!config.contains("apps = false"));
         assert!(!config.contains("image_generation = false"));
 
         let _ = std::fs::remove_dir_all(codex_home);
@@ -2758,7 +2929,9 @@ keep_me = false
         configure_codex_app(test_configure_options(codex_home.clone())).expect("configure");
 
         let config = std::fs::read_to_string(config_path).expect("read config");
-        assert!(!config.contains("apps = false"));
+        // `apps` is no longer a plugin-blocking flag: codexhub keeps it set to
+        // false so Codex skips the host-owned `codex_apps` MCP registration.
+        assert!(config.contains("apps = false"));
         assert!(!config.contains("plugins = false"));
         assert!(!config.contains("computer_use = false"));
         assert!(!config.contains("browser_use = false"));
@@ -2820,6 +2993,91 @@ source = 'C:\Users\test\.codex\.tmp\bundled-marketplaces\openai-bundled'
                 .and_then(|item| item.as_str()),
             Some(curated_marketplace_root.to_string_lossy().as_ref())
         );
+
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn configure_codex_app_prunes_remote_backed_curated_plugins_from_disk() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        let curated_root = codex_home.join(".tmp").join("plugins");
+        let manifest_dir = curated_root.join(".agents").join("plugins");
+        std::fs::create_dir_all(&manifest_dir).expect("create manifest dir");
+
+        // A hosted Apps/Connector plugin (`.app.json`) => remote-backed.
+        let github_dir = curated_root.join("plugins").join("github");
+        std::fs::create_dir_all(&github_dir).expect("create github dir");
+        std::fs::write(github_dir.join(".app.json"), r#"{"id":"github"}"#)
+            .expect("write github app");
+        // A hosted HTTP MCP plugin (bare `url`) => remote-backed.
+        let notion_dir = curated_root.join("plugins").join("notion");
+        std::fs::create_dir_all(&notion_dir).expect("create notion dir");
+        std::fs::write(
+            notion_dir.join(".mcp.json"),
+            r#"{"mcpServers":{"notion":{"url":"https://mcp.notion.com/mcp"}}}"#,
+        )
+        .expect("write notion mcp");
+        // A local stdio MCP plugin => keep.
+        let sentry_dir = curated_root.join("plugins").join("sentry");
+        std::fs::create_dir_all(&sentry_dir).expect("create sentry dir");
+        std::fs::write(
+            sentry_dir.join(".mcp.json"),
+            r#"{"mcpServers":{"sentry":{"command":"sentry-mcp"}}}"#,
+        )
+        .expect("write sentry mcp");
+        // A skill-only plugin => keep.
+        let superpowers_dir = curated_root.join("plugins").join("superpowers");
+        std::fs::create_dir_all(&superpowers_dir).expect("create superpowers dir");
+
+        let manifest = r#"{
+  "name": "openai-curated",
+  "plugins": [
+    {"name": "github", "source": {"source": "local", "path": "./plugins/github"}},
+    {"name": "notion", "source": {"source": "local", "path": "./plugins/notion"}},
+    {"name": "sentry", "source": {"source": "local", "path": "./plugins/sentry"}},
+    {"name": "superpowers", "source": {"source": "local", "path": "./plugins/superpowers"}}
+  ]
+}"#;
+        std::fs::write(manifest_dir.join("marketplace.json"), manifest)
+            .expect("write marketplace.json");
+        std::fs::write(manifest_dir.join("api_marketplace.json"), manifest)
+            .expect("write api_marketplace.json");
+
+        std::fs::write(&config_path, "").expect("write config");
+
+        configure_codex_app(test_configure_options(codex_home.clone())).expect("configure");
+
+        for relative in ["marketplace.json", "api_marketplace.json"] {
+            let filtered = std::fs::read_to_string(manifest_dir.join(relative))
+                .expect("read filtered manifest");
+            // Regression guard: the manifests Codex parses with serde_json must
+            // never carry a UTF-8 BOM, otherwise plugin loading fails with
+            // "expected value at line 1 column 1".
+            let raw_bytes = std::fs::read(manifest_dir.join(relative))
+                .expect("read filtered manifest bytes");
+            assert_ne!(
+                raw_bytes.get(0..3),
+                Some([0xEF, 0xBB, 0xBF].as_slice()),
+                "{relative} must not be written with a UTF-8 BOM"
+            );
+            let value: serde_json::Value =
+                serde_json::from_str(&filtered).expect("parse filtered manifest");
+            let names = value
+                .get("plugins")
+                .and_then(|item| item.as_array())
+                .expect("plugins array")
+                .iter()
+                .filter_map(|plugin| plugin.get("name").and_then(|name| name.as_str()))
+                .collect::<Vec<_>>();
+            assert!(!names.contains(&"github"), "{relative} still lists github");
+            assert!(!names.contains(&"notion"), "{relative} still lists notion");
+            assert!(names.contains(&"sentry"), "{relative} dropped sentry");
+            assert!(
+                names.contains(&"superpowers"),
+                "{relative} dropped superpowers"
+            );
+        }
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -3644,6 +3902,38 @@ base_url = "https://api.example.invalid"
         let removed = clear_codex_models_cache(Some(codex_home.clone())).expect("clear cache");
 
         assert!(!removed);
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn clear_connector_directory_cache_removes_only_json_files() {
+        let codex_home = unique_temp_dir();
+        let cache_dir = codex_home.join(CODEX_CONNECTOR_DIRECTORY_CACHE_DIR);
+        std::fs::create_dir_all(&cache_dir).expect("create connector cache dir");
+        std::fs::write(cache_dir.join("aaa.json"), r#"{"connectors":[]}"#)
+            .expect("write cache a");
+        std::fs::write(cache_dir.join("bbb.json"), r#"{"connectors":[]}"#)
+            .expect("write cache b");
+        // A non-json sibling must be left untouched.
+        std::fs::write(cache_dir.join("notes.txt"), "keep me").expect("write sidecar");
+
+        let removed = clear_connector_directory_cache(&codex_home).expect("clear connector cache");
+
+        assert_eq!(removed, 2);
+        assert!(!cache_dir.join("aaa.json").exists());
+        assert!(!cache_dir.join("bbb.json").exists());
+        assert!(cache_dir.join("notes.txt").exists());
+        let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn clear_connector_directory_cache_ignores_missing_dir() {
+        let codex_home = unique_temp_dir();
+        std::fs::create_dir_all(&codex_home).expect("create codex home");
+
+        let removed = clear_connector_directory_cache(&codex_home).expect("clear connector cache");
+
+        assert_eq!(removed, 0);
         let _ = std::fs::remove_dir_all(codex_home);
     }
 

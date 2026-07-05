@@ -2,28 +2,32 @@ use std::{fs, path::PathBuf, time::SystemTime};
 
 use axum::{
     Json, Router,
-    extract::{Path, Query},
+    extract::Path,
     http::StatusCode,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::app_state::SharedState;
 use crate::codex_app_config;
 
-const DEFAULT_FEATURED_PLUGINS: &[&str] = &[
-    "github",
-    "linear",
-    "gmail",
-    "slack",
-    "figma",
-    "google-calendar",
-    "google-drive",
-    "canva",
+// Preferred ordering for locally usable curated plugins. Entries that are not
+// present in the filtered local catalog (e.g. because they need a remote OpenAI
+// backend) are simply skipped, so this list never surfaces unusable plugins.
+const PREFERRED_LOCAL_FEATURED_PLUGINS: &[&str] = &[
+    "superpowers",
+    "remotion",
+    "game-studio",
+    "zotero",
+    "codex-security",
+    "sentry",
+    "circleci",
+    "render",
 ];
+const MAX_FEATURED_PLUGINS: usize = 8;
 const OPENAI_BUNDLED_MARKETPLACE: &str = "openai-bundled";
+const OPENAI_CURATED_MARKETPLACE: &str = "openai-curated";
 const OPENAI_CURATED_REMOTE_MARKETPLACE: &str = "openai-curated-remote";
 const CODEXHUB_CURATED_REMOTE_ID_PREFIX: &str = "plugins~codexhub-local-";
 const CODEXHUB_BUNDLED_REMOTE_ID_PREFIX: &str = "plugins~codexhub-bundled-";
@@ -46,37 +50,24 @@ pub fn router() -> Router<SharedState> {
         .route("/backend-api/plugins/featured", get(featured_plugins))
 }
 
-#[derive(Debug, Deserialize)]
-struct PluginListQuery {
-    scope: Option<String>,
-    #[serde(rename = "pageToken")]
-    page_token: Option<String>,
-}
-
-async fn list_plugins(Query(query): Query<PluginListQuery>) -> Response {
-    if !matches!(query.scope.as_deref(), None | Some("GLOBAL")) {
-        return Json(empty_plugin_page()).into_response();
-    }
-    if query.page_token.is_some() {
-        return Json(empty_plugin_page()).into_response();
-    }
-
-    match load_local_curated_remote_plugins() {
-        Ok(plugins) => Json(json!({
-            "plugins": plugins,
-            "pagination": {
-                "next_page_token": null
-            }
-        }))
-        .into_response(),
-        Err(err) => (
-            StatusCode::NOT_FOUND,
-            Json(json!({
-                "error": err
-            })),
-        )
-            .into_response(),
-    }
+async fn list_plugins() -> Response {
+    // codexhub intentionally serves an EMPTY remote plugin catalog here.
+    //
+    // The Codex desktop app merges two independent plugin sources:
+    //   1. the on-disk local marketplace `openai-curated` (display name
+    //      "Codex official"), read directly from
+    //      `~/.codex/.tmp/plugins/.agents/plugins/marketplace.json`, and
+    //   2. this HTTP "remote" catalog (`/backend-api/ps/plugins/*`).
+    //
+    // Everything this endpoint could return already lives in the local
+    // marketplace, where installs go through the working `marketplacePath`
+    // branch (materialized into `~/.codex/plugins/cache/openai-curated/...`).
+    // When we also advertised the same plugins here, the app surfaced a second
+    // "OpenAI Curated Remote" tab whose installs route through the remote
+    // branch and fail with `MissingBundleDownloadUrl` because codexhub cannot
+    // provide an HTTPS `bundle_download_url`. Returning an empty catalog drops
+    // that broken duplicate tab and leaves the working local tab untouched.
+    Json(empty_plugin_page()).into_response()
 }
 
 async fn installed_plugins() -> Json<Value> {
@@ -90,12 +81,16 @@ async fn installed_plugins() -> Json<Value> {
 }
 
 async fn featured_plugins() -> Json<Value> {
-    Json(json!(
-        DEFAULT_FEATURED_PLUGINS
-            .iter()
-            .map(|name| format!("{name}@openai-curated-remote"))
-            .collect::<Vec<_>>()
-    ))
+    let plugins = load_local_curated_remote_plugins().unwrap_or_default();
+    let featured = featured_plugin_names(&plugins)
+        .into_iter()
+        // Featured ids must match the LOCAL marketplace plugin ids
+        // (`<name>@openai-curated`) so the app highlights entries in the
+        // "Codex official" tab. The remote (`openai-curated-remote`) catalog is
+        // no longer served, so featuring against it would highlight nothing.
+        .map(|name| format!("{name}@{OPENAI_CURATED_MARKETPLACE}"))
+        .collect::<Vec<_>>();
+    Json(json!(featured))
 }
 
 async fn suggested_plugins() -> Response {
@@ -218,6 +213,7 @@ fn load_local_curated_remote_plugins() -> Result<Vec<Value>, String> {
 
     Ok(plugins
         .iter()
+        .filter(|plugin| !curated_plugin_requires_remote_backend(plugin))
         .filter_map(|plugin| {
             local_marketplace_plugin_to_remote(
                 plugin,
@@ -555,15 +551,42 @@ fn is_safe_path_segment(value: &str) -> bool {
 }
 
 fn recommended_plugins(plugins: &[Value]) -> Vec<Value> {
-    DEFAULT_FEATURED_PLUGINS
-        .iter()
+    featured_plugin_names(plugins)
+        .into_iter()
         .filter_map(|name| {
             plugins
                 .iter()
-                .find(|plugin| plugin.get("name").and_then(Value::as_str) == Some(*name))
+                .find(|plugin| plugin.get("name").and_then(Value::as_str) == Some(name.as_str()))
         })
         .filter_map(recommended_plugin_item)
         .collect()
+}
+
+/// Chooses which locally usable plugins to feature, preferring the curated
+/// ordering and then filling any remaining slots with the rest of the catalog.
+fn featured_plugin_names(plugins: &[Value]) -> Vec<String> {
+    let available = plugins
+        .iter()
+        .filter_map(|plugin| plugin.get("name").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    let mut ordered = Vec::new();
+    for preferred in PREFERRED_LOCAL_FEATURED_PLUGINS {
+        if available.iter().any(|name| name == preferred) {
+            ordered.push((*preferred).to_string());
+        }
+    }
+    for name in available {
+        if ordered.len() >= MAX_FEATURED_PLUGINS {
+            break;
+        }
+        if !ordered.iter().any(|existing| existing == &name) {
+            ordered.push(name);
+        }
+    }
+    ordered.truncate(MAX_FEATURED_PLUGINS);
+    ordered
 }
 
 fn recommended_plugin_item(plugin: &Value) -> Option<Value> {
@@ -739,6 +762,85 @@ fn curated_marketplace_path() -> PathBuf {
         .join("marketplace.json")
 }
 
+fn curated_marketplace_root() -> PathBuf {
+    codex_home().join(".tmp").join("plugins")
+}
+
+/// Decides whether a curated-marketplace plugin depends on a remote backend
+/// codexhub does not provide when running against a local gateway.
+///
+/// Two dependency kinds are treated as "remote-backed" and hidden from the
+/// local plugin directory:
+/// - `.app.json`: an OpenAI Apps/Connector whose tools live behind the ChatGPT
+///   `codex_apps` MCP (Gmail, Google Drive, Linear, ...).
+/// - `.mcp.json` with an HTTP/SSE transport: a hosted MCP served over the
+///   network (e.g. `https://mcp.notion.com/mcp`).
+///
+/// Skill-only plugins and plugins whose `.mcp.json` launches a local stdio
+/// process (`command`) stay visible because they work without the remote
+/// OpenAI backend.
+fn curated_plugin_requires_remote_backend(plugin: &Value) -> bool {
+    let Some(dir) = curated_plugin_dir(plugin) else {
+        return false;
+    };
+    plugin_dir_requires_remote_backend(&dir)
+}
+
+pub(crate) fn plugin_dir_requires_remote_backend(dir: &std::path::Path) -> bool {
+    if dir.join(".app.json").is_file() {
+        return true;
+    }
+    mcp_manifest_is_remote(&dir.join(".mcp.json"))
+}
+
+fn curated_plugin_dir(plugin: &Value) -> Option<PathBuf> {
+    let raw_path = plugin
+        .get("source")
+        .and_then(|source| source.get("path"))
+        .and_then(Value::as_str)?;
+    let relative = raw_path.trim_start_matches("./").replace('\\', "/");
+    if relative.is_empty() {
+        return None;
+    }
+
+    let mut dir = curated_marketplace_root();
+    for segment in relative.split('/') {
+        match segment {
+            "" | "." => continue,
+            ".." => return None,
+            segment => dir.push(segment),
+        }
+    }
+    Some(dir)
+}
+
+fn mcp_manifest_is_remote(path: &std::path::Path) -> bool {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_str::<Value>(&contents) else {
+        return false;
+    };
+    let Some(servers) = manifest.get("mcpServers").and_then(Value::as_object) else {
+        return false;
+    };
+
+    servers.values().any(mcp_server_is_remote)
+}
+
+fn mcp_server_is_remote(server: &Value) -> bool {
+    // A local stdio server is launched via `command`; anything else that only
+    // exposes a network endpoint (`http`/`sse` transport, or a bare `url`) is
+    // treated as remote.
+    if server.get("command").and_then(Value::as_str).is_some() {
+        return false;
+    }
+    if let Some(kind) = server.get("type").and_then(Value::as_str) {
+        return matches!(kind, "http" | "sse" | "streamable-http" | "streamable_http");
+    }
+    server.get("url").and_then(Value::as_str).is_some()
+}
+
 fn bundled_marketplace_path() -> PathBuf {
     codex_home()
         .join(".tmp")
@@ -765,4 +867,159 @@ fn display_name_from_slug(name: &str) -> String {
 
 fn codex_home() -> PathBuf {
     codex_app_config::default_codex_home()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn unique_temp_dir() -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after UNIX epoch")
+            .as_nanos();
+        let sequence = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "codexhub-plugins-test-{}-{}-{}",
+            std::process::id(),
+            nanos,
+            sequence
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    #[test]
+    fn app_json_plugin_is_remote_backed() {
+        let dir = unique_temp_dir();
+        std::fs::write(dir.join(".app.json"), r#"{"apps":{"gmail":{"id":"x"}}}"#)
+            .expect("write app.json");
+        assert!(plugin_dir_requires_remote_backend(&dir));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn http_mcp_plugin_is_remote_backed() {
+        let dir = unique_temp_dir();
+        std::fs::write(
+            dir.join(".mcp.json"),
+            r#"{"mcpServers":{"notion":{"type":"http","url":"https://mcp.notion.com/mcp"}}}"#,
+        )
+        .expect("write mcp.json");
+        assert!(plugin_dir_requires_remote_backend(&dir));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stdio_mcp_plugin_is_local() {
+        let dir = unique_temp_dir();
+        std::fs::write(
+            dir.join(".mcp.json"),
+            r#"{"mcpServers":{"xcode":{"command":"npx","args":["-y","xcodebuildmcp@latest"]}}}"#,
+        )
+        .expect("write mcp.json");
+        assert!(!plugin_dir_requires_remote_backend(&dir));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn skill_only_plugin_is_local() {
+        let dir = unique_temp_dir();
+        std::fs::create_dir_all(dir.join("skills")).expect("create skills dir");
+        assert!(!plugin_dir_requires_remote_backend(&dir));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn bare_url_mcp_without_command_is_remote() {
+        let dir = unique_temp_dir();
+        std::fs::write(
+            dir.join(".mcp.json"),
+            r#"{"mcpServers":{"svc":{"url":"https://mcp.example.com/mcp"}}}"#,
+        )
+        .expect("write mcp.json");
+        assert!(plugin_dir_requires_remote_backend(&dir));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn featured_names_prefer_local_ordering_then_fill() {
+        let plugins = vec![
+            json!({ "name": "remotion" }),
+            json!({ "name": "aardvark-tool" }),
+            json!({ "name": "superpowers" }),
+        ];
+        let featured = featured_plugin_names(&plugins);
+        assert_eq!(featured.first().map(String::as_str), Some("superpowers"));
+        assert!(featured.iter().any(|name| name == "remotion"));
+        assert!(featured.iter().any(|name| name == "aardvark-tool"));
+        assert!(featured.len() <= MAX_FEATURED_PLUGINS);
+    }
+
+    #[test]
+    fn curated_plugin_dir_rejects_parent_traversal() {
+        let plugin = json!({ "source": { "path": "./plugins/../secret" } });
+        assert!(curated_plugin_dir(&plugin).is_none());
+    }
+
+    #[test]
+    fn curated_plugin_dir_resolves_relative_path() {
+        let plugin = json!({ "source": { "path": "./plugins/remotion" } });
+        let dir = curated_plugin_dir(&plugin).expect("dir");
+        let tail = dir
+            .components()
+            .rev()
+            .take(2)
+            .map(|component| component.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(tail, vec!["remotion".to_string(), "plugins".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn list_plugins_returns_empty_remote_catalog() {
+        // The remote catalog must stay empty so the desktop app does not render
+        // a duplicate "OpenAI Curated Remote" tab whose installs fail. Plugins
+        // are surfaced only via the local `openai-curated` marketplace.
+        let response = list_plugins().await;
+        let (parts, body) = response.into_parts();
+        assert_eq!(parts.status, StatusCode::OK);
+        let bytes = axum::body::to_bytes(body, usize::MAX)
+            .await
+            .expect("read body");
+        let value: Value = serde_json::from_slice(&bytes).expect("json body");
+        assert_eq!(
+            value
+                .get("plugins")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+        assert!(value.get("pagination").is_some());
+    }
+
+    #[tokio::test]
+    async fn featured_ids_target_local_curated_marketplace() {
+        // Featured ids must reference the LOCAL marketplace suffix so the app
+        // highlights entries in the "Codex official" tab, not the retired
+        // remote catalog.
+        let response = featured_plugins().await;
+        let Json(value) = response;
+        if let Some(ids) = value.as_array() {
+            for id in ids {
+                let id = id.as_str().expect("featured id string");
+                assert!(
+                    id.ends_with(&format!("@{OPENAI_CURATED_MARKETPLACE}")),
+                    "featured id {id} must target the local curated marketplace"
+                );
+                assert!(
+                    !id.ends_with(&format!("@{OPENAI_CURATED_REMOTE_MARKETPLACE}")),
+                    "featured id {id} must not target the retired remote catalog"
+                );
+            }
+        }
+    }
 }

@@ -327,7 +327,7 @@ dependencies = [
 
 [[package]]
 name = "codexhub"
-version = "0.3.21"
+version = "0.3.22"
 dependencies = [
  "aes",
  "anyhow",
