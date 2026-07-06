@@ -140,7 +140,7 @@ use self::ai_gateway::{
 };
 use self::api::{
     ApiClient, ConfigureTelegramBotRequest, DashboardSnapshot, DeleteImAccountRequest,
-    RemoteControlStatus, RequestLogItem, SetImAccountEnabledRequest,
+    RemoteControlConnectionStatus, RemoteControlStatus, RequestLogItem, SetImAccountEnabledRequest,
 };
 use self::codex_tab::{CodexActionResult, CodexTab};
 use self::daemon::{
@@ -3368,6 +3368,171 @@ mod model_mapping_tests {
         assert_eq!(floor.width, MIN_FRAME_WIDTH);
         assert_eq!(floor.height, MIN_FRAME_HEIGHT);
     }
+
+    #[test]
+    fn codex_app_status_ignores_unknown_connection_initialization() {
+        let remote = RemoteControlStatus {
+            connected: true,
+            initialized: false,
+            active_source_kind: None,
+            connections: vec![RemoteControlConnectionStatus {
+                connected: true,
+                initialized: false,
+                source_kind: "unknown".to_string(),
+            }],
+        };
+
+        assert_eq!(
+            endpoint_status_state(Some(&remote), "codex_app", true),
+            EndpointStatusState::NotConnected
+        );
+    }
+
+    #[test]
+    fn endpoint_status_is_uninitialized_when_not_configured() {
+        assert_eq!(
+            endpoint_status_state(
+                Some(&RemoteControlStatus {
+                    connected: false,
+                    initialized: false,
+                    active_source_kind: None,
+                    connections: vec![],
+                }),
+                "codex_app",
+                false
+            ),
+            EndpointStatusState::UninitializedConfig
+        );
+    }
+
+    #[test]
+    fn endpoint_status_is_loading_when_remote_snapshot_is_missing() {
+        assert_eq!(
+            endpoint_status_state(None, "codex_app", true),
+            EndpointStatusState::Loading
+        );
+    }
+
+    #[test]
+    fn endpoint_status_is_not_connected_when_configured_without_source_connection() {
+        let remote = RemoteControlStatus {
+            connected: true,
+            initialized: true,
+            active_source_kind: Some("codex_app".to_string()),
+            connections: vec![RemoteControlConnectionStatus {
+                connected: true,
+                initialized: true,
+                source_kind: "codex_app".to_string(),
+            }],
+        };
+
+        assert_eq!(
+            endpoint_status_state(Some(&remote), "vscode", true),
+            EndpointStatusState::NotConnected
+        );
+    }
+
+    #[test]
+    fn endpoint_status_initializing_is_source_specific() {
+        let remote = RemoteControlStatus {
+            connected: true,
+            initialized: false,
+            active_source_kind: None,
+            connections: vec![RemoteControlConnectionStatus {
+                connected: true,
+                initialized: false,
+                source_kind: "vscode".to_string(),
+            }],
+        };
+
+        assert_eq!(
+            endpoint_status_state(Some(&remote), "vscode", true),
+            EndpointStatusState::Initializing
+        );
+        assert_eq!(
+            endpoint_status_state(Some(&remote), "cli", true),
+            EndpointStatusState::NotConnected
+        );
+    }
+
+    #[test]
+    fn endpoint_status_connected_takes_priority_over_config_state() {
+        let remote = RemoteControlStatus {
+            connected: true,
+            initialized: true,
+            active_source_kind: Some("codex_app".to_string()),
+            connections: vec![],
+        };
+
+        assert_eq!(
+            endpoint_status_state(Some(&remote), "codex_app", false),
+            EndpointStatusState::Connected
+        );
+    }
+
+    #[test]
+    fn endpoint_status_labels_are_unified_for_zh_cn() {
+        let text = GuiText::new(GuiLocale::ZhCn);
+
+        assert_eq!(
+            endpoint_status_label(text, EndpointStatusState::UninitializedConfig),
+            "未初始化配置"
+        );
+        assert_eq!(
+            endpoint_status_label(text, EndpointStatusState::NotConnected),
+            "未连接"
+        );
+        assert_eq!(
+            endpoint_status_label(text, EndpointStatusState::Initializing),
+            "初始化中"
+        );
+        assert_eq!(
+            endpoint_status_label(text, EndpointStatusState::Connected),
+            "已连接"
+        );
+        assert_eq!(
+            endpoint_status_label(text, EndpointStatusState::Loading),
+            "读取中"
+        );
+    }
+
+    #[test]
+    fn codex_app_status_initializes_only_for_codex_app_connection() {
+        let remote = RemoteControlStatus {
+            connected: true,
+            initialized: false,
+            active_source_kind: None,
+            connections: vec![RemoteControlConnectionStatus {
+                connected: true,
+                initialized: false,
+                source_kind: "codex_app".to_string(),
+            }],
+        };
+
+        assert_eq!(
+            endpoint_status_state(Some(&remote), "codex_app", true),
+            EndpointStatusState::Initializing
+        );
+    }
+
+    #[test]
+    fn vscode_status_is_not_connected_when_only_codex_app_is_connected() {
+        let remote = RemoteControlStatus {
+            connected: true,
+            initialized: true,
+            active_source_kind: Some("codex_app".to_string()),
+            connections: vec![RemoteControlConnectionStatus {
+                connected: true,
+                initialized: true,
+                source_kind: "codex_app".to_string(),
+            }],
+        };
+
+        assert_eq!(
+            endpoint_status_state(Some(&remote), "vscode", true),
+            EndpointStatusState::NotConnected
+        );
+    }
 }
 
 fn fetch_remote_models(
@@ -4080,33 +4245,22 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
 
     refresh_im_account_list(handles, snapshot);
 
-    let remote_connected = snapshot
-        .remote
-        .as_ref()
-        .map(|remote| remote.connected)
-        .unwrap_or(false);
-    let remote_initialized = snapshot
-        .remote
-        .as_ref()
-        .map(|remote| remote.initialized)
-        .unwrap_or(false);
     let remote_status = snapshot.remote.as_ref();
-    let codex_app_remote_ready = remote_connection_ready(remote_status, "codex_app")
-        || remote_active_ready(remote_status, "codex_app");
-    let vscode_remote_ready = remote_connection_ready(remote_status, "vscode")
-        || remote_active_ready(remote_status, "vscode");
-    let cli_remote_ready =
-        remote_connection_ready(remote_status, "cli") || remote_active_ready(remote_status, "cli");
-    codex_tab::refresh_remote_ready(
-        &handles.codex_tab,
-        codex_app_remote_ready || vscode_remote_ready || cli_remote_ready,
-    );
-    let remote_initializing = remote_connected && !remote_initialized;
     let codex_configured = snapshot
         .codex_app
         .as_ref()
         .map(|status| status.configured)
         .unwrap_or(false);
+    let codex_app_status_state =
+        endpoint_status_state(remote_status, "codex_app", codex_configured);
+    let vscode_status_state = endpoint_status_state(remote_status, "vscode", true);
+    let cli_status_state = endpoint_status_state(remote_status, "cli", true);
+    codex_tab::refresh_remote_ready(
+        &handles.codex_tab,
+        codex_app_status_state == EndpointStatusState::Connected
+            || vscode_status_state == EndpointStatusState::Connected
+            || cli_status_state == EndpointStatusState::Connected,
+    );
 
     if CODEX_APP_GUI_UNSUPPORTED {
         set_disabled_status_panel(
@@ -4114,47 +4268,12 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
             text.unavailable(),
             text.app_gui_unsupported(),
         );
-    } else if codex_app_remote_ready {
-        set_status_panel(&handles.codex_status, text.connected(), "", StateTone::Ok);
-    } else if remote_initializing {
-        set_status_panel(
-            &handles.codex_status,
-            text.initializing(),
-            "",
-            StateTone::Warn,
-        );
-    } else if codex_configured {
-        set_status_panel(
-            &handles.codex_status,
-            text.control_not_open(),
-            "",
-            StateTone::Warn,
-        );
     } else {
-        set_status_panel(
-            &handles.codex_status,
-            text.not_injected(),
-            "",
-            StateTone::Warn,
-        );
+        set_endpoint_status_panel(&handles.codex_status, text, codex_app_status_state);
     }
 
-    if vscode_remote_ready {
-        set_status_panel(&handles.vscode_status, text.connected(), "", StateTone::Ok);
-    } else {
-        set_status_panel(
-            &handles.vscode_status,
-            text.can_connect(),
-            "",
-            StateTone::Warn,
-        );
-    }
-
-    if cli_remote_ready {
-        set_status_panel(&handles.cli_status, text.connected(), "", StateTone::Ok);
-    } else {
-        set_status_panel(&handles.cli_status, text.can_connect(), "", StateTone::Warn);
-    }
+    set_endpoint_status_panel(&handles.vscode_status, text, vscode_status_state);
+    set_endpoint_status_panel(&handles.cli_status, text, cli_status_state);
 
     // AI Gateway status
     if let Some(gw) = &snapshot.ai_gateway {
@@ -4344,6 +4463,73 @@ fn remote_active_ready(remote: Option<&RemoteControlStatus>, source_kind: &str) 
         .filter(|remote| remote.connected && remote.initialized)
         .and_then(|remote| remote.active_source_kind.as_deref())
         == Some(source_kind)
+}
+
+fn remote_source_initializing(remote: Option<&RemoteControlStatus>, source_kind: &str) -> bool {
+    remote
+        .map(|remote| {
+            remote.connections.iter().any(|connection| {
+                connection.source_kind == source_kind
+                    && connection.connected
+                    && !connection.initialized
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn endpoint_status_state(
+    remote: Option<&RemoteControlStatus>,
+    source_kind: &str,
+    configured: bool,
+) -> EndpointStatusState {
+    if remote.is_none() {
+        EndpointStatusState::Loading
+    } else if remote_connection_ready(remote, source_kind)
+        || remote_active_ready(remote, source_kind)
+    {
+        EndpointStatusState::Connected
+    } else if remote_source_initializing(remote, source_kind) {
+        EndpointStatusState::Initializing
+    } else if configured {
+        EndpointStatusState::NotConnected
+    } else {
+        EndpointStatusState::UninitializedConfig
+    }
+}
+
+fn set_endpoint_status_panel(panel: &StatusPanel, text: GuiText, state: EndpointStatusState) {
+    let label = endpoint_status_label(text, state);
+    let tone = endpoint_status_tone(state);
+    set_status_panel(panel, label, "", tone);
+}
+
+fn endpoint_status_label(text: GuiText, state: EndpointStatusState) -> &'static str {
+    match state {
+        EndpointStatusState::Connected => text.connected(),
+        EndpointStatusState::Loading => text.reading(),
+        EndpointStatusState::Initializing => text.initializing(),
+        EndpointStatusState::NotConnected => text.not_connected(),
+        EndpointStatusState::UninitializedConfig => text.uninitialized_config(),
+    }
+}
+
+fn endpoint_status_tone(state: EndpointStatusState) -> StateTone {
+    match state {
+        EndpointStatusState::Connected => StateTone::Ok,
+        EndpointStatusState::Loading => StateTone::Muted,
+        EndpointStatusState::Initializing
+        | EndpointStatusState::NotConnected
+        | EndpointStatusState::UninitializedConfig => StateTone::Warn,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndpointStatusState {
+    Connected,
+    Loading,
+    Initializing,
+    NotConnected,
+    UninitializedConfig,
 }
 
 fn show_about_dialog(parent: &Frame) {

@@ -1369,24 +1369,10 @@ impl GuiText {
         }
     }
 
-    pub(super) fn control_not_open(self) -> &'static str {
+    pub(super) fn uninitialized_config(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "未打开控制",
-            GuiLocale::EnUs => "Control Closed",
-        }
-    }
-
-    pub(super) fn not_injected(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "未注入",
-            GuiLocale::EnUs => "Not Injected",
-        }
-    }
-
-    pub(super) fn can_connect(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "可接入",
-            GuiLocale::EnUs => "Ready",
+            GuiLocale::ZhCn => "未初始化配置",
+            GuiLocale::EnUs => "Not Initialized",
         }
     }
 
@@ -1485,7 +1471,7 @@ impl GuiText {
 
     pub(super) fn not_connected(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "未接入",
+            GuiLocale::ZhCn => "未连接",
             GuiLocale::EnUs => "Not Connected",
         }
     }

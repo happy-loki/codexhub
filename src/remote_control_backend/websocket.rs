@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 
 use anyhow::{Context, Result, anyhow};
 use axum::{
@@ -21,7 +21,8 @@ use crate::{
 
 use super::client_state::{
     connection_exists_locked, default_client_key_for_connection_locked, ensure_client_state_locked,
-    source_default_client_key, source_kind_from_user_agent, sync_default_client_legacy_locked,
+    prune_inactive_remote_connections_locked, source_default_client_key,
+    source_kind_from_user_agent, sync_default_client_legacy_locked,
     sync_legacy_from_active_connection_locked,
 };
 use super::diagnostics::{
@@ -169,6 +170,7 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
                 stream_diagnostics: HashMap::new(),
             },
         );
+        prune_inactive_remote_connections_locked(&mut remote);
         sync_default_client_legacy_locked(&mut remote);
         (
             connection_id,
@@ -355,12 +357,9 @@ async fn run_websocket(state: SharedState, headers: HeaderMap, socket: WebSocket
     {
         let mut remote = state.remote_control.inner.lock().await;
         let last_error = connection_result.as_ref().err().map(|err| err.to_string());
-        if let Some(connection) = remote.connections.get_mut(&connection_id) {
-            connection.connected = false;
-            connection.outbound_tx = None;
-            connection.last_error = last_error.clone();
-        }
+        remote.connections.remove(&connection_id);
         remote.last_error = last_error;
+        prune_inactive_remote_connections_locked(&mut remote);
         sync_legacy_from_active_connection_locked(&mut remote);
     }
     state

@@ -60,6 +60,38 @@ fn remote_inner_for_test(stream_id: &str) -> RemoteControlInner {
     }
 }
 
+fn test_connection(
+    id: &str,
+    connection_epoch: u64,
+    connected: bool,
+    initialized: bool,
+    source_kind: crate::app_state::RemoteControlSourceKind,
+    outbound_tx: Option<tokio::sync::mpsc::UnboundedSender<OutboundWsMessage>>,
+) -> crate::app_state::RemoteControlServerConnection {
+    crate::app_state::RemoteControlServerConnection {
+        connection_id: id.to_string(),
+        connection_epoch,
+        connected,
+        initialized,
+        source_kind,
+        user_agent: None,
+        server_id: None,
+        environment_id: None,
+        server_name: None,
+        installation_id: None,
+        account_id: None,
+        subscribe_cursor: None,
+        outbound_tx,
+        connected_at_ms: Some(connection_epoch as u128),
+        last_ws_inbound_at_ms: Some(connection_epoch as u128),
+        last_ws_ping_at_ms: None,
+        last_ws_pong_at_ms: None,
+        last_error: None,
+        clients: HashMap::new(),
+        stream_diagnostics: HashMap::new(),
+    }
+}
+
 fn test_server_message_envelope(
     client_id: &str,
     stream_id: &str,
@@ -841,6 +873,144 @@ async fn initialize_remote_clients_for_connection_sends_connection_default_clien
         .collect::<std::collections::HashSet<_>>();
     let expected_streams = std::collections::HashSet::from(["stream-root".to_string()]);
     assert_eq!(initialize_streams, expected_streams);
+}
+
+#[test]
+fn active_connection_can_be_selected_before_initialize_completes() {
+    let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut remote = remote_inner_for_test("stream-root");
+    remote.connections.insert(
+        "conn-pending".to_string(),
+        test_connection(
+            "conn-pending",
+            11,
+            true,
+            false,
+            crate::app_state::RemoteControlSourceKind::Unknown,
+            Some(outbound_tx),
+        ),
+    );
+
+    assert_eq!(
+        select_active_connection_id_locked(&remote).as_deref(),
+        Some("conn-pending")
+    );
+}
+
+#[test]
+fn inactive_remote_connections_are_not_retained_in_memory() {
+    let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut remote = remote_inner_for_test("stream-root");
+    for epoch in 1..=80 {
+        let id = format!("conn-{epoch}");
+        remote.connections.insert(
+            id.clone(),
+            test_connection(
+                &id,
+                epoch,
+                false,
+                false,
+                crate::app_state::RemoteControlSourceKind::Unknown,
+                None,
+            ),
+        );
+    }
+    remote.connections.insert(
+        "conn-active".to_string(),
+        test_connection(
+            "conn-active",
+            10,
+            true,
+            false,
+            crate::app_state::RemoteControlSourceKind::Vscode,
+            Some(outbound_tx),
+        ),
+    );
+
+    prune_inactive_remote_connections_locked(&mut remote);
+
+    assert_eq!(remote.connections.len(), 1);
+    assert!(remote.connections.contains_key("conn-active"));
+    assert!(!remote.connections.contains_key("conn-1"));
+    assert!(!remote.connections.contains_key("conn-80"));
+}
+
+#[test]
+fn pruning_last_connection_clears_legacy_connected_state() {
+    let mut remote = remote_inner_for_test("stream-root");
+    remote.connected = true;
+    remote.initialized = true;
+    remote.connection_epoch = 7;
+    let id = "conn-closed";
+    remote.connections.insert(
+        id.to_string(),
+        test_connection(
+            id,
+            7,
+            false,
+            true,
+            crate::app_state::RemoteControlSourceKind::CodexApp,
+            None,
+        ),
+    );
+
+    prune_inactive_remote_connections_locked(&mut remote);
+
+    assert!(remote.connections.is_empty());
+    assert!(!remote.connected);
+    assert!(!remote.initialized);
+    assert!(remote.outbound_tx.is_none());
+}
+
+#[tokio::test]
+async fn status_snapshot_excludes_inactive_connections() {
+    let state = test_state();
+    let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::unbounded_channel();
+    {
+        let mut remote = state.remote_control.inner.lock().await;
+        for epoch in 1..=80 {
+            let id = format!("conn-{epoch}");
+            remote.connections.insert(
+                id.clone(),
+                test_connection(
+                    &id,
+                    epoch,
+                    false,
+                    false,
+                    crate::app_state::RemoteControlSourceKind::Unknown,
+                    None,
+                ),
+            );
+        }
+        remote.connections.insert(
+            "conn-active".to_string(),
+            test_connection(
+                "conn-active",
+                10,
+                true,
+                true,
+                crate::app_state::RemoteControlSourceKind::CodexApp,
+                Some(outbound_tx),
+            ),
+        );
+    }
+
+    let snapshot = status_snapshot(&state).await;
+
+    assert_eq!(snapshot.connections.len(), 1);
+    assert!(
+        snapshot
+            .connections
+            .iter()
+            .any(|connection| connection.id == "conn-active")
+    );
+    assert_eq!(
+        snapshot
+            .connections
+            .first()
+            .map(|connection| connection.id.as_str()),
+        Some("conn-active")
+    );
 }
 
 #[tokio::test]

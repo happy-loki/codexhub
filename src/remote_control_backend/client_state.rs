@@ -1,4 +1,4 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 
 use crate::{
     app_state::{RemoteControlClientState, RemoteControlInner, RemoteControlSourceKind},
@@ -249,18 +249,53 @@ fn source_kind_priority(kind: RemoteControlSourceKind) -> u8 {
     }
 }
 
+pub(in crate::remote_control_backend) fn prune_inactive_remote_connections_locked(
+    remote: &mut RemoteControlInner,
+) {
+    let had_connections = !remote.connections.is_empty();
+    remote
+        .connections
+        .retain(|_, connection| connection.connected && connection.outbound_tx.is_some());
+    if remote
+        .active_connection_id
+        .as_ref()
+        .is_some_and(|connection_id| !remote.connections.contains_key(connection_id))
+    {
+        remote.active_connection_id = None;
+    }
+    if had_connections && remote.connections.is_empty() {
+        clear_active_connection_legacy_locked(remote);
+    }
+}
+
+fn clear_active_connection_legacy_locked(remote: &mut RemoteControlInner) {
+    remote.active_connection_id = None;
+    remote.connected = false;
+    remote.initialized = false;
+    remote.outbound_tx = None;
+    remote.server_id = None;
+    remote.environment_id = None;
+    remote.server_name = None;
+    remote.installation_id = None;
+    remote.account_id = None;
+    remote.subscribe_cursor = None;
+    remote.connected_at_ms = None;
+    remote.last_ws_inbound_at_ms = None;
+    remote.last_ws_ping_at_ms = None;
+    remote.last_ws_pong_at_ms = None;
+}
+
 pub(in crate::remote_control_backend) fn select_active_connection_id_locked(
     remote: &RemoteControlInner,
 ) -> Option<String> {
     remote
         .connections
         .values()
-        .filter(|connection| {
-            connection.connected && connection.outbound_tx.is_some() && connection.initialized
-        })
+        .filter(|connection| connection.connected && connection.outbound_tx.is_some())
         .max_by_key(|connection| {
             (
                 source_kind_priority(connection.source_kind),
+                connection.initialized,
                 connection
                     .last_ws_inbound_at_ms
                     .or(connection.connected_at_ms)
@@ -275,7 +310,13 @@ pub(in crate::remote_control_backend) fn sync_legacy_from_active_connection_lock
     remote: &mut RemoteControlInner,
 ) {
     if remote.connections.is_empty() {
-        sync_default_client_legacy_locked(remote);
+        remote.active_connection_id = None;
+        if remote.connected && remote.outbound_tx.is_some() {
+            sync_default_client_legacy_locked(remote);
+        } else {
+            remote.initialized = false;
+            remote.outbound_tx = None;
+        }
         return;
     }
     remote.active_connection_id = select_active_connection_id_locked(remote);

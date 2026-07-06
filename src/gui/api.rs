@@ -133,34 +133,29 @@ impl ApiClient {
     }
 
     pub(super) fn dashboard(&self) -> DashboardSnapshot {
-        let offline_snapshot = DashboardSnapshot {
-            local_connection_mode: self.connection_mode(),
-            ..DashboardSnapshot::default()
-        };
         let dashboard = match self.get_quick::<GuiDashboardResponse>("/api/gui/dashboard") {
             Ok(dashboard) => dashboard,
             Err(_err) => {
-                if self.connection_mode() == LocalConnectionMode::Standard {
-                    return DashboardSnapshot {
-                        compatible_connection_available: self
-                            .probe_base_url("http://localhost:3847"),
-                        ..offline_snapshot
-                    };
-                }
-                return offline_snapshot;
+                return self.dashboard_fallback();
             }
         };
-        let local_connection_mode = dashboard.status.local_connection_mode;
+        DashboardSnapshot::from_dashboard_response(dashboard)
+    }
 
-        DashboardSnapshot {
-            service_online: true,
-            local_connection_mode,
-            compatible_connection_available: false,
-            remote: Some(dashboard.remote),
-            codex_app: Some(dashboard.codex_app),
-            im_accounts: Some(dashboard.im_accounts),
-            status: Some(dashboard.status),
-            ai_gateway: Some(dashboard.ai_gateway),
+    fn dashboard_fallback(&self) -> DashboardSnapshot {
+        let local_connection_mode = self.connection_mode();
+        match self.get_quick::<ServerStatus>("/api/status") {
+            Ok(status) => DashboardSnapshot::from_status_fallback(status),
+            Err(_err) => {
+                let compatible_connection_available = local_connection_mode
+                    == LocalConnectionMode::Standard
+                    && self.probe_base_url("http://localhost:3847");
+                DashboardSnapshot {
+                    local_connection_mode,
+                    compatible_connection_available,
+                    ..DashboardSnapshot::default()
+                }
+            }
         }
     }
 
@@ -334,6 +329,33 @@ pub(super) struct DashboardSnapshot {
     pub(super) ai_gateway: Option<AiGatewayConfig>,
 }
 
+impl DashboardSnapshot {
+    fn from_dashboard_response(dashboard: GuiDashboardResponse) -> Self {
+        let local_connection_mode = dashboard.status.local_connection_mode;
+        Self {
+            service_online: true,
+            local_connection_mode,
+            compatible_connection_available: false,
+            remote: Some(dashboard.remote),
+            codex_app: Some(dashboard.codex_app),
+            im_accounts: Some(dashboard.im_accounts),
+            status: Some(dashboard.status),
+            ai_gateway: Some(dashboard.ai_gateway),
+        }
+    }
+
+    fn from_status_fallback(status: ServerStatus) -> Self {
+        let local_connection_mode = status.local_connection_mode;
+        Self {
+            service_online: true,
+            local_connection_mode,
+            compatible_connection_available: false,
+            status: Some(status),
+            ..Self::default()
+        }
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GuiDashboardResponse {
@@ -461,6 +483,31 @@ pub(super) struct SetCodexAppFastStartupRequest {
 
 fn default_true() -> bool {
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_fallback_keeps_service_online() {
+        let snapshot = DashboardSnapshot::from_status_fallback(ServerStatus {
+            bind: "127.0.0.1:3847".to_string(),
+            local_connection_mode: LocalConnectionMode::Standard,
+            codex_app_fast_startup: true,
+        });
+
+        assert!(snapshot.service_online);
+        assert_eq!(
+            snapshot.local_connection_mode,
+            LocalConnectionMode::Standard
+        );
+        assert!(snapshot.status.is_some());
+        assert!(snapshot.remote.is_none());
+        assert!(snapshot.codex_app.is_none());
+        assert!(snapshot.im_accounts.is_none());
+        assert!(snapshot.ai_gateway.is_none());
+    }
 }
 
 #[derive(Clone, Default, Deserialize)]

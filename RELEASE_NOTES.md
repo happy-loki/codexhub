@@ -1,3 +1,27 @@
+CodexHub v0.3.24
+
+这是一个紧急修复版本，重点修复桌面面板状态显示混乱、本地服务误判超时，以及远程连接历史在内存和状态接口里无限累积的问题。
+
+## GUI / 状态栏
+
+- **统一连接状态文案**：Codex App、VSCode 插件、CLI 三类终端统一为更清晰的状态集合，包括 `未初始化配置`、`已连接`、`未连接`、`初始化中`、`读取中`，减少普通用户看到的中间状态和心智负担。
+- **修复本地服务误判离线**：GUI dashboard 请求失败或超时时，会回退到轻量 `/api/status` 判断本地服务是否在线，不再把面板子状态接口的异常直接显示成“服务未运行”。
+- **移除误导状态**：不再显示 `未注入`、`未打开控制`、`可接入` 等容易误解的状态。
+
+## Remote Control / 内存
+
+- **远程连接只保留当前活跃连接**：`remote.connections` 不再保存断开的历史连接，断开后立即从内存状态移除。
+- **状态接口自动清理历史连接**：生成 `/api/remote-control/status` 快照前会清理非活跃连接，避免历史连接把响应撑到几十 MB 甚至上百 MB。
+- **连接选择更稳定**：新连接在初始化完成前也可以被选为活跃连接，同时优先选择已初始化连接，避免 Codex App / VSCode 插件明明可用但状态显示不一致。
+
+## 验证
+
+- `cargo test --features gui`
+- `rustfmt --edition 2024 --check src/gui.rs src/gui/api.rs src/gui/text.rs src/remote_control_backend/client_state.rs src/remote_control_backend/status.rs src/remote_control_backend/tests.rs src/remote_control_backend/websocket.rs`
+- `git diff --check`
+
+---
+
 CodexHub v0.3.23
 
 本次为聚焦修复版本，解决插件目录里出现"能看见但装不了"的插件问题，让 API 登录环境下的插件列表回归可用状态。

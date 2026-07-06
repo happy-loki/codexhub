@@ -6,7 +6,8 @@ use crate::{
 };
 
 use super::{
-    DEFAULT_REMOTE_CLIENT_KEY, remote_control_stale_reason_locked, source_default_client_key,
+    DEFAULT_REMOTE_CLIENT_KEY, prune_inactive_remote_connections_locked,
+    remote_control_stale_reason_locked, source_default_client_key,
     sync_legacy_from_active_connection_locked,
 };
 
@@ -64,6 +65,7 @@ pub struct RemoteControlConnectionStatusResponse {
 
 pub async fn status_snapshot(state: &SharedState) -> RemoteControlStatusResponse {
     let mut remote = state.remote_control.inner.lock().await;
+    prune_inactive_remote_connections_locked(&mut remote);
     sync_legacy_from_active_connection_locked(&mut remote);
     let stale = remote_control_stale_reason_locked(&remote, now_ms()).is_some();
     let active_connection = remote
@@ -72,9 +74,20 @@ pub async fn status_snapshot(state: &SharedState) -> RemoteControlStatusResponse
         .and_then(|connection_id| remote.connections.get(connection_id));
     let active_source_kind = active_connection.map(|connection| connection.source_kind);
     let active_user_agent = active_connection.and_then(|connection| connection.user_agent.clone());
-    let connections = remote
-        .connections
-        .values()
+    let mut connection_values = remote.connections.values().collect::<Vec<_>>();
+    connection_values.sort_by_key(|connection| {
+        std::cmp::Reverse((
+            connection.connected && connection.outbound_tx.is_some(),
+            connection.initialized,
+            connection
+                .last_ws_inbound_at_ms
+                .or(connection.connected_at_ms)
+                .unwrap_or_default(),
+            connection.connection_epoch,
+        ))
+    });
+    let connections = connection_values
+        .into_iter()
         .map(|connection| RemoteControlConnectionStatusResponse {
             id: connection.connection_id.clone(),
             connection_epoch: connection.connection_epoch,
