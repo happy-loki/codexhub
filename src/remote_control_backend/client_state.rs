@@ -294,8 +294,8 @@ pub(in crate::remote_control_backend) fn select_active_connection_id_locked(
         .filter(|connection| connection.connected && connection.outbound_tx.is_some())
         .max_by_key(|connection| {
             (
-                source_kind_priority(connection.source_kind),
                 connection.initialized,
+                source_kind_priority(connection.source_kind),
                 connection
                     .last_ws_inbound_at_ms
                     .or(connection.connected_at_ms)

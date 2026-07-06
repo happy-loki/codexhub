@@ -1,3 +1,26 @@
+CodexHub v0.3.25
+
+这是一个针对 v0.3.24 升级问题的紧急修复版本，重点处理部分 Windows 用户升级后仍运行旧界面、多端连接状态被未初始化连接抢占、以及面板状态偶发跳变的问题。
+
+## Windows 更新
+
+- **修复自动更新覆盖失败风险**：Windows 自动更新下载 MSI 后，现在会先让 CodexHub 完整退出，再由后台 helper 启动安装器，避免安装器启动时旧进程仍占用 `CodexHub.exe`，导致用户升级后实际还在运行旧版本。
+- **更新提示更准确**：下载完成后的提示改为说明“退出后会自动启动安装器”，避免用户误以为安装已经完成。
+
+## Remote Control / 状态
+
+- **优先保留已初始化连接**：当 Codex App / VSCode / CLI 同时或反复重连时，已初始化的连接优先于新建但未初始化的高优先级连接，避免状态在“成功/失败”之间跳动。
+- **明确隔离 unknown 连接**：对已连接且已初始化但来源为 `unknown` 的旧连接，不再归到 Codex App / VSCode / CLI 任一明确终端，避免某一端误显示“已连接”。
+- **修复 dashboard fallback 状态丢失**：当 GUI 聚合 dashboard 接口偶发超时或失败、但本地服务仍在线时，面板会继续单独读取 remote-control 和 Codex App 状态，不再把三端状态错误降级为“读取中”。
+
+## 验证
+
+- `cargo test --features gui`
+- `rustfmt --edition 2024 --check src/gui.rs src/gui/api.rs src/gui/text.rs src/gui/update.rs src/remote_control_backend/client_state.rs src/remote_control_backend/tests.rs`
+- `git diff --check -- src/gui.rs src/gui/api.rs src/gui/text.rs src/gui/update.rs src/remote_control_backend/client_state.rs src/remote_control_backend/tests.rs`
+
+---
+
 CodexHub v0.3.24
 
 这是一个紧急修复版本，重点修复桌面面板状态显示混乱、本地服务误判超时，以及远程连接历史在内存和状态接口里无限累积的问题。

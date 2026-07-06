@@ -1779,15 +1779,13 @@ impl GuiText {
     ) -> String {
         let action = if can_download_installer {
             match self.locale {
-                GuiLocale::ZhCn => "是否自动下载更新包并启动安装器？",
+                GuiLocale::ZhCn => "是否下载更新包并启动安装器？",
                 GuiLocale::EnUs => "Download and start the installer?",
             }
         } else {
             match self.locale {
-                GuiLocale::ZhCn => "暂时没有找到可自动安装的更新包，是否打开发布页手动下载？",
-                GuiLocale::EnUs => {
-                    "No auto-installable update package was found yet. Open the release page?"
-                }
+                GuiLocale::ZhCn => "是否打开发布页手动下载并安装？",
+                GuiLocale::EnUs => "Open the release page to download and install manually?",
             }
         };
         match self.locale {
@@ -1841,9 +1839,9 @@ impl GuiText {
 
     pub(super) fn update_download_started(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "正在下载更新包，下载完成后会启动安装器。",
+            GuiLocale::ZhCn => "正在下载更新包，下载完成后会打开安装包。",
             GuiLocale::EnUs => {
-                "Downloading the update. The installer will start when the download finishes."
+                "Downloading the update. The installer package will open when the download finishes."
             }
         }
     }
@@ -1915,11 +1913,34 @@ impl GuiText {
         }
     }
 
-    pub(super) fn update_installer_started(self, path: &str) -> String {
+    #[cfg(target_os = "windows")]
+    pub(super) fn update_installer_started(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => format!("更新包已下载并启动安装器。\n路径：{path}"),
+            GuiLocale::ZhCn => "更新包已下载。CodexHub 将退出以继续安装。",
             GuiLocale::EnUs => {
-                format!("The update was downloaded and the installer was started.\nPath: {path}")
+                "The update was downloaded. CodexHub will exit to continue installation."
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    pub(super) fn update_installer_started(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "更新包已下载并打开。请将 CodexHub 拖到 Applications 覆盖安装，然后重新打开。"
+            }
+            GuiLocale::EnUs => {
+                "The update was downloaded and opened. Drag CodexHub to Applications to replace the old app, then reopen it."
+            }
+        }
+    }
+
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    pub(super) fn update_installer_started(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "更新包已下载并打开，请按系统提示完成安装。",
+            GuiLocale::EnUs => {
+                "The update was downloaded and opened. Follow the system prompts to finish installation."
             }
         }
     }

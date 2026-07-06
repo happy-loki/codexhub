@@ -38,12 +38,10 @@ const PROJECT_HOME_URL: &str = "https://github.com/happy-loki/codexhub";
 #[cfg(target_os = "windows")]
 const UPDATE_MANIFEST_URL: &str =
     "https://github.com/happy-loki/codexhub/releases/latest/download/latest-windows.json";
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-const UPDATE_MANIFEST_URL: &str =
-    "https://github.com/happy-loki/codexhub/releases/latest/download/latest-macos-intel.json";
-#[cfg(all(target_os = "macos", not(target_arch = "x86_64")))]
-const UPDATE_MANIFEST_URL: &str =
+const MACOS_UPDATE_MANIFEST_URL: &str =
     "https://github.com/happy-loki/codexhub/releases/latest/download/latest-macos.json";
+#[cfg(target_os = "macos")]
+const UPDATE_MANIFEST_URL: &str = MACOS_UPDATE_MANIFEST_URL;
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 const UPDATE_MANIFEST_URL: &str =
     "https://github.com/happy-loki/codexhub/releases/latest/download/latest-linux.json";
@@ -3378,6 +3376,25 @@ mod model_mapping_tests {
             connections: vec![RemoteControlConnectionStatus {
                 connected: true,
                 initialized: false,
+                source_kind: "unknown".to_string(),
+            }],
+        };
+
+        assert_eq!(
+            endpoint_status_state(Some(&remote), "codex_app", true),
+            EndpointStatusState::NotConnected
+        );
+    }
+
+    #[test]
+    fn codex_app_status_does_not_claim_unknown_active_connection() {
+        let remote = RemoteControlStatus {
+            connected: true,
+            initialized: true,
+            active_source_kind: Some("unknown".to_string()),
+            connections: vec![RemoteControlConnectionStatus {
+                connected: true,
+                initialized: true,
                 source_kind: "unknown".to_string(),
             }],
         };

@@ -898,6 +898,40 @@ fn active_connection_can_be_selected_before_initialize_completes() {
 }
 
 #[test]
+fn initialized_connection_is_preferred_over_uninitialized_higher_priority_connection() {
+    let (codex_tx, _codex_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (vscode_tx, _vscode_rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut remote = remote_inner_for_test("stream-root");
+    remote.connections.insert(
+        "conn-vscode-ready".to_string(),
+        test_connection(
+            "conn-vscode-ready",
+            10,
+            true,
+            true,
+            crate::app_state::RemoteControlSourceKind::Vscode,
+            Some(vscode_tx),
+        ),
+    );
+    remote.connections.insert(
+        "conn-codex-pending".to_string(),
+        test_connection(
+            "conn-codex-pending",
+            20,
+            true,
+            false,
+            crate::app_state::RemoteControlSourceKind::CodexApp,
+            Some(codex_tx),
+        ),
+    );
+
+    assert_eq!(
+        select_active_connection_id_locked(&remote).as_deref(),
+        Some("conn-vscode-ready")
+    );
+}
+
+#[test]
 fn inactive_remote_connections_are_not_retained_in_memory() {
     let (outbound_tx, _outbound_rx) = tokio::sync::mpsc::unbounded_channel();
     let mut remote = remote_inner_for_test("stream-root");

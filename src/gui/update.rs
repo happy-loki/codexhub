@@ -96,6 +96,13 @@ struct UpdateDownload {
     asset_type: Option<String>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdatePlatform {
+    Windows,
+    Macos,
+    Linux,
+}
+
 #[derive(Debug)]
 struct DownloadedUpdate {
     path: PathBuf,
@@ -404,20 +411,38 @@ impl UpdateDownload {
 }
 
 fn platform_download(manifest: &UpdateManifest) -> Option<UpdateDownload> {
+    platform_download_for_platform(current_update_platform(), manifest)
+}
+
+fn platform_download_for_platform(
+    platform: UpdatePlatform,
+    manifest: &UpdateManifest,
+) -> Option<UpdateDownload> {
     manifest
         .assets
-        .get(platform_manifest_asset_key())
-        .or_else(|| manifest.assets.get(platform_manifest_fallback_asset_key()))
+        .get(platform_manifest_asset_key(platform))
+        .or_else(|| {
+            manifest
+                .assets
+                .get(platform_manifest_fallback_asset_key(platform))
+        })
         .and_then(UpdateDownload::from_asset)
 }
 
 fn platform_download_from_github_assets(assets: &[GitHubReleaseAsset]) -> Option<UpdateDownload> {
+    platform_download_from_github_assets_for_platform(current_update_platform(), assets)
+}
+
+fn platform_download_from_github_assets_for_platform(
+    platform: UpdatePlatform,
+    assets: &[GitHubReleaseAsset],
+) -> Option<UpdateDownload> {
     assets.iter().find_map(|asset| {
-        if platform_github_asset_matches(&asset.name) {
+        if platform_github_asset_matches(platform, &asset.name) {
             Some(UpdateDownload {
                 url: asset.browser_download_url.clone(),
                 sha256: None,
-                asset_type: Some(platform_installer_asset_type().to_string()),
+                asset_type: Some(platform_installer_asset_type(platform).to_string()),
             })
         } else {
             None
@@ -426,82 +451,53 @@ fn platform_download_from_github_assets(assets: &[GitHubReleaseAsset]) -> Option
 }
 
 #[cfg(target_os = "windows")]
-fn platform_github_asset_matches(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    name.ends_with(".msi") && name.contains("windows") && name.contains("x64")
-}
-
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-fn platform_github_asset_matches(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    name.ends_with(".dmg") && name.contains("macos") && name.contains("intel")
-}
-
-#[cfg(all(target_os = "macos", not(target_arch = "x86_64")))]
-fn platform_github_asset_matches(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    name.ends_with(".dmg") && name.contains("macos") && !name.contains("intel")
-}
-
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn platform_github_asset_matches(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    name.ends_with(".appimage") || name.ends_with(".tar.gz")
-}
-
-#[cfg(target_os = "windows")]
-fn platform_installer_asset_type() -> &'static str {
-    "msi"
+fn current_update_platform() -> UpdatePlatform {
+    UpdatePlatform::Windows
 }
 
 #[cfg(target_os = "macos")]
-fn platform_installer_asset_type() -> &'static str {
-    "dmg"
+fn current_update_platform() -> UpdatePlatform {
+    UpdatePlatform::Macos
 }
 
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn platform_installer_asset_type() -> &'static str {
-    "appimage"
+fn current_update_platform() -> UpdatePlatform {
+    UpdatePlatform::Linux
 }
 
-#[cfg(target_os = "windows")]
-fn platform_manifest_asset_key() -> &'static str {
-    "windows-x86_64"
+fn platform_github_asset_matches(platform: UpdatePlatform, name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    match platform {
+        UpdatePlatform::Windows => {
+            name.ends_with(".msi") && name.contains("windows") && name.contains("x64")
+        }
+        UpdatePlatform::Macos => name.ends_with(".dmg") && name.contains("macos"),
+        UpdatePlatform::Linux => name.ends_with(".appimage") || name.ends_with(".tar.gz"),
+    }
 }
 
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-fn platform_manifest_asset_key() -> &'static str {
-    "macos-intel"
+fn platform_installer_asset_type(platform: UpdatePlatform) -> &'static str {
+    match platform {
+        UpdatePlatform::Windows => "msi",
+        UpdatePlatform::Macos => "dmg",
+        UpdatePlatform::Linux => "appimage",
+    }
 }
 
-#[cfg(all(target_os = "macos", not(target_arch = "x86_64")))]
-fn platform_manifest_asset_key() -> &'static str {
-    "macos-universal"
+fn platform_manifest_asset_key(platform: UpdatePlatform) -> &'static str {
+    match platform {
+        UpdatePlatform::Windows => "windows-x86_64",
+        UpdatePlatform::Macos => "macos-universal",
+        UpdatePlatform::Linux => "linux-x86_64",
+    }
 }
 
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn platform_manifest_asset_key() -> &'static str {
-    "linux-x86_64"
-}
-
-#[cfg(target_os = "windows")]
-fn platform_manifest_fallback_asset_key() -> &'static str {
-    "windows-portable-x86_64"
-}
-
-#[cfg(all(target_os = "macos", target_arch = "x86_64"))]
-fn platform_manifest_fallback_asset_key() -> &'static str {
-    "macos-sparkle-intel"
-}
-
-#[cfg(all(target_os = "macos", not(target_arch = "x86_64")))]
-fn platform_manifest_fallback_asset_key() -> &'static str {
-    "macos-sparkle-universal"
-}
-
-#[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-fn platform_manifest_fallback_asset_key() -> &'static str {
-    "linux-appimage-x86_64"
+fn platform_manifest_fallback_asset_key(platform: UpdatePlatform) -> &'static str {
+    match platform {
+        UpdatePlatform::Windows => "windows-portable-x86_64",
+        UpdatePlatform::Macos => "macos-sparkle-universal",
+        UpdatePlatform::Linux => "linux-appimage-x86_64",
+    }
 }
 
 fn download_and_install_update_async(
@@ -519,7 +515,7 @@ fn download_and_install_update_async(
                 if progress.is_cancelled() {
                     return Err(text.update_download_cancelled().to_string());
                 }
-                launch_downloaded_update(text, &update)?;
+                launch_downloaded_update(text, &update, true)?;
                 Ok(update)
             });
             if let Ok(mut slot) = progress.result.lock() {
@@ -556,18 +552,12 @@ fn download_and_install_update_async(
                 }
                 dialog.update(DOWNLOAD_PROGRESS_RESOLUTION, None);
                 match result {
-                    Ok(update) => {
-                        show_info(
-                            &parent,
-                            &text.update_installer_started(&update.path.display().to_string()),
-                        );
-                        // The installer needs to replace the running executable.
-                        // Quit CodexHub (and its backend daemon) so the MSI no
-                        // longer sees the app holding files open, which would
-                        // otherwise trigger Windows "close the running app"
-                        // prompts (once per running process).
-                        quitting.store(true, Ordering::SeqCst);
-                        parent.close(true);
+                    Ok(_update) => {
+                        show_info(&parent, text.update_installer_started());
+                        if should_quit_after_update_launch() {
+                            quitting.store(true, Ordering::SeqCst);
+                            parent.close(true);
+                        }
                     }
                     Err(err) => {
                         if progress.is_cancelled() {
@@ -736,11 +726,19 @@ fn default_platform_update_filename() -> &'static str {
     "CodexHub-update"
 }
 
-fn launch_downloaded_update(text: GuiText, update: &DownloadedUpdate) -> Result<(), String> {
+fn launch_downloaded_update(
+    text: GuiText,
+    update: &DownloadedUpdate,
+    _wait_for_current_process_exit: bool,
+) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     let mut command = {
-        let mut command = Command::new("msiexec.exe");
-        command.arg("/i").arg(&update.path);
+        let current_pid = std::process::id();
+        let mut command = if _wait_for_current_process_exit {
+            windows_deferred_msi_command(&update.path, current_pid)
+        } else {
+            windows_msi_command(&update.path)
+        };
         hide_command_window(&mut command);
         command
     };
@@ -761,6 +759,53 @@ fn launch_downloaded_update(text: GuiText, update: &DownloadedUpdate) -> Result<
         .spawn()
         .map(|_| ())
         .map_err(|err| text.update_installer_launch_failed(&update.url, &err.to_string()))
+}
+
+#[cfg(target_os = "windows")]
+fn should_quit_after_update_launch() -> bool {
+    true
+}
+
+#[cfg(not(target_os = "windows"))]
+fn should_quit_after_update_launch() -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn windows_msi_command(path: &std::path::Path) -> Command {
+    let mut command = Command::new("msiexec.exe");
+    command.arg("/i").arg(path);
+    command
+}
+
+#[cfg(target_os = "windows")]
+fn windows_deferred_msi_command(path: &std::path::Path, parent_pid: u32) -> Command {
+    let mut command = Command::new("powershell.exe");
+    command
+        .arg("-NoProfile")
+        .arg("-ExecutionPolicy")
+        .arg("Bypass")
+        .arg("-WindowStyle")
+        .arg("Hidden")
+        .arg("-Command")
+        .arg(windows_deferred_msi_script(path, parent_pid));
+    command
+}
+
+#[cfg(target_os = "windows")]
+fn windows_deferred_msi_script(path: &std::path::Path, parent_pid: u32) -> String {
+    let msi_path = powershell_single_quoted(path.display().to_string().as_str());
+    format!(
+        "$ErrorActionPreference='SilentlyContinue'; \
+         $p=Get-Process -Id {parent_pid}; \
+         if ($p) {{ $p.WaitForExit(); }}; \
+         Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', {msi_path})"
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn powershell_single_quoted(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 fn truncate_for_dialog(value: &str, max_chars: usize) -> String {
@@ -821,6 +866,141 @@ mod update_tests {
         assert!(!is_version_newer(text, "v0.2.5", "0.2.5").unwrap());
         assert!(!is_version_newer(text, "v0.2.4", "0.2.5").unwrap());
         assert!(!is_version_newer(text, "v0.2.5-beta.1", "0.2.5").unwrap());
+    }
+
+    #[test]
+    fn macos_update_manifest_url_is_arch_independent() {
+        assert!(super::super::MACOS_UPDATE_MANIFEST_URL.ends_with("/latest-macos.json"));
+        assert!(!super::super::MACOS_UPDATE_MANIFEST_URL.contains("intel"));
+    }
+
+    #[test]
+    fn macos_update_policy_downloads_universal_dmg() {
+        let mut assets = BTreeMap::new();
+        assets.insert(
+            "macos-universal".to_string(),
+            UpdateAsset {
+                url: Some("https://example.test/CodexHub.dmg".to_string()),
+                sha256: None,
+                asset_type: Some("dmg".to_string()),
+            },
+        );
+        assets.insert(
+            "macos-sparkle-universal".to_string(),
+            UpdateAsset {
+                url: Some("https://example.test/CodexHub.app.zip".to_string()),
+                sha256: None,
+                asset_type: Some("app-zip".to_string()),
+            },
+        );
+        let manifest = UpdateManifest {
+            version: "v9.9.9".to_string(),
+            release_url: None,
+            notes: None,
+            assets,
+        };
+        let release_assets = vec![
+            GitHubReleaseAsset {
+                name: "CodexHub-v9.9.9-macos-universal.dmg".to_string(),
+                browser_download_url: "https://example.test/CodexHub.dmg".to_string(),
+            },
+            GitHubReleaseAsset {
+                name: "CodexHub-v9.9.9-macos-universal.app.zip".to_string(),
+                browser_download_url: "https://example.test/CodexHub.app.zip".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            platform_download_for_platform(UpdatePlatform::Macos, &manifest)
+                .expect("macOS manifest download")
+                .url,
+            "https://example.test/CodexHub.dmg"
+        );
+        assert_eq!(
+            platform_download_from_github_assets_for_platform(
+                UpdatePlatform::Macos,
+                &release_assets
+            )
+            .expect("macOS GitHub asset download")
+            .url,
+            "https://example.test/CodexHub.dmg"
+        );
+    }
+
+    #[test]
+    fn macos_release_workflow_publishes_intel_compat_manifest() {
+        let workflow = include_str!("../../.github/workflows/release-macos.yml");
+
+        assert!(workflow.contains("asset_key: macos-universal"));
+        assert!(workflow.contains("sparkle_key: macos-sparkle-universal"));
+        assert!(workflow.contains("intel_manifest_name: latest-macos-intel.json"));
+        assert!(workflow.contains("\"macos-intel\": manifest[\"assets\"][asset_key]"));
+        assert!(workflow.contains("target/dist/${{ matrix.intel_manifest_name }}"));
+    }
+
+    #[test]
+    fn non_macos_update_policy_keeps_platform_downloads() {
+        let mut assets = BTreeMap::new();
+        assets.insert(
+            "windows-x86_64".to_string(),
+            UpdateAsset {
+                url: Some("https://example.test/CodexHub.msi".to_string()),
+                sha256: None,
+                asset_type: Some("msi".to_string()),
+            },
+        );
+        assets.insert(
+            "linux-x86_64".to_string(),
+            UpdateAsset {
+                url: Some("https://example.test/CodexHub.tar.gz".to_string()),
+                sha256: None,
+                asset_type: Some("tar.gz".to_string()),
+            },
+        );
+        let manifest = UpdateManifest {
+            version: "v9.9.9".to_string(),
+            release_url: None,
+            notes: None,
+            assets,
+        };
+
+        assert_eq!(
+            platform_download_for_platform(UpdatePlatform::Windows, &manifest)
+                .expect("windows download")
+                .url,
+            "https://example.test/CodexHub.msi"
+        );
+        assert_eq!(
+            platform_download_for_platform(UpdatePlatform::Linux, &manifest)
+                .expect("linux download")
+                .url,
+            "https://example.test/CodexHub.tar.gz"
+        );
+        assert!(platform_github_asset_matches(
+            UpdatePlatform::Windows,
+            "CodexHub-v9.9.9-windows-x64.msi"
+        ));
+        assert!(platform_github_asset_matches(
+            UpdatePlatform::Linux,
+            "CodexHub.Linux.x86_64.AppImage"
+        ));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_update_launcher_waits_for_current_process_before_msi() {
+        let script = windows_deferred_msi_script(
+            std::path::Path::new(r"C:\Temp\CodexHub Update's.msi"),
+            4242,
+        );
+
+        let wait_index = script.find("WaitForExit").expect("wait for parent");
+        let start_index = script.find("Start-Process").expect("start installer");
+
+        assert!(wait_index < start_index);
+        assert!(script.contains("Get-Process -Id 4242"));
+        assert!(script.contains("'C:\\Temp\\CodexHub Update''s.msi'"));
+        assert!(script.contains("'msiexec.exe'"));
     }
 }
 

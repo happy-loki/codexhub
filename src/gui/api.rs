@@ -145,7 +145,15 @@ impl ApiClient {
     fn dashboard_fallback(&self) -> DashboardSnapshot {
         let local_connection_mode = self.connection_mode();
         match self.get_quick::<ServerStatus>("/api/status") {
-            Ok(status) => DashboardSnapshot::from_status_fallback(status),
+            Ok(status) => {
+                let remote = self
+                    .get_quick::<RemoteControlStatus>("/api/remote-control/status")
+                    .ok();
+                let codex_app = self
+                    .get_quick::<CodexAppStatus>("/api/codex-app/status")
+                    .ok();
+                DashboardSnapshot::from_status_fallback(status, remote, codex_app)
+            }
             Err(_err) => {
                 let compatible_connection_available = local_connection_mode
                     == LocalConnectionMode::Standard
@@ -344,12 +352,18 @@ impl DashboardSnapshot {
         }
     }
 
-    fn from_status_fallback(status: ServerStatus) -> Self {
+    fn from_status_fallback(
+        status: ServerStatus,
+        remote: Option<RemoteControlStatus>,
+        codex_app: Option<CodexAppStatus>,
+    ) -> Self {
         let local_connection_mode = status.local_connection_mode;
         Self {
             service_online: true,
             local_connection_mode,
             compatible_connection_available: false,
+            remote,
+            codex_app,
             status: Some(status),
             ..Self::default()
         }
@@ -491,11 +505,15 @@ mod tests {
 
     #[test]
     fn status_fallback_keeps_service_online() {
-        let snapshot = DashboardSnapshot::from_status_fallback(ServerStatus {
-            bind: "127.0.0.1:3847".to_string(),
-            local_connection_mode: LocalConnectionMode::Standard,
-            codex_app_fast_startup: true,
-        });
+        let snapshot = DashboardSnapshot::from_status_fallback(
+            ServerStatus {
+                bind: "127.0.0.1:3847".to_string(),
+                local_connection_mode: LocalConnectionMode::Standard,
+                codex_app_fast_startup: true,
+            },
+            None,
+            None,
+        );
 
         assert!(snapshot.service_online);
         assert_eq!(
@@ -505,6 +523,41 @@ mod tests {
         assert!(snapshot.status.is_some());
         assert!(snapshot.remote.is_none());
         assert!(snapshot.codex_app.is_none());
+        assert!(snapshot.im_accounts.is_none());
+        assert!(snapshot.ai_gateway.is_none());
+    }
+
+    #[test]
+    fn status_fallback_keeps_terminal_status_when_available() {
+        let remote = RemoteControlStatus {
+            connected: true,
+            initialized: true,
+            active_source_kind: Some("vscode".to_string()),
+            connections: vec![RemoteControlConnectionStatus {
+                connected: true,
+                initialized: true,
+                source_kind: "vscode".to_string(),
+            }],
+        };
+        let codex_app = CodexAppStatus {
+            configured: true,
+            provider: None,
+            providers: Vec::new(),
+            image_generation_enabled: true,
+        };
+        let snapshot = DashboardSnapshot::from_status_fallback(
+            ServerStatus {
+                bind: "127.0.0.1:3847".to_string(),
+                local_connection_mode: LocalConnectionMode::Standard,
+                codex_app_fast_startup: true,
+            },
+            Some(remote),
+            Some(codex_app),
+        );
+
+        assert!(snapshot.service_online);
+        assert!(snapshot.remote.is_some());
+        assert!(snapshot.codex_app.is_some());
         assert!(snapshot.im_accounts.is_none());
         assert!(snapshot.ai_gateway.is_none());
     }

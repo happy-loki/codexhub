@@ -21,11 +21,13 @@ jobs:
             asset_key: macos-universal
             sparkle_key: macos-sparkle-universal
             manifest_name: latest-macos.json
+            intel_manifest_name: latest-macos-intel.json
     env:
       MACOS_FILE_SLUG: ${{ matrix.file_slug }}
       MACOS_ASSET_KEY: ${{ matrix.asset_key }}
       MACOS_SPARKLE_KEY: ${{ matrix.sparkle_key }}
       MACOS_MANIFEST_NAME: ${{ matrix.manifest_name }}
+      MACOS_INTEL_MANIFEST_NAME: ${{ matrix.intel_manifest_name }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -207,6 +209,7 @@ jobs:
           asset_key = os.environ["MACOS_ASSET_KEY"]
           sparkle_key = os.environ["MACOS_SPARKLE_KEY"]
           manifest_name = os.environ["MACOS_MANIFEST_NAME"]
+          intel_manifest_name = os.environ["MACOS_INTEL_MANIFEST_NAME"]
           dmg_path = dist / dmg_name
           app_zip_path = dist / app_zip_name
           release_tag = os.environ["RELEASE_TAG"]
@@ -248,6 +251,19 @@ jobs:
               json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
               encoding="utf-8",
           )
+          intel_manifest = {
+              "version": release_tag,
+              "releaseUrl": release_url,
+              "notes": "",
+              "assets": {
+                  "macos-intel": manifest["assets"][asset_key],
+                  "macos-sparkle-intel": manifest["assets"][sparkle_key],
+              },
+          }
+          Path(f"target/dist/{intel_manifest_name}").write_text(
+              json.dumps(intel_manifest, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
           PY
 
       - name: Upload Artifact
@@ -258,6 +274,7 @@ jobs:
             target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.dmg
             target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.app.zip
             target/dist/${{ matrix.manifest_name }}
+            target/dist/${{ matrix.intel_manifest_name }}
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -271,3 +288,4 @@ jobs:
             target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.dmg
             target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.app.zip
             target/dist/${{ matrix.manifest_name }}
+            target/dist/${{ matrix.intel_manifest_name }}
