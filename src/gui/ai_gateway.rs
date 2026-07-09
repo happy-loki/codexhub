@@ -45,6 +45,7 @@ pub(super) enum AiGwActionResult {
     },
     FilterImageGeneration(Result<bool, String>),
     RequestLogging(Result<bool, String>),
+    RequestLogDetails(Result<bool, String>),
 }
 
 pub(super) fn save_ai_gw_provider(
@@ -112,13 +113,37 @@ pub(super) fn refresh_ai_gw_filter_image_generation(handles: &UiHandles, enabled
 pub(super) fn set_request_logging_enabled(api: &ApiClient, enabled: bool) -> Result<bool, String> {
     let mut config = api.get_app_config()?;
     config.ai_gateway.request_logging_enabled = enabled;
+    if !enabled {
+        config.ai_gateway.request_log_details_enabled = false;
+    }
     api.save_app_config(&config)?;
     Ok(enabled)
 }
 
-pub(super) fn refresh_ai_gw_enable_logging(handles: &UiHandles, enabled: bool) {
+pub(super) fn set_request_log_details_enabled(
+    api: &ApiClient,
+    enabled: bool,
+) -> Result<bool, String> {
+    let mut config = api.get_app_config()?;
+    config.ai_gateway.request_log_details_enabled =
+        enabled && config.ai_gateway.request_logging_enabled;
+    api.save_app_config(&config)?;
+    Ok(config.ai_gateway.request_log_details_enabled)
+}
+
+pub(super) fn refresh_ai_gw_enable_logging(
+    handles: &UiHandles,
+    enabled: bool,
+    details_enabled: bool,
+) {
     if !handles.ai_gw_enable_logging.has_focus() {
         handles.ai_gw_enable_logging.set_value(enabled);
+    }
+    handles.ai_gw_enable_log_details.enable(enabled);
+    if !handles.ai_gw_enable_log_details.has_focus() {
+        handles
+            .ai_gw_enable_log_details
+            .set_value(enabled && details_enabled);
     }
     // Show/hide the disabled hint based on logging state
     if enabled {
@@ -273,6 +298,10 @@ pub(super) fn apply_pending_ai_gw_action(
         }
         AiGwActionResult::RequestLogging(Ok(_enabled)) => {}
         AiGwActionResult::RequestLogging(Err(err)) => {
+            super::show_error(frame, &handles.text.ai_gw_save_failed(&err));
+        }
+        AiGwActionResult::RequestLogDetails(Ok(_enabled)) => {}
+        AiGwActionResult::RequestLogDetails(Err(err)) => {
             super::show_error(frame, &handles.text.ai_gw_save_failed(&err));
         }
     }

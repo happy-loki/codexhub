@@ -116,9 +116,15 @@ pub async fn handle(
 
     if let Some(log_context) = &log_context {
         let update = RequestLogUpdate {
-            upstream_request_headers_json: request_log::headers_to_json(upstream_req.headers()),
+            upstream_request_headers_json: log_context
+                .details_enabled
+                .then(|| request_log::headers_to_json(upstream_req.headers()))
+                .flatten(),
             upstream_request_body_bytes: request_log::json_body_size_bytes(&anthropic_body),
-            upstream_request_json: serde_json::to_string(&anthropic_body).ok(),
+            upstream_request_json: log_context
+                .details_enabled
+                .then(|| serde_json::to_string(&anthropic_body).ok())
+                .flatten(),
             ..RequestLogUpdate::default()
         };
         if let Err(err) = log_context.store.update_record(log_context.log_id, &update) {
@@ -173,7 +179,10 @@ pub async fn handle(
             status: Some(response_obj.status.clone()),
             usage: Some(request_log::usage_from_response_value(&response_value)),
             latency_ms: Some(request_log::elapsed_ms(log_context.started_at)),
-            response_json: serde_json::to_string(&response_value).ok(),
+            response_json: log_context
+                .details_enabled
+                .then(|| serde_json::to_string(&response_value).ok())
+                .flatten(),
             ..RequestLogUpdate::default()
         };
         if let Err(err) = log_context.store.update_record(log_context.log_id, &update) {
@@ -791,7 +800,10 @@ fn response_from_response_object(
             status: Some(response_obj.status.clone()),
             usage: Some(request_log::usage_from_response_value(&response_value)),
             latency_ms: Some(request_log::elapsed_ms(log_context.started_at)),
-            response_json: serde_json::to_string(&response_value).ok(),
+            response_json: log_context
+                .details_enabled
+                .then(|| serde_json::to_string(&response_value).ok())
+                .flatten(),
             ..RequestLogUpdate::default()
         };
         if let Err(err) = log_context.store.update_record(log_context.log_id, &update) {
@@ -1233,9 +1245,15 @@ fn update_upstream_log(
 ) {
     if let Some(log_context) = log_context {
         let update = RequestLogUpdate {
-            upstream_request_headers_json: request_log::headers_to_json(headers),
+            upstream_request_headers_json: log_context
+                .details_enabled
+                .then(|| request_log::headers_to_json(headers))
+                .flatten(),
             upstream_request_body_bytes: request_log::json_body_size_bytes(anthropic_body),
-            upstream_request_json: serde_json::to_string(anthropic_body).ok(),
+            upstream_request_json: log_context
+                .details_enabled
+                .then(|| serde_json::to_string(anthropic_body).ok())
+                .flatten(),
             ..RequestLogUpdate::default()
         };
         if let Err(err) = log_context.store.update_record(log_context.log_id, &update) {
@@ -1248,6 +1266,9 @@ fn save_internal_upstream_sse(log_context: &Option<RequestLogContext>, raw_sse: 
     let Some(log_context) = log_context else {
         return;
     };
+    if !log_context.details_enabled {
+        return;
+    }
     if raw_sse.is_empty() {
         return;
     }

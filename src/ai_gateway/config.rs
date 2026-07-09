@@ -29,6 +29,9 @@ pub struct AiGatewayConfig {
     /// 是否启用请求日志记录。
     #[serde(default = "default_false")]
     pub request_logging_enabled: bool,
+    /// 是否记录请求/响应/SSE 详情。关闭时仍保留摘要指标。
+    #[serde(default = "default_false")]
+    pub request_log_details_enabled: bool,
 }
 
 fn default_false() -> bool {
@@ -45,6 +48,7 @@ impl Default for AiGatewayConfig {
             codex_visible_models: Vec::new(),
             filter_image_generation_tool: false,
             request_logging_enabled: false,
+            request_log_details_enabled: false,
         }
     }
 }
@@ -696,6 +700,7 @@ mod tests {
         assert_eq!(config.providers[0].weight, DEFAULT_PROVIDER_WEIGHT);
         assert_eq!(config.providers[1].weight, DEFAULT_PROVIDER_WEIGHT);
         assert_eq!(config.providers[0].compatibility, None);
+        assert!(!config.request_log_details_enabled);
         assert_eq!(
             config.providers[2].compatibility.as_deref(),
             Some("anthropic")
@@ -715,6 +720,13 @@ mod tests {
                 .map(String::as_str),
             Some("GLM-5.2")
         );
+    }
+
+    #[test]
+    fn request_log_details_default_to_disabled() {
+        let config = AiGatewayConfig::default();
+        assert!(!config.request_logging_enabled);
+        assert!(!config.request_log_details_enabled);
     }
 
     #[test]

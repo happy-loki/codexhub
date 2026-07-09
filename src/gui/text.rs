@@ -889,9 +889,27 @@ impl GuiText {
 
     pub(super) fn enable_request_logging_help(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "开启后会记录所有大模型接入请求详情，便于调试和分析",
+            GuiLocale::ZhCn => "开启后记录大模型接入请求摘要指标，便于调试和分析",
             GuiLocale::EnUs => {
-                "When enabled, records all AI Gateway request details for debugging and analysis"
+                "When enabled, records AI Gateway request summary metrics for debugging and analysis"
+            }
+        }
+    }
+
+    pub(super) fn enable_request_log_details(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "记录详情",
+            GuiLocale::EnUs => "Record details",
+        }
+    }
+
+    pub(super) fn enable_request_log_details_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "开启后额外保存请求、上游请求、上游 SSE 和响应内容；可能占用更多资源"
+            }
+            GuiLocale::EnUs => {
+                "When enabled, also stores request, upstream request, upstream SSE, and response payloads"
             }
         }
     }

@@ -72,9 +72,15 @@ pub async fn passthrough(
 
     if let Some(log_context) = &log_context {
         let update = RequestLogUpdate {
-            upstream_request_headers_json: request_log::headers_to_json(upstream_req.headers()),
+            upstream_request_headers_json: log_context
+                .details_enabled
+                .then(|| request_log::headers_to_json(upstream_req.headers()))
+                .flatten(),
             upstream_request_body_bytes: request_log::json_body_size_bytes(&raw_body),
-            upstream_request_json: serde_json::to_string(&raw_body).ok(),
+            upstream_request_json: log_context
+                .details_enabled
+                .then(|| serde_json::to_string(&raw_body).ok())
+                .flatten(),
             ..RequestLogUpdate::default()
         };
         if let Err(err) = log_context.store.update_record(log_context.log_id, &update) {
@@ -161,7 +167,10 @@ pub async fn passthrough(
             status: Some(status),
             usage: Some(usage),
             latency_ms: Some(request_log::elapsed_ms(log_context.started_at)),
-            response_json: response_text,
+            response_json: log_context
+                .details_enabled
+                .then_some(response_text)
+                .flatten(),
             ..RequestLogUpdate::default()
         };
         if let Err(err) = log_context.store.update_record(log_context.log_id, &update) {

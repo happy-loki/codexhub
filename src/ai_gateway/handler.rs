@@ -1,4 +1,7 @@
-use std::time::Instant;
+use std::{
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Instant,
+};
 
 use axum::{
     Json,
@@ -24,6 +27,8 @@ use super::request_log::{
 };
 use super::router::resolve_provider_with_state;
 
+static AI_GATEWAY_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
 /// POST /ai-gateway/v1/responses
 pub async fn handle_responses(
     State(state): State<SharedState>,
@@ -36,8 +41,11 @@ pub async fn handle_responses(
     let gw_config = config.ai_gateway.clone();
     let filter_image_generation_tool = gw_config.filter_image_generation_tool;
     let request_logging_enabled = gw_config.request_logging_enabled;
+    let request_log_details_enabled = gw_config.request_log_details_enabled;
     let models_etag = configured_models_etag(&gw_config);
     drop(config);
+    let in_flight = AI_GATEWAY_IN_FLIGHT.fetch_add(1, Ordering::AcqRel) + 1;
+    let _in_flight_guard = AiGatewayInFlightGuard;
 
     // 1. 解析请求 body
     let mut raw_body: serde_json::Value = match serde_json::from_slice(&body) {
@@ -61,6 +69,7 @@ pub async fn handle_responses(
 
     // 3. 路由到 provider（状态感知：熔断健康 + 会话粘性 + 权重优先级）
     let routing_now = Instant::now();
+    let route_started = Instant::now();
     let (provider, route_id) = {
         let mut routing = state.ai_gateway_routing.lock().await;
         routing.evict_stale(routing_now);
@@ -85,6 +94,7 @@ pub async fn handle_responses(
                             &raw_body,
                             started_at,
                             created_at_ms,
+                            request_log_details_enabled,
                         )
                     })
                     .flatten();
@@ -93,6 +103,7 @@ pub async fn handle_responses(
             }
         }
     };
+    let route_ms = request_log::elapsed_ms(route_started);
 
     let log_context = request_logging_enabled
         .then(|| {
@@ -105,6 +116,7 @@ pub async fn handle_responses(
                 &raw_body,
                 started_at,
                 created_at_ms,
+                request_log_details_enabled,
             )
         })
         .flatten();
@@ -116,6 +128,9 @@ pub async fn handle_responses(
         session_id = ?ctx.session_id,
         prompt_cache_key = %ctx.prompt_cache_key,
         stream = envelope.stream,
+        in_flight,
+        route_ms,
+        details = request_log_details_enabled,
         "ai-gateway request routed"
     );
 
@@ -214,6 +229,14 @@ pub async fn handle_responses(
                 }
             }
         }
+    }
+}
+
+struct AiGatewayInFlightGuard;
+
+impl Drop for AiGatewayInFlightGuard {
+    fn drop(&mut self) {
+        AI_GATEWAY_IN_FLIGHT.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -386,6 +409,7 @@ fn insert_initial_log(
     raw_body: &serde_json::Value,
     started_at: Instant,
     created_at_ms: i64,
+    details_enabled: bool,
 ) -> Option<RequestLogContext> {
     let record = RequestLogRecord {
         request_id: ctx.request_id.clone(),
@@ -404,8 +428,12 @@ fn insert_initial_log(
         ttft_ms: None,
         created_at_ms,
         error_message: None,
-        request_headers_json: request_log::headers_to_json(headers),
-        request_json: serde_json::to_string(raw_body).ok(),
+        request_headers_json: details_enabled
+            .then(|| request_log::headers_to_json(headers))
+            .flatten(),
+        request_json: details_enabled
+            .then(|| serde_json::to_string(raw_body).ok())
+            .flatten(),
         upstream_request_body_bytes: None,
         upstream_request_headers_json: None,
         upstream_request_json: None,
@@ -417,6 +445,7 @@ fn insert_initial_log(
             store: store.clone(),
             log_id,
             started_at,
+            details_enabled,
         }),
         Err(err) => {
             request_log::log_insert_error(err);

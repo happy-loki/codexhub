@@ -141,7 +141,7 @@ use self::ai_gateway::{
     provider_logo_variant, provider_protocol_display, refresh_ai_gw_enable_logging,
     refresh_ai_gw_filter_image_generation, refresh_ai_gw_provider_list, save_ai_gw_provider,
     set_ai_gw_actions_enabled, set_ai_gw_provider_enabled, set_filter_image_generation_tool,
-    set_request_logging_enabled,
+    set_request_log_details_enabled, set_request_logging_enabled,
 };
 use self::api::{
     ApiClient, ConfigureTelegramBotRequest, DashboardSnapshot, DeleteImAccountRequest,
@@ -859,6 +859,14 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     ai_gw_enable_logging.set_background_color(theme::theme().bg_card_alt);
     ai_gw_enable_logging.set_foreground_color(theme::theme().ink_primary);
     ai_gw_enable_logging.set_tooltip(text.enable_request_logging_help());
+    let ai_gw_enable_log_details = CheckBox::builder(&request_logs_page)
+        .with_label(text.enable_request_log_details())
+        .with_value(false)
+        .build();
+    ai_gw_enable_log_details.set_background_color(theme::theme().bg_card_alt);
+    ai_gw_enable_log_details.set_foreground_color(theme::theme().ink_primary);
+    ai_gw_enable_log_details.set_tooltip(text.enable_request_log_details_help());
+    ai_gw_enable_log_details.enable(false);
 
     let request_log_clear_old_button = Button::builder(&request_logs_page)
         .with_label(text.request_log_clear_old())
@@ -877,6 +885,12 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     request_log_toolbar.add_stretch_spacer(1);
     request_log_toolbar.add(
         &ai_gw_enable_logging,
+        0,
+        SizerFlag::Right | SizerFlag::AlignCenterVertical,
+        10,
+    );
+    request_log_toolbar.add(
+        &ai_gw_enable_log_details,
         0,
         SizerFlag::Right | SizerFlag::AlignCenterVertical,
         10,
@@ -1062,6 +1076,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         pending_ai_gw_channel_toggle,
         ai_gw_filter_image_generation,
         ai_gw_enable_logging,
+        ai_gw_enable_log_details,
         ai_gw_delete_button,
         ai_gw_new_button,
         ai_gw_edit_button,
@@ -1381,6 +1396,24 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
             thread::spawn(move || {
                 let outcome = set_request_logging_enabled(&worker_api, enabled);
                 let _ = gui_tx.send(GuiMessage::AiGwAction(AiGwActionResult::RequestLogging(
+                    outcome,
+                )));
+                wxdragon::wake_up_idle();
+            });
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
+        });
+    }
+    {
+        let api = api.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
+        let gui_tx = gui_tx.clone();
+        ai_gw_enable_log_details.on_toggled(move |event| {
+            let enabled = event.is_checked();
+            let worker_api = api.clone();
+            let gui_tx = gui_tx.clone();
+            thread::spawn(move || {
+                let outcome = set_request_log_details_enabled(&worker_api, enabled);
+                let _ = gui_tx.send(GuiMessage::AiGwAction(AiGwActionResult::RequestLogDetails(
                     outcome,
                 )));
                 wxdragon::wake_up_idle();
@@ -4075,6 +4108,7 @@ struct UiHandles {
     pending_ai_gw_channel_toggle: PendingAiGwChannelToggle,
     ai_gw_filter_image_generation: CheckBox,
     ai_gw_enable_logging: CheckBox,
+    ai_gw_enable_log_details: CheckBox,
     ai_gw_delete_button: Button,
     ai_gw_new_button: Button,
     ai_gw_edit_button: Button,
@@ -4505,7 +4539,11 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
     }
     if let Some(gw) = &snapshot.ai_gateway {
         refresh_ai_gw_filter_image_generation(handles, gw.filter_image_generation_tool);
-        refresh_ai_gw_enable_logging(handles, gw.request_logging_enabled);
+        refresh_ai_gw_enable_logging(
+            handles,
+            gw.request_logging_enabled,
+            gw.request_log_details_enabled,
+        );
     }
 
     if let Some(status) = &snapshot.status {

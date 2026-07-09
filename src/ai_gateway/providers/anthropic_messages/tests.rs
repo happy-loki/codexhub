@@ -2821,6 +2821,7 @@ async fn anthropic_stream_records_ttft_end_to_end() {
         store: store.clone(),
         log_id,
         started_at: Instant::now(),
+        details_enabled: true,
     };
 
     let input = stream::iter(vec![
@@ -2895,6 +2896,7 @@ async fn anthropic_real_fixture_records_ttft_bytewise() {
         store: store.clone(),
         log_id,
         started_at: Instant::now(),
+        details_enabled: true,
     };
 
     let chunks: Vec<Result<Bytes, std::io::Error>> = raw

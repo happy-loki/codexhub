@@ -65,9 +65,15 @@ pub async fn handle(
 
     if let Some(log_context) = &log_context {
         let update = RequestLogUpdate {
-            upstream_request_headers_json: request_log::headers_to_json(upstream_req.headers()),
+            upstream_request_headers_json: log_context
+                .details_enabled
+                .then(|| request_log::headers_to_json(upstream_req.headers()))
+                .flatten(),
             upstream_request_body_bytes: request_log::json_body_size_bytes(&chat_body),
-            upstream_request_json: serde_json::to_string(&chat_body).ok(),
+            upstream_request_json: log_context
+                .details_enabled
+                .then(|| serde_json::to_string(&chat_body).ok())
+                .flatten(),
             ..RequestLogUpdate::default()
         };
         if let Err(err) = log_context.store.update_record(log_context.log_id, &update) {
@@ -126,7 +132,10 @@ async fn handle_non_stream(
             status: Some(response_obj.status.clone()),
             usage: Some(request_log::usage_from_response_value(&response_value)),
             latency_ms: Some(request_log::elapsed_ms(log_context.started_at)),
-            response_json: serde_json::to_string(&response_value).ok(),
+            response_json: log_context
+                .details_enabled
+                .then(|| serde_json::to_string(&response_value).ok())
+                .flatten(),
             ..RequestLogUpdate::default()
         };
         if let Err(err) = log_context.store.update_record(log_context.log_id, &update) {
