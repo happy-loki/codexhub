@@ -1,15 +1,10 @@
 use axum::{
-    body::{Body, Bytes},
+    body::Body,
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode},
     response::Response,
 };
-use futures_util::{Stream, StreamExt};
-use serde_json::{Value, json};
-use std::{
-    collections::VecDeque,
-    pin::Pin,
-    task::{Context, Poll},
-};
+use futures_util::StreamExt;
+use serde_json::json;
 use tracing::{debug, error};
 
 use crate::ai_gateway::config::{ProviderConfig, ProviderType, provider_api_root};
@@ -18,6 +13,7 @@ use crate::ai_gateway::error::GatewayError;
 use crate::ai_gateway::request_log::{
     self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream, UpstreamSseCaptureStream,
 };
+use crate::ai_gateway::responses_compat::{ResponsesCompatSseStream, normalize_json_body};
 
 use super::{
     apply_total_request_timeout, ensure_success_response, execute_stream_start,
@@ -139,13 +135,13 @@ pub async fn passthrough(
         });
         let body = if let Some(log_context) = log_context {
             let captured_upstream = UpstreamSseCaptureStream::new(byte_stream, log_context.clone());
-            let compat_stream = ResponsesPassthroughCompatStream::new(Box::pin(captured_upstream));
+            let compat_stream = ResponsesCompatSseStream::new(Box::pin(captured_upstream));
             Body::from_stream(ResponsesSseLogStream::new(
                 Box::pin(compat_stream),
                 log_context,
             ))
         } else {
-            Body::from_stream(ResponsesPassthroughCompatStream::new(Box::pin(byte_stream)))
+            Body::from_stream(ResponsesCompatSseStream::new(Box::pin(byte_stream)))
         };
         let mut response = Response::new(body);
         *response.status_mut() = StatusCode::OK;
@@ -157,7 +153,7 @@ pub async fn passthrough(
     let body_bytes = upstream_resp.bytes().await.map_err(|e| {
         GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("read upstream body: {e}"))
     })?;
-    let (body_bytes, response_json) = normalize_responses_passthrough_body(body_bytes);
+    let (body_bytes, response_json) = normalize_json_body(body_bytes);
     if let Some(log_context) = &log_context {
         let (status, usage, response_text) = response_json
             .as_ref()
@@ -242,171 +238,13 @@ fn normalize_grok_reasoning_replay(raw_body: &mut serde_json::Value, provider: &
     }
 }
 
-/// Some OpenAI-compatible Responses providers emit Codex custom tools as
-/// `name: "exec", namespace: "exec"`. Current Codex clients dispatch custom
-/// tools by combining namespace and name, which turns this into `execexec`.
-/// Function tools keep their namespace; this compatibility pass only removes a
-/// duplicate namespace from the code-mode exec custom tool-call item.
-struct ResponsesPassthroughCompatStream<S> {
-    inner: S,
-    line_buf: String,
-    output_queue: VecDeque<Result<Bytes, std::io::Error>>,
-    ended: bool,
-}
-
-impl<S> ResponsesPassthroughCompatStream<S> {
-    fn new(inner: S) -> Self {
-        Self {
-            inner,
-            line_buf: String::new(),
-            output_queue: VecDeque::new(),
-            ended: false,
-        }
-    }
-}
-
-impl<S> Stream for ResponsesPassthroughCompatStream<S>
-where
-    S: Stream<Item = Result<Bytes, std::io::Error>> + Unpin,
-{
-    type Item = Result<Bytes, std::io::Error>;
-
-    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        loop {
-            if let Some(item) = this.output_queue.pop_front() {
-                return Poll::Ready(Some(item));
-            }
-
-            if this.ended {
-                return Poll::Ready(None);
-            }
-
-            match Pin::new(&mut this.inner).poll_next(cx) {
-                Poll::Ready(Some(Ok(chunk))) => {
-                    this.push_rewritten_chunk(&chunk);
-                }
-                Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(err))),
-                Poll::Ready(None) => {
-                    this.ended = true;
-                    if !this.line_buf.is_empty() {
-                        let line = std::mem::take(&mut this.line_buf);
-                        this.push_rewritten_line(&line);
-                    }
-                }
-                Poll::Pending => return Poll::Pending,
-            }
-        }
-    }
-}
-
-impl<S> ResponsesPassthroughCompatStream<S> {
-    fn push_rewritten_chunk(&mut self, chunk: &Bytes) {
-        let text = String::from_utf8_lossy(chunk);
-        self.line_buf.push_str(&text);
-        while let Some(pos) = self.line_buf.find('\n') {
-            let line = self.line_buf[..pos].trim_end_matches('\r').to_string();
-            self.line_buf = self.line_buf[pos + 1..].to_string();
-            self.push_rewritten_line(&line);
-        }
-    }
-
-    fn push_rewritten_line(&mut self, line: &str) {
-        let rewritten = rewrite_responses_sse_line(line);
-        self.output_queue
-            .push_back(Ok(Bytes::from(format!("{rewritten}\n"))));
-    }
-}
-
-fn rewrite_responses_sse_line(line: &str) -> String {
-    let Some(data) = sse_data_value(line) else {
-        return line.to_string();
-    };
-    if data.trim() == "[DONE]" {
-        return line.to_string();
-    }
-    let Ok(mut event) = serde_json::from_str::<Value>(data) else {
-        return line.to_string();
-    };
-    if !normalize_exec_custom_tool_namespace(&mut event) {
-        return line.to_string();
-    }
-    format!(
-        "data: {}",
-        serde_json::to_string(&event).unwrap_or_else(|_| data.to_string())
-    )
-}
-
-fn sse_data_value(line: &str) -> Option<&str> {
-    let data = line.strip_prefix("data:")?;
-    Some(data.strip_prefix(' ').unwrap_or(data))
-}
-
-fn normalize_responses_passthrough_body(body_bytes: Bytes) -> (Bytes, Option<Value>) {
-    let mut response_json = serde_json::from_slice::<Value>(&body_bytes).ok();
-    let Some(value) = response_json.as_mut() else {
-        return (body_bytes, response_json);
-    };
-    if normalize_exec_custom_tool_namespace(value) {
-        let rewritten = serde_json::to_vec(value)
-            .map(Bytes::from)
-            .unwrap_or_else(|_| body_bytes.clone());
-        (rewritten, response_json)
-    } else {
-        (body_bytes, response_json)
-    }
-}
-
-fn normalize_exec_custom_tool_namespace(value: &mut Value) -> bool {
-    match value {
-        Value::Object(object) => {
-            let mut changed = false;
-            let is_duplicate_exec_custom_tool_namespace = object
-                .get("type")
-                .and_then(Value::as_str)
-                .is_some_and(|item_type| item_type == "custom_tool_call")
-                && object
-                    .get("name")
-                    .and_then(Value::as_str)
-                    .zip(object.get("namespace").and_then(Value::as_str))
-                    .is_some_and(|(name, namespace)| {
-                        let name = name.trim();
-                        name == "exec" && namespace.trim() == "exec"
-                    });
-
-            if is_duplicate_exec_custom_tool_namespace {
-                object.remove("namespace");
-                changed = true;
-            }
-
-            for child in object.values_mut() {
-                changed |= normalize_exec_custom_tool_namespace(child);
-            }
-            changed
-        }
-        Value::Array(items) => {
-            let mut changed = false;
-            for item in items {
-                changed |= normalize_exec_custom_tool_namespace(item);
-            }
-            changed
-        }
-        _ => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use axum::body::Bytes;
-    use futures_util::{StreamExt, stream};
     use serde_json::json;
 
     use crate::ai_gateway::config::{ProviderConfig, ProviderType};
 
-    use super::{
-        ResponsesPassthroughCompatStream, normalize_exec_custom_tool_namespace,
-        normalize_grok_reasoning_replay, normalize_responses_passthrough_body,
-    };
+    use super::normalize_grok_reasoning_replay;
 
     fn grok_provider() -> ProviderConfig {
         ProviderConfig {
@@ -496,97 +334,5 @@ mod tests {
                 .is_some_and(|value| value.is_null())
         );
         assert!(reasoning.get("status").is_none());
-    }
-
-    #[test]
-    fn exec_namespace_is_removed_only_for_exec_custom_tool_calls() {
-        let mut event = json!({
-            "type": "response.output_item.done",
-            "item": {
-                "type": "custom_tool_call",
-                "name": "exec",
-                "namespace": "exec",
-                "call_id": "call_1",
-                "input": "text('ok')"
-            },
-            "response": {
-                "output": [
-                    {
-                        "type": "custom_tool_call",
-                        "name": "lookup",
-                        "namespace": "lookup",
-                        "call_id": "call_2",
-                        "input": "payload"
-                    },
-                    {
-                        "type": "function_call",
-                        "name": "read_file",
-                        "namespace": "fs"
-                    }
-                ]
-            }
-        });
-
-        assert!(normalize_exec_custom_tool_namespace(&mut event));
-
-        assert!(event["item"].get("namespace").is_none());
-        assert_eq!(event["item"]["name"], "exec");
-        assert_eq!(event["response"]["output"][0]["namespace"], "lookup");
-        assert_eq!(event["response"]["output"][1]["namespace"], "fs");
-    }
-
-    #[test]
-    fn non_streaming_body_normalizes_duplicate_custom_tool_namespace() {
-        let body = Bytes::from(
-            json!({
-                "status": "completed",
-                "output": [
-                    {
-                        "type": "custom_tool_call",
-                        "name": "exec",
-                        "namespace": "exec",
-                        "call_id": "call_1"
-                    }
-                ]
-            })
-            .to_string(),
-        );
-
-        let (body, parsed) = normalize_responses_passthrough_body(body);
-        let parsed = parsed.expect("parsed response");
-
-        assert!(parsed["output"][0].get("namespace").is_none());
-        assert!(
-            !String::from_utf8(body.to_vec())
-                .expect("utf8")
-                .contains("\"namespace\"")
-        );
-    }
-
-    #[tokio::test]
-    async fn stream_normalizes_duplicate_custom_tool_namespace() {
-        let chunks = stream::iter(vec![
-            Ok(Bytes::from(
-                "event: response.output_item.done\n\
-                 data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"custom_tool_call\",\"name\":\"exec\",\"namespace\":\"exec\",\"call_id\":\"call_1\"}}\n\n",
-            )),
-            Ok(Bytes::from(
-                "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"name\":\"read_file\",\"namespace\":\"fs\"}}\n\n",
-            )),
-        ]);
-        let output = ResponsesPassthroughCompatStream::new(Box::pin(chunks))
-            .collect::<Vec<Result<Bytes, std::io::Error>>>()
-            .await;
-        let text = output
-            .into_iter()
-            .map(|item| String::from_utf8(item.expect("chunk").to_vec()).expect("utf8"))
-            .collect::<String>();
-
-        assert!(text.contains("\"type\":\"custom_tool_call\""));
-        assert!(text.contains("\"name\":\"exec\""));
-        assert!(!text.contains("\"namespace\":\"exec\""));
-        assert!(text.contains("\"type\":\"function_call\""));
-        assert!(text.contains("\"name\":\"read_file\""));
-        assert!(text.contains("\"namespace\":\"fs\""));
     }
 }

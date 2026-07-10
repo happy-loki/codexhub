@@ -11,6 +11,7 @@ pub mod ir;
 pub mod model;
 pub mod providers;
 pub mod request_log;
+pub mod responses_compat;
 pub mod router;
 pub mod routing_state;
 pub mod tool_names;
