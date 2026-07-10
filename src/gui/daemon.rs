@@ -1,6 +1,8 @@
-﻿use std::{
+use std::{
     cell::RefCell,
     env,
+    fs::OpenOptions,
+    io::Write,
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     rc::Rc,
@@ -23,6 +25,7 @@ use super::{
 };
 use super::{force_dashboard_refresh, schedule_dashboard_refresh, set_actions_enabled};
 use super::{show_dashboard_starting, show_dashboard_startup_error};
+use crate::{config::AppConfig, types::now_ms};
 
 pub(super) fn restart_daemon_for_gui(api: &ApiClient, text: GuiText) -> Result<Child, String> {
     stop_existing_daemon(api);
@@ -348,10 +351,13 @@ pub(super) fn stop_daemon_by_port(_api: &ApiClient) {}
 pub(super) fn spawn_daemon(text: GuiText) -> Result<Child, String> {
     let mut command = daemon_command(text)?;
     hide_command_window(&mut command);
+    command.stdin(Stdio::null());
+    if let Some((stdout, stderr)) = daemon_output_stdio() {
+        command.stdout(stdout).stderr(stderr);
+    } else {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    }
     command
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
         .spawn()
         .map_err(|err| text.daemon_spawn_failed(&err.to_string()))
 }
@@ -397,6 +403,63 @@ pub(super) fn app_support_config_path() -> PathBuf {
         return base.join("config.toml");
     }
     platform_app_support_config_path()
+}
+
+fn daemon_output_stdio() -> Option<(Stdio, Stdio)> {
+    let path = daemon_startup_log_path();
+    if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+        std::fs::create_dir_all(parent).ok()?;
+    }
+    let mut stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    let stderr = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .ok()?;
+    let exe = std::env::current_exe()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    let _ = writeln!(
+        stdout,
+        "\n[ts_ms={}] [daemon] event=spawn_start exe={}",
+        now_ms(),
+        exe
+    );
+    Some((Stdio::from(stdout), Stdio::from(stderr)))
+}
+
+fn daemon_startup_log_path() -> PathBuf {
+    let config_path = daemon_config_path().unwrap_or_else(app_support_config_path);
+    daemon_startup_log_path_for_config_path(&config_path)
+}
+
+fn daemon_startup_log_path_for_config_path(config_path: &Path) -> PathBuf {
+    let base = config_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let state_path = AppConfig::load_or_default(&config_path.to_path_buf())
+        .ok()
+        .map(|config| {
+            if config.state_path.is_relative() {
+                base.join(config.state_path)
+            } else {
+                config.state_path
+            }
+        })
+        .unwrap_or_else(|| base.join("codexhub-state.json"));
+    state_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or(base)
+        .join("logs")
+        .join("codexhub-daemon-startup.log")
 }
 
 #[cfg(target_os = "windows")]
@@ -482,3 +545,26 @@ pub(super) fn hide_command_window(command: &mut Command) {
 
 #[cfg(not(target_os = "windows"))]
 pub(super) fn hide_command_window(_command: &mut Command) {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn daemon_startup_log_follows_relative_state_path() {
+        let root = std::env::temp_dir().join(format!("codexhub-daemon-log-test-{}", now_ms()));
+        let config_path = root.join("config.toml");
+        std::fs::create_dir_all(&root).expect("create temp dir");
+        std::fs::write(&config_path, "statePath = 'state/codexhub-state.json'\n")
+            .expect("write config");
+
+        assert_eq!(
+            daemon_startup_log_path_for_config_path(&config_path),
+            root.join("state")
+                .join("logs")
+                .join("codexhub-daemon-startup.log")
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

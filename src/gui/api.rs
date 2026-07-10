@@ -419,6 +419,7 @@ pub(super) struct ImAccountItem {
 #[serde(rename_all = "camelCase")]
 pub(super) struct RemoteControlStatus {
     pub(super) connected: bool,
+    #[allow(dead_code)]
     pub(super) initialized: bool,
     pub(super) active_source_kind: Option<String>,
     #[serde(default)]
@@ -429,6 +430,7 @@ pub(super) struct RemoteControlStatus {
 #[serde(rename_all = "camelCase")]
 pub(super) struct RemoteControlConnectionStatus {
     pub(super) connected: bool,
+    #[allow(dead_code)]
     pub(super) initialized: bool,
     pub(super) source_kind: String,
 }

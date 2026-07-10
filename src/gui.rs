@@ -3765,7 +3765,7 @@ mod model_mapping_tests {
 
         assert_eq!(
             endpoint_status_state(Some(&remote), "codex_app", true),
-            EndpointStatusState::NotConnected
+            EndpointStatusState::Connected
         );
         assert_eq!(
             endpoint_status_state(Some(&remote), "vscode", true),
@@ -3778,7 +3778,7 @@ mod model_mapping_tests {
     }
 
     #[test]
-    fn endpoint_status_uninitialized_source_is_not_connected() {
+    fn endpoint_status_uninitialized_source_is_connected_when_channel_is_open() {
         let remote = RemoteControlStatus {
             connected: true,
             initialized: false,
@@ -3792,7 +3792,7 @@ mod model_mapping_tests {
 
         assert_eq!(
             endpoint_status_state(Some(&remote), "vscode", true),
-            EndpointStatusState::NotConnected
+            EndpointStatusState::Connected
         );
         assert_eq!(
             endpoint_status_state(Some(&remote), "cli", true),
@@ -3838,7 +3838,7 @@ mod model_mapping_tests {
     }
 
     #[test]
-    fn codex_app_status_is_not_connected_for_uninitialized_connection() {
+    fn codex_app_status_is_connected_for_open_uninitialized_channel() {
         let remote = RemoteControlStatus {
             connected: true,
             initialized: false,
@@ -3852,7 +3852,7 @@ mod model_mapping_tests {
 
         assert_eq!(
             endpoint_status_state(Some(&remote), "codex_app", true),
-            EndpointStatusState::NotConnected
+            EndpointStatusState::Connected
         );
     }
 
@@ -4807,21 +4807,20 @@ fn apply_pending_diagnostics_export(
     }
 }
 
-fn remote_connection_ready(remote: Option<&RemoteControlStatus>, source_kind: &str) -> bool {
+fn remote_source_connected(remote: Option<&RemoteControlStatus>, source_kind: &str) -> bool {
     remote
         .map(|remote| {
-            remote.connections.iter().any(|connection| {
-                connection.source_kind == source_kind
-                    && connection.connected
-                    && connection.initialized
-            })
+            remote
+                .connections
+                .iter()
+                .any(|connection| connection.source_kind == source_kind && connection.connected)
         })
         .unwrap_or(false)
 }
 
-fn remote_active_ready(remote: Option<&RemoteControlStatus>, source_kind: &str) -> bool {
+fn remote_active_connected(remote: Option<&RemoteControlStatus>, source_kind: &str) -> bool {
     remote
-        .filter(|remote| remote.connected && remote.initialized)
+        .filter(|remote| remote.connected)
         .and_then(|remote| remote.active_source_kind.as_deref())
         == Some(source_kind)
 }
@@ -4833,8 +4832,8 @@ fn endpoint_status_state(
 ) -> EndpointStatusState {
     if remote.is_none() {
         EndpointStatusState::Loading
-    } else if remote_connection_ready(remote, source_kind)
-        || remote_active_ready(remote, source_kind)
+    } else if remote_source_connected(remote, source_kind)
+        || remote_active_connected(remote, source_kind)
     {
         EndpointStatusState::Connected
     } else if !configured {

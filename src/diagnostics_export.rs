@@ -621,6 +621,11 @@ mod tests {
             "connected\napi_key=sk-secret\nAuthorization: Bearer abc\n",
         )
         .expect("write chain log");
+        std::fs::write(
+            logs.join("codexhub-daemon-startup.log"),
+            "daemon failed before chain log\napi_key=sk-secret\n",
+        )
+        .expect("write daemon startup log");
         std::fs::write(logs.join("ai-gateway-request-log.sqlite"), "do not include")
             .expect("write request log db");
         std::fs::write(logs.join("codexhub-ai-gateway.log"), "do not include")
@@ -659,6 +664,7 @@ mod tests {
         assert!(names.contains(&"remote-control-status.json".to_string()));
         assert!(names.contains(&"codex-app-status.json".to_string()));
         assert!(names.contains(&"logs/codexhub-chain.log".to_string()));
+        assert!(names.contains(&"logs/codexhub-daemon-startup.log".to_string()));
         assert!(!names.iter().any(|name| name.contains("ai-gateway")));
 
         let mut remote = String::new();
@@ -682,6 +688,16 @@ mod tests {
         assert!(log.contains("Authorization:<redacted>"));
         assert!(!log.contains("sk-secret"));
         assert!(!log.contains("Bearer abc"));
+
+        let mut startup_log = String::new();
+        archive
+            .by_name("logs/codexhub-daemon-startup.log")
+            .unwrap()
+            .read_to_string(&mut startup_log)
+            .unwrap();
+        assert!(startup_log.contains("daemon failed before chain log"));
+        assert!(startup_log.contains("api_key=<redacted>"));
+        assert!(!startup_log.contains("sk-secret"));
 
         let _ = std::fs::remove_dir_all(root);
     }
