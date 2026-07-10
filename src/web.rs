@@ -159,6 +159,10 @@ async fn access_log(request: Request<Body>, next: Next) -> impl IntoResponse {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StatusResponse {
+    service: String,
+    pid: u32,
+    instance_id: String,
+    started_at_ms: u64,
     running: bool,
     bind: String,
     local_connection_mode: crate::config::LocalConnectionMode,
@@ -195,6 +199,10 @@ async fn status_snapshot(state: &SharedState) -> StatusResponse {
         .cloned()
         .collect::<Vec<_>>();
     StatusResponse {
+        service: state.daemon_identity.service.clone(),
+        pid: state.daemon_identity.pid,
+        instance_id: state.daemon_identity.instance_id.clone(),
+        started_at_ms: state.daemon_identity.started_at_ms,
         running,
         bind: config.bind.clone(),
         local_connection_mode: config.local_connection_mode,

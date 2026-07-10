@@ -15,6 +15,7 @@ base64 = "0.22"
 cipher = "0.4"
 ecb = "0.1"
 futures-util = "0.3"
+fs2 = "0.4"
 hex = "0.4"
 image = { version = "0.25.10", default-features = false, features = ["png"], optional = true }
 mime_guess = "2"

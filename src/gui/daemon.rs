@@ -1,8 +1,10 @@
 use std::{
     cell::RefCell,
+    collections::HashSet,
     env,
     fs::OpenOptions,
     io::Write,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     rc::Rc,
@@ -25,18 +27,48 @@ use super::{
 };
 use super::{force_dashboard_refresh, schedule_dashboard_refresh, set_actions_enabled};
 use super::{show_dashboard_starting, show_dashboard_startup_error};
-use crate::{config::AppConfig, types::now_ms};
+use crate::{
+    config::AppConfig,
+    daemon_process::{DAEMON_INSTANCE_ENV, read_active_daemon_metadata},
+    types::now_ms,
+};
+
+const DAEMON_GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_millis(1_500);
+const DAEMON_FORCE_STOP_TIMEOUT: Duration = Duration::from_millis(1_500);
+const DAEMON_STOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+struct SpawnedDaemon {
+    child: Child,
+    instance_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PortOwner {
+    pid: u32,
+    command: String,
+}
 
 pub(super) fn restart_daemon_for_gui(api: &ApiClient, text: GuiText) -> Result<Child, String> {
-    stop_existing_daemon(api);
-    let mut child = spawn_daemon(text)?;
+    stop_existing_daemon(api, text)?;
+    let SpawnedDaemon {
+        mut child,
+        instance_id,
+    } = spawn_daemon(text)?;
+    let child_pid = child.id();
     for _ in 0..40 {
         thread::sleep(Duration::from_millis(250));
-        if api.is_online() {
-            return Ok(child);
-        }
         if let Some(status) = child.try_wait().map_err(|err| err.to_string())? {
             return Err(text.daemon_exited(&status.to_string()));
+        }
+        if api
+            .daemon_identity()
+            .is_ok_and(|identity| identity.pid == child_pid && identity.instance_id == instance_id)
+        {
+            daemon_manager_log(format!(
+                "event=start_ready pid={} instance_id={}",
+                child_pid, instance_id
+            ));
+            return Ok(child);
         }
     }
 
@@ -45,13 +77,87 @@ pub(super) fn restart_daemon_for_gui(api: &ApiClient, text: GuiText) -> Result<C
     Err(text.daemon_start_timeout().to_string())
 }
 
-pub(super) fn stop_existing_daemon(api: &ApiClient) {
-    if api.is_online() {
+pub(super) fn stop_existing_daemon(api: &ApiClient, text: GuiText) -> Result<(), String> {
+    let port = api
+        .local_port()
+        .ok_or_else(|| text.daemon_port_unknown(&api.base_url))?;
+    let mut target_pids = HashSet::new();
+    if let Ok(identity) = api.daemon_identity() {
+        if identity.pid != std::process::id() && process_is_codexhub(identity.pid) {
+            target_pids.insert(identity.pid);
+        }
+        daemon_manager_log(format!(
+            "event=stop_request pid={} instance_id={} port={}",
+            identity.pid, identity.instance_id, port
+        ));
         let _ = api.shutdown();
-        wait_for_daemon_offline(api, 5);
     }
-    stop_daemon_by_port(api);
-    wait_for_daemon_offline(api, 5);
+    if let Some(config_path) = daemon_config_path()
+        && let Some(metadata) = read_active_daemon_metadata(&config_path)
+        && metadata.identity.pid != std::process::id()
+        && process_is_codexhub(metadata.identity.pid)
+    {
+        target_pids.insert(metadata.identity.pid);
+    }
+
+    let initial_target_pids = target_pids.iter().copied().collect::<Vec<_>>();
+    if wait_for_daemon_stopped(api, &initial_target_pids, DAEMON_GRACEFUL_STOP_TIMEOUT) {
+        return Ok(());
+    }
+
+    let owners = port_owners(port);
+    if let Some(owners) = owners.as_ref() {
+        for owner in owners {
+            if owner.pid != std::process::id() && command_is_codexhub(&owner.command) {
+                target_pids.insert(owner.pid);
+            }
+        }
+        if !owners.is_empty() && target_pids.is_empty() {
+            let owner_summary = owners
+                .iter()
+                .map(|owner| format!("{}:{}", owner.pid, owner.command))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(text.daemon_port_conflict(port, &owner_summary));
+        }
+    }
+
+    if target_pids.is_empty() {
+        if port_is_available(api) {
+            return Ok(());
+        }
+        return Err(text.daemon_port_conflict(port, "unknown process"));
+    }
+
+    let mut target_pids = target_pids.into_iter().collect::<Vec<_>>();
+    target_pids.sort_unstable();
+    daemon_manager_log(format!(
+        "event=stop_force_begin port={} pids={:?}",
+        port, target_pids
+    ));
+    terminate_daemon_processes(&target_pids, false);
+    if wait_for_daemon_stopped(api, &target_pids, DAEMON_FORCE_STOP_TIMEOUT) {
+        daemon_manager_log(format!(
+            "event=stop_ready port={} pids={:?}",
+            port, target_pids
+        ));
+        return Ok(());
+    }
+
+    terminate_daemon_processes(&target_pids, true);
+    if wait_for_daemon_stopped(api, &target_pids, DAEMON_FORCE_STOP_TIMEOUT) {
+        daemon_manager_log(format!(
+            "event=stop_killed port={} pids={:?}",
+            port, target_pids
+        ));
+        return Ok(());
+    }
+
+    daemon_manager_log(format!(
+        "event=stop_failed port={} pids={:?}",
+        port, target_pids
+    ));
+    Err(text.daemon_stop_failed(port, &format!("{target_pids:?}")))
 }
 
 pub(super) fn stop_managed_daemon(daemon_child: &Rc<RefCell<Option<Child>>>) {
@@ -191,7 +297,9 @@ pub(super) fn cleanup_codex_app_gui_environment_async(
 pub(super) fn stop_daemon_on_exit(api: &ApiClient, daemon_child: &Rc<RefCell<Option<Child>>>) {
     let child = daemon_child.borrow_mut().take();
 
-    let _ = api.shutdown();
+    if api.daemon_identity().is_ok() {
+        let _ = api.shutdown();
+    }
     if let Some(mut child) = child {
         kill_child(&mut child);
     }
@@ -237,26 +345,67 @@ pub(super) fn kill_child(child: &mut Child) {
     let _ = child.wait();
 }
 
-pub(super) fn wait_for_daemon_offline(api: &ApiClient, attempts: usize) {
-    for _ in 0..attempts {
-        thread::sleep(Duration::from_millis(100));
-        if !api.is_online() {
-            break;
-        }
-    }
-}
-
 pub(super) fn replace_managed_daemon(daemon_child: &Rc<RefCell<Option<Child>>>, child: Child) {
     stop_managed_daemon(daemon_child);
     daemon_child.borrow_mut().replace(child);
 }
 
-#[cfg(unix)]
-pub(super) fn stop_daemon_by_port(api: &ApiClient) {
+fn wait_for_daemon_stopped(api: &ApiClient, target_pids: &[u32], timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let processes_stopped = target_pids.iter().all(|pid| !process_is_codexhub(*pid));
+        if processes_stopped && port_is_available(api) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        thread::sleep(DAEMON_STOP_POLL_INTERVAL);
+    }
+}
+
+fn port_is_available(api: &ApiClient) -> bool {
     let Some(port) = api.local_port() else {
-        return;
+        return false;
     };
-    let Ok(output) = Command::new("lsof")
+    port_owners(port)
+        .map(|owners| owners.is_empty())
+        .unwrap_or_else(|| fallback_port_is_available(port))
+}
+
+fn fallback_port_is_available(port: u16) -> bool {
+    let addresses = [
+        SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port),
+        SocketAddr::new(Ipv6Addr::LOCALHOST.into(), port),
+    ];
+    let mut checked = false;
+    for address in addresses {
+        match TcpListener::bind(address) {
+            Ok(listener) => {
+                checked = true;
+                drop(listener);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AddrNotAvailable => {}
+            Err(_) => return false,
+        }
+    }
+    checked
+}
+
+fn command_is_codexhub(command: &str) -> bool {
+    let command = command.trim().replace('\\', "/");
+    let executable = command.rsplit('/').next().unwrap_or_default();
+    executable.eq_ignore_ascii_case("codexhub") || executable.eq_ignore_ascii_case("codexhub.exe")
+}
+
+#[cfg(unix)]
+fn port_owners(port: u16) -> Option<Vec<PortOwner>> {
+    let executable = if Path::new("/usr/sbin/lsof").exists() {
+        "/usr/sbin/lsof"
+    } else {
+        "lsof"
+    };
+    let output = Command::new(executable)
         .arg("-nP")
         .arg("-iTCP")
         .arg(format!(":{port}"))
@@ -264,40 +413,51 @@ pub(super) fn stop_daemon_by_port(api: &ApiClient) {
         .arg("-F")
         .arg("pc")
         .output()
-    else {
-        return;
-    };
-    let mut pid: Option<String> = None;
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        .ok()?;
+    Some(parse_lsof_port_owners(&String::from_utf8_lossy(
+        &output.stdout,
+    )))
+}
+
+#[cfg_attr(not(unix), allow(dead_code))]
+fn parse_lsof_port_owners(output: &str) -> Vec<PortOwner> {
+    let mut owners = Vec::new();
+    let mut pid = None;
+    for line in output.lines() {
         if let Some(value) = line.strip_prefix('p') {
-            pid = Some(value.to_string());
+            pid = value.parse::<u32>().ok();
         } else if let Some(command) = line.strip_prefix('c')
-            && command.contains("codexhub")
+            && let Some(pid) = pid.take()
         {
-            if let Some(pid) = pid.take() {
-                let _ = Command::new("kill").arg(pid).status();
-            }
-        } else if line.starts_with('c') {
-            pid = None;
+            owners.push(PortOwner {
+                pid,
+                command: command.to_string(),
+            });
         }
     }
+    owners
 }
 
 #[cfg(windows)]
-pub(super) fn stop_daemon_by_port(api: &ApiClient) {
-    let Some(port) = api.local_port() else {
-        return;
-    };
+fn port_owners(port: u16) -> Option<Vec<PortOwner>> {
     let mut command = Command::new("netstat");
     command.args(["-ano", "-p", "TCP"]);
     hide_command_window(&mut command);
-    let Ok(output) = command.output() else {
-        return;
-    };
+    let output = command.output().ok()?;
+    let pids = parse_netstat_listener_pids(&String::from_utf8_lossy(&output.stdout), port);
+    Some(
+        pids.into_iter()
+            .map(|pid| PortOwner {
+                pid,
+                command: windows_process_name(pid).unwrap_or_default(),
+            })
+            .collect(),
+    )
+}
 
-    let current_pid = std::process::id().to_string();
+fn parse_netstat_listener_pids(output: &str, port: u16) -> Vec<u32> {
     let mut pids = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
+    for line in output.lines() {
         let parts = line.split_whitespace().collect::<Vec<_>>();
         if parts.len() < 5 {
             continue;
@@ -308,20 +468,14 @@ pub(super) fn stop_daemon_by_port(api: &ApiClient) {
         if !netstat_addr_has_port(parts[1], port) {
             continue;
         }
-        let pid = parts[4].to_string();
-        if pid != current_pid && !pids.iter().any(|value| value == &pid) {
+        let Ok(pid) = parts[4].parse::<u32>() else {
+            continue;
+        };
+        if pid != std::process::id() && !pids.contains(&pid) {
             pids.push(pid);
         }
     }
-
-    for pid in pids {
-        if windows_pid_is_codexhub(&pid) {
-            let mut command = Command::new("taskkill");
-            command.args(["/PID", &pid, "/F", "/T"]);
-            hide_command_window(&mut command);
-            let _ = command.status();
-        }
-    }
+    pids
 }
 
 #[cfg(windows)]
@@ -332,24 +486,72 @@ pub(super) fn netstat_addr_has_port(addr: &str, port: u16) -> bool {
 }
 
 #[cfg(windows)]
-pub(super) fn windows_pid_is_codexhub(pid: &str) -> bool {
+fn windows_process_name(pid: u32) -> Option<String> {
     let filter = format!("PID eq {pid}");
     let mut command = Command::new("tasklist");
     command.args(["/FI", &filter, "/FO", "CSV", "/NH"]);
     hide_command_window(&mut command);
-    let Ok(output) = command.output() else {
-        return false;
-    };
-    String::from_utf8_lossy(&output.stdout)
-        .to_ascii_lowercase()
-        .contains("codexhub")
+    let output = command.output().ok()?;
+    let output_text = String::from_utf8_lossy(&output.stdout);
+    let line = output_text.lines().next()?.trim();
+    let name = line
+        .strip_prefix('"')?
+        .split("\",\"")
+        .next()?
+        .trim()
+        .to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+#[cfg(unix)]
+fn process_is_codexhub(pid: u32) -> bool {
+    let pid = pid.to_string();
+    let output = Command::new("/bin/ps")
+        .args(["-p", pid.as_str(), "-o", "comm="])
+        .output();
+    output
+        .ok()
+        .is_some_and(|output| command_is_codexhub(&String::from_utf8_lossy(&output.stdout)))
+}
+
+#[cfg(windows)]
+fn process_is_codexhub(pid: u32) -> bool {
+    windows_process_name(pid).is_some_and(|name| command_is_codexhub(&name))
 }
 
 #[cfg(all(not(unix), not(windows)))]
-pub(super) fn stop_daemon_by_port(_api: &ApiClient) {}
+fn process_is_codexhub(_pid: u32) -> bool {
+    false
+}
 
-pub(super) fn spawn_daemon(text: GuiText) -> Result<Child, String> {
+#[cfg(unix)]
+fn terminate_daemon_processes(pids: &[u32], force: bool) {
+    let signal = if force { "-KILL" } else { "-TERM" };
+    for pid in pids {
+        let pid = pid.to_string();
+        let _ = Command::new("/bin/kill")
+            .args([signal, pid.as_str()])
+            .status();
+    }
+}
+
+#[cfg(windows)]
+fn terminate_daemon_processes(pids: &[u32], _force: bool) {
+    for pid in pids {
+        let mut command = Command::new("taskkill");
+        command.args(["/PID", &pid.to_string(), "/F", "/T"]);
+        hide_command_window(&mut command);
+        let _ = command.status();
+    }
+}
+
+#[cfg(all(not(unix), not(windows)))]
+fn terminate_daemon_processes(_pids: &[u32], _force: bool) {}
+
+fn spawn_daemon(text: GuiText) -> Result<SpawnedDaemon, String> {
     let mut command = daemon_command(text)?;
+    let instance_id = uuid::Uuid::new_v4().to_string();
+    command.env(DAEMON_INSTANCE_ENV, &instance_id);
     hide_command_window(&mut command);
     command.stdin(Stdio::null());
     if let Some((stdout, stderr)) = daemon_output_stdio() {
@@ -357,9 +559,15 @@ pub(super) fn spawn_daemon(text: GuiText) -> Result<Child, String> {
     } else {
         command.stdout(Stdio::null()).stderr(Stdio::null());
     }
-    command
+    let child = command
         .spawn()
-        .map_err(|err| text.daemon_spawn_failed(&err.to_string()))
+        .map_err(|err| text.daemon_spawn_failed(&err.to_string()))?;
+    daemon_manager_log(format!(
+        "event=spawn_child pid={} instance_id={}",
+        child.id(),
+        instance_id
+    ));
+    Ok(SpawnedDaemon { child, instance_id })
 }
 
 pub(super) fn daemon_command(text: GuiText) -> Result<Command, String> {
@@ -430,6 +638,21 @@ fn daemon_output_stdio() -> Option<(Stdio, Stdio)> {
         exe
     );
     Some((Stdio::from(stdout), Stdio::from(stderr)))
+}
+
+fn daemon_manager_log(message: impl AsRef<str>) {
+    let path = daemon_startup_log_path();
+    if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(
+            file,
+            "[ts_ms={}] [daemon_manager] {}",
+            now_ms(),
+            message.as_ref()
+        );
+    }
 }
 
 fn daemon_startup_log_path() -> PathBuf {
@@ -566,5 +789,40 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn lsof_parser_keeps_pid_and_command_pairs() {
+        assert_eq!(
+            parse_lsof_port_owners("p49094\ncCodexHub\np57488\ncother\n"),
+            vec![
+                PortOwner {
+                    pid: 49094,
+                    command: "CodexHub".to_string(),
+                },
+                PortOwner {
+                    pid: 57488,
+                    command: "other".to_string(),
+                },
+            ]
+        );
+        assert!(command_is_codexhub("CodexHub"));
+        assert!(command_is_codexhub("codexhub"));
+        assert!(command_is_codexhub(
+            "C:\\Program Files\\CodexHub\\codexhub.exe"
+        ));
+        assert!(!command_is_codexhub("codexhub-helper"));
+        assert!(!command_is_codexhub("not-codexhub.exe"));
+        assert!(!command_is_codexhub("other"));
+    }
+
+    #[test]
+    fn netstat_parser_returns_unique_listening_pids_for_port() {
+        let output = r#"
+  TCP    127.0.0.1:3847       0.0.0.0:0       LISTENING       49094
+  TCP    [::1]:3847           [::]:0          LISTENING       49094
+  TCP    127.0.0.1:9999       0.0.0.0:0       LISTENING       57488
+"#;
+        assert_eq!(parse_netstat_listener_pids(output, 3847), vec![49094]);
     }
 }

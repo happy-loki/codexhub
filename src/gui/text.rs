@@ -2506,6 +2506,35 @@ impl GuiText {
         }
     }
 
+    pub(super) fn daemon_port_unknown(self, base_url: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("无法识别本地服务地址的端口：{base_url}"),
+            GuiLocale::EnUs => format!("Could not determine the local service port: {base_url}"),
+        }
+    }
+
+    pub(super) fn daemon_port_conflict(self, port: u16, owner: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                format!("端口 {port} 被非 CodexHub 进程占用，已停止自动启动以避免误杀：{owner}")
+            }
+            GuiLocale::EnUs => format!(
+                "Port {port} is owned by a non-CodexHub process. Automatic startup was stopped to avoid terminating it: {owner}"
+            ),
+        }
+    }
+
+    pub(super) fn daemon_stop_failed(self, port: u16, pids: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                format!("无法停止占用端口 {port} 的旧 CodexHub 进程（PID：{pids}）")
+            }
+            GuiLocale::EnUs => {
+                format!("Failed to stop the old CodexHub process on port {port} (PID: {pids})")
+            }
+        }
+    }
+
     pub(super) fn daemon_current_exe_failed(self, err: &str) -> String {
         match self.locale {
             GuiLocale::ZhCn => format!("无法定位当前程序：{err}"),

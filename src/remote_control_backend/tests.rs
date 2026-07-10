@@ -20,6 +20,7 @@ fn test_state() -> SharedState {
         std::env::temp_dir().join("codexhub-test-config.toml"),
         config,
         None,
+        None,
     )
 }
 

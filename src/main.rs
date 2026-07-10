@@ -1,4 +1,4 @@
-﻿#![cfg_attr(all(windows, feature = "gui"), windows_subsystem = "windows")]
+#![cfg_attr(all(windows, feature = "gui"), windows_subsystem = "windows")]
 
 mod ai_gateway;
 mod app_state;
@@ -9,6 +9,7 @@ mod codex;
 mod codex_app_config;
 mod codex_session_history;
 mod config;
+mod daemon_process;
 mod diagnostics_export;
 #[cfg(feature = "gui")]
 mod gui;
@@ -148,12 +149,19 @@ fn run_gui_command() -> anyhow::Result<()> {
 }
 
 async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<()> {
+    let daemon_identity = daemon_process::DaemonIdentity::new();
+    let _daemon_lock = daemon_process::DaemonInstanceLock::acquire(&config_path, &daemon_identity)?;
     let bind = config.bind.clone();
     outbound_http::init(&config.outbound_proxy, config.local_listen_port())?;
     let chain_log_path = chain_log_path(&config);
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
     let (server_shutdown_tx, server_shutdown_rx) = watch::channel(false);
-    let state = AppState::new(config_path, config, Some(shutdown_tx));
+    let state = AppState::new(
+        config_path,
+        config,
+        Some(shutdown_tx),
+        Some(daemon_identity),
+    );
     {
         let config = state.config.lock().await;
         state

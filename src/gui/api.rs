@@ -6,6 +6,7 @@ use serde_json::Value;
 
 use crate::ai_gateway::config::AiGatewayConfig;
 use crate::config::{AppConfig, LocalConnectionMode};
+use crate::daemon_process::DaemonIdentity;
 
 use super::text::GuiText;
 use super::{GUI_ACTION_TIMEOUT, GUI_CONFIG_TIMEOUT, GUI_CONNECT_TIMEOUT, GUI_STATUS_TIMEOUT};
@@ -51,7 +52,15 @@ impl ApiClient {
     }
 
     pub(super) fn is_online(&self) -> bool {
-        self.get_quick::<serde_json::Value>("/api/status").is_ok()
+        self.daemon_identity().is_ok()
+    }
+
+    pub(super) fn daemon_identity(&self) -> Result<DaemonIdentity, String> {
+        let identity = self.get_quick::<DaemonIdentity>("/api/status")?;
+        identity
+            .is_codexhub()
+            .then_some(identity)
+            .ok_or_else(|| "local service identity does not match CodexHub".to_string())
     }
 
     pub(super) fn get_quick_json(&self, path: &str) -> Result<Value, String> {
@@ -189,6 +198,9 @@ impl ApiClient {
             return false;
         };
         response.status().is_success()
+            && response
+                .json::<DaemonIdentity>()
+                .is_ok_and(|identity| identity.is_codexhub())
     }
 
     pub(super) fn configure_codex_app(

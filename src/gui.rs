@@ -32,6 +32,7 @@ use crate::config::{AppConfig, LocalConnectionMode, OutboundProxyConfig, Outboun
 use crate::diagnostics_export::{
     ConnectionDiagnosticsInput, connection_status_snapshot, export_connection_diagnostics_to_path,
 };
+use crate::types::now_ms;
 
 #[cfg(target_os = "windows")]
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
@@ -65,6 +66,8 @@ const GUI_STATUS_TIMEOUT: Duration = Duration::from_millis(650);
 const GUI_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
 const GUI_CONFIG_TIMEOUT: Duration = Duration::from_secs(15);
 const GUI_STARTUP_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(30);
+const DAEMON_AUTO_RESTART_FAILURE_THRESHOLD: u64 = 3;
+const DAEMON_AUTO_RESTART_COOLDOWN_MS: u64 = 60_000;
 const GUI_MODEL_LIST_FETCH_TIMEOUT_SECS: u64 = 30;
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(8);
 #[cfg(target_os = "windows")]
@@ -1594,6 +1597,8 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         let handles = handles.clone();
         let frame = frame;
         let dashboard_refresh = dashboard_refresh.clone();
+        let daemon_child_for_idle = daemon_child.clone();
+        let gui_timers_for_idle = gui_timers.clone();
         let gui_tx = gui_tx.clone();
         let im_action_in_flight = im_action_in_flight.clone();
         let ai_gw_action_in_flight = ai_gw_action_in_flight.clone();
@@ -1678,7 +1683,14 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                                 apply_pending_ai_gw_action(&handles, &frame, result);
                             }
                             GuiMessage::DashboardUpdate => {
-                                apply_pending_dashboard(&handles, &dashboard_refresh, &api, &frame);
+                                apply_pending_dashboard(
+                                    &handles,
+                                    &dashboard_refresh,
+                                    &api,
+                                    &frame,
+                                    &daemon_child_for_idle,
+                                    &gui_timers_for_idle,
+                                );
                             }
                             GuiMessage::DiagnosticsExport => {
                                 apply_pending_diagnostics_export(
@@ -4305,6 +4317,8 @@ struct DashboardRefresh {
     result: Arc<Mutex<Option<(u64, DashboardSnapshot)>>>,
     last_snapshot: Arc<Mutex<Option<DashboardSnapshot>>>,
     daemon_starting: Arc<AtomicBool>,
+    daemon_health_failures: Arc<AtomicU64>,
+    daemon_restart_not_before_ms: Arc<AtomicU64>,
     generation: Arc<AtomicU64>,
     closing: Arc<AtomicBool>,
     connection_prompt_shown: Arc<AtomicBool>,
@@ -4320,6 +4334,8 @@ impl DashboardRefresh {
             result: Arc::new(Mutex::new(None)),
             last_snapshot: Arc::new(Mutex::new(None)),
             daemon_starting: Arc::new(AtomicBool::new(false)),
+            daemon_health_failures: Arc::new(AtomicU64::new(0)),
+            daemon_restart_not_before_ms: Arc::new(AtomicU64::new(0)),
             generation: Arc::new(AtomicU64::new(0)),
             closing: Arc::new(AtomicBool::new(false)),
             connection_prompt_shown: Arc::new(AtomicBool::new(false)),
@@ -4485,6 +4501,8 @@ fn apply_pending_dashboard(
     refresh: &DashboardRefresh,
     api: &ApiClient,
     frame: &Frame,
+    daemon_child: &Rc<RefCell<Option<Child>>>,
+    gui_timers: &GuiTimers,
 ) -> bool {
     let result = refresh.result.lock().ok().and_then(|mut slot| slot.take());
     let Some((generation, snapshot)) = result else {
@@ -4497,10 +4515,80 @@ fn apply_pending_dashboard(
     let daemon_starting = refresh.daemon_starting.load(Ordering::SeqCst);
     update_dashboard(handles, &snapshot, daemon_starting);
     maybe_prompt_compatible_connection(handles, refresh, api, frame, &snapshot, daemon_starting);
+    maybe_restart_unhealthy_daemon(
+        handles,
+        refresh,
+        api,
+        frame,
+        daemon_child,
+        gui_timers,
+        &snapshot,
+        daemon_starting,
+    );
     if let Ok(mut last_snapshot) = refresh.last_snapshot.lock() {
         last_snapshot.replace(snapshot);
     }
     true
+}
+
+fn maybe_restart_unhealthy_daemon(
+    handles: &UiHandles,
+    refresh: &DashboardRefresh,
+    api: &ApiClient,
+    frame: &Frame,
+    daemon_child: &Rc<RefCell<Option<Child>>>,
+    gui_timers: &GuiTimers,
+    snapshot: &DashboardSnapshot,
+    daemon_starting: bool,
+) {
+    if snapshot.service_online {
+        refresh.daemon_health_failures.store(0, Ordering::SeqCst);
+        return;
+    }
+    if daemon_starting || refresh.closing.load(Ordering::SeqCst) {
+        return;
+    }
+
+    let failures = refresh
+        .daemon_health_failures
+        .fetch_add(1, Ordering::SeqCst)
+        .saturating_add(1);
+    let now = now_ms().min(u64::MAX as u128) as u64;
+    let not_before = refresh.daemon_restart_not_before_ms.load(Ordering::SeqCst);
+    if !daemon_auto_restart_ready(failures, now, not_before) {
+        return;
+    }
+    let next_restart_at = now.saturating_add(DAEMON_AUTO_RESTART_COOLDOWN_MS);
+    if refresh
+        .daemon_restart_not_before_ms
+        .compare_exchange(
+            not_before,
+            next_restart_at,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        )
+        .is_err()
+    {
+        return;
+    }
+    refresh.daemon_health_failures.store(0, Ordering::SeqCst);
+    start_daemon_for_gui_async(api, handles, frame, daemon_child, refresh, gui_timers);
+}
+
+fn daemon_auto_restart_ready(failures: u64, now_ms: u64, not_before_ms: u64) -> bool {
+    failures >= DAEMON_AUTO_RESTART_FAILURE_THRESHOLD && now_ms >= not_before_ms
+}
+
+#[cfg(test)]
+mod daemon_recovery_tests {
+    use super::*;
+
+    #[test]
+    fn daemon_restart_requires_failure_threshold_and_cooldown() {
+        assert!(!daemon_auto_restart_ready(2, 100, 0));
+        assert!(!daemon_auto_restart_ready(3, 99, 100));
+        assert!(daemon_auto_restart_ready(3, 100, 100));
+    }
 }
 
 fn cached_dashboard_snapshot(refresh: &DashboardRefresh) -> Option<DashboardSnapshot> {
