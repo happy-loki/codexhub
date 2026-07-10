@@ -246,7 +246,7 @@ fn normalize_grok_reasoning_replay(raw_body: &mut serde_json::Value, provider: &
 /// `name: "exec", namespace: "exec"`. Current Codex clients dispatch custom
 /// tools by combining namespace and name, which turns this into `execexec`.
 /// Function tools keep their namespace; this compatibility pass only removes a
-/// duplicate namespace from custom tool-call items.
+/// duplicate namespace from the code-mode exec custom tool-call item.
 struct ResponsesPassthroughCompatStream<S> {
     inner: S,
     line_buf: String,
@@ -328,7 +328,7 @@ fn rewrite_responses_sse_line(line: &str) -> String {
     let Ok(mut event) = serde_json::from_str::<Value>(data) else {
         return line.to_string();
     };
-    if !normalize_duplicate_custom_tool_namespace(&mut event) {
+    if !normalize_exec_custom_tool_namespace(&mut event) {
         return line.to_string();
     }
     format!(
@@ -347,7 +347,7 @@ fn normalize_responses_passthrough_body(body_bytes: Bytes) -> (Bytes, Option<Val
     let Some(value) = response_json.as_mut() else {
         return (body_bytes, response_json);
     };
-    if normalize_duplicate_custom_tool_namespace(value) {
+    if normalize_exec_custom_tool_namespace(value) {
         let rewritten = serde_json::to_vec(value)
             .map(Bytes::from)
             .unwrap_or_else(|_| body_bytes.clone());
@@ -357,11 +357,11 @@ fn normalize_responses_passthrough_body(body_bytes: Bytes) -> (Bytes, Option<Val
     }
 }
 
-fn normalize_duplicate_custom_tool_namespace(value: &mut Value) -> bool {
+fn normalize_exec_custom_tool_namespace(value: &mut Value) -> bool {
     match value {
         Value::Object(object) => {
             let mut changed = false;
-            let is_duplicate_custom_tool_namespace = object
+            let is_duplicate_exec_custom_tool_namespace = object
                 .get("type")
                 .and_then(Value::as_str)
                 .is_some_and(|item_type| item_type == "custom_tool_call")
@@ -371,23 +371,23 @@ fn normalize_duplicate_custom_tool_namespace(value: &mut Value) -> bool {
                     .zip(object.get("namespace").and_then(Value::as_str))
                     .is_some_and(|(name, namespace)| {
                         let name = name.trim();
-                        !name.is_empty() && name == namespace.trim()
+                        name == "exec" && namespace.trim() == "exec"
                     });
 
-            if is_duplicate_custom_tool_namespace {
+            if is_duplicate_exec_custom_tool_namespace {
                 object.remove("namespace");
                 changed = true;
             }
 
             for child in object.values_mut() {
-                changed |= normalize_duplicate_custom_tool_namespace(child);
+                changed |= normalize_exec_custom_tool_namespace(child);
             }
             changed
         }
         Value::Array(items) => {
             let mut changed = false;
             for item in items {
-                changed |= normalize_duplicate_custom_tool_namespace(item);
+                changed |= normalize_exec_custom_tool_namespace(item);
             }
             changed
         }
@@ -404,7 +404,7 @@ mod tests {
     use crate::ai_gateway::config::{ProviderConfig, ProviderType};
 
     use super::{
-        ResponsesPassthroughCompatStream, normalize_duplicate_custom_tool_namespace,
+        ResponsesPassthroughCompatStream, normalize_exec_custom_tool_namespace,
         normalize_grok_reasoning_replay, normalize_responses_passthrough_body,
     };
 
@@ -499,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_namespace_is_removed_only_for_custom_tool_calls() {
+    fn exec_namespace_is_removed_only_for_exec_custom_tool_calls() {
         let mut event = json!({
             "type": "response.output_item.done",
             "item": {
@@ -512,6 +512,13 @@ mod tests {
             "response": {
                 "output": [
                     {
+                        "type": "custom_tool_call",
+                        "name": "lookup",
+                        "namespace": "lookup",
+                        "call_id": "call_2",
+                        "input": "payload"
+                    },
+                    {
                         "type": "function_call",
                         "name": "read_file",
                         "namespace": "fs"
@@ -520,11 +527,12 @@ mod tests {
             }
         });
 
-        assert!(normalize_duplicate_custom_tool_namespace(&mut event));
+        assert!(normalize_exec_custom_tool_namespace(&mut event));
 
         assert!(event["item"].get("namespace").is_none());
         assert_eq!(event["item"]["name"], "exec");
-        assert_eq!(event["response"]["output"][0]["namespace"], "fs");
+        assert_eq!(event["response"]["output"][0]["namespace"], "lookup");
+        assert_eq!(event["response"]["output"][1]["namespace"], "fs");
     }
 
     #[test]
