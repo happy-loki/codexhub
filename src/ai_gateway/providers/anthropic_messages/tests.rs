@@ -1,5 +1,5 @@
 use super::options::{AnthropicProviderOptions, AnthropicProviderProfile};
-use super::request::build_anthropic_request;
+use super::request::{build_anthropic_request, build_anthropic_request_with_scope};
 use super::response::convert_anthropic_response;
 use super::stream::AnthropicSseToResponsesSse;
 use super::stream_internal::InternalSseEnvelope;
@@ -8,14 +8,16 @@ use super::{
     WebSearchToolUse, anthropic_message_from_sse, append_tool_results, bearer_authorization,
     build_anthropic_upstream_request, emit_injected_web_search_call, find_web_search_tool_uses,
     insert_metadata_user_id, internal_web_search_body, merge_anthropic_betas,
-    raw_sse_has_first_content_token,
+    raw_sse_has_first_content_token, scope_anthropic_response,
 };
 use crate::ai_gateway::config::{ProviderConfig, ProviderType};
 use crate::ai_gateway::context::GatewayContext;
+use crate::ai_gateway::encrypted_content::{AnthropicEncryptedContentKind, EncryptedContentScope};
 use crate::ai_gateway::model::{
     ContentPart, FunctionCallOutput, FunctionCallOutputContentItem, GatewayRequest, ItemContent,
-    ItemType, Reasoning, ResponseItem,
+    ItemType, Reasoning, ResponseItem, SummaryPart,
 };
+use crate::ai_gateway::responses_compat::ResponsesCompatSseStream;
 use crate::ai_gateway::tool_names::ToolNameMap;
 use axum::{
     body::Bytes,
@@ -97,6 +99,34 @@ fn provider(api_key: &str, compatibility: Option<&str>) -> ProviderConfig {
         api_key: api_key.to_string(),
         ..Default::default()
     }
+}
+
+fn encrypted_content_scope(
+    name: &str,
+    provider_type: ProviderType,
+    base_url: &str,
+) -> EncryptedContentScope {
+    EncryptedContentScope::for_provider(&ProviderConfig {
+        name: name.to_string(),
+        provider_type,
+        base_url: base_url.to_string(),
+        ..ProviderConfig::default()
+    })
+}
+
+fn reasoning_item(summary: Option<&str>, encrypted_content: String) -> ResponseItem {
+    let mut item = message("assistant", "ignored");
+    item.item_type = ItemType::Reasoning;
+    item.role = None;
+    item.content = None;
+    item.summary = summary.map(|text| {
+        vec![SummaryPart {
+            part_type: "summary_text".to_string(),
+            text: text.to_string(),
+        }]
+    });
+    item.encrypted_content = Some(encrypted_content);
+    item
 }
 
 fn message(role: &str, text: &str) -> ResponseItem {
@@ -338,6 +368,156 @@ fn builds_anthropic_text_request() {
             .is_none()
     );
     assert!(body.get("cache_control").is_none());
+}
+
+#[test]
+fn replays_matching_anthropic_thinking_with_text_and_tool_use() {
+    let scope = encrypted_content_scope(
+        "claude",
+        ProviderType::AnthropicMessages,
+        "https://api.anthropic.com/v1",
+    );
+    let reasoning = reasoning_item(
+        Some("I should inspect the repository."),
+        scope.encode_anthropic(AnthropicEncryptedContentKind::Thinking, "sig_123"),
+    );
+    let mut tool_call = message("assistant", "ignored");
+    tool_call.item_type = ItemType::FunctionCall;
+    tool_call.content = None;
+    tool_call.name = Some("read_file".to_string());
+    tool_call.call_id = Some("toolu_123".to_string());
+    tool_call.arguments = Some(crate::ai_gateway::model::JsonString::Value(json!({
+        "path": "README.md"
+    })));
+
+    let (body, _) = build_anthropic_request_with_scope(
+        &request(vec![
+            message("user", "inspect it"),
+            reasoning,
+            message("assistant", "I will inspect it."),
+            tool_call,
+        ]),
+        AnthropicProviderProfile::Anthropic,
+        &scope,
+    )
+    .unwrap();
+
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1]["role"], "assistant");
+    let content = messages[1]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 3);
+    assert_eq!(content[0]["type"], "thinking");
+    assert_eq!(content[0]["thinking"], "I should inspect the repository.");
+    assert_eq!(content[0]["signature"], "sig_123");
+    assert_eq!(content[1]["type"], "text");
+    assert_eq!(content[2]["type"], "tool_use");
+}
+
+#[test]
+fn replays_matching_anthropic_redacted_thinking() {
+    let scope = encrypted_content_scope(
+        "claude",
+        ProviderType::AnthropicMessages,
+        "https://api.anthropic.com/v1",
+    );
+    let reasoning = reasoning_item(
+        None,
+        scope.encode_anthropic(
+            AnthropicEncryptedContentKind::RedactedThinking,
+            "encrypted_456",
+        ),
+    );
+
+    let (body, _) = build_anthropic_request_with_scope(
+        &request(vec![
+            message("user", "continue"),
+            reasoning,
+            message("assistant", "final"),
+        ]),
+        AnthropicProviderProfile::Anthropic,
+        &scope,
+    )
+    .unwrap();
+
+    let content = body["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(content.len(), 2);
+    assert_eq!(content[0]["type"], "redacted_thinking");
+    assert_eq!(content[0]["data"], "encrypted_456");
+    assert_eq!(content[1]["type"], "text");
+}
+
+#[test]
+fn replays_omitted_anthropic_thinking_as_thinking_not_redacted() {
+    let scope = encrypted_content_scope(
+        "claude",
+        ProviderType::AnthropicMessages,
+        "https://api.anthropic.com/v1",
+    );
+    let mut reasoning = reasoning_item(
+        None,
+        scope.encode_anthropic(AnthropicEncryptedContentKind::Thinking, "sig_omitted"),
+    );
+    reasoning.summary = Some(Vec::new());
+
+    let (body, _) = build_anthropic_request_with_scope(
+        &request(vec![
+            message("user", "continue"),
+            reasoning,
+            message("assistant", "final"),
+        ]),
+        AnthropicProviderProfile::Anthropic,
+        &scope,
+    )
+    .unwrap();
+
+    let content = body["messages"][1]["content"].as_array().unwrap();
+    assert_eq!(content[0]["type"], "thinking");
+    assert_eq!(content[0]["thinking"], "");
+    assert_eq!(content[0]["signature"], "sig_omitted");
+}
+
+#[test]
+fn filters_foreign_and_unmarked_reasoning_from_anthropic_request() {
+    let anthropic_scope = encrypted_content_scope(
+        "claude",
+        ProviderType::AnthropicMessages,
+        "https://api.anthropic.com/v1",
+    );
+    let other_anthropic_scope = encrypted_content_scope(
+        "claude-backup",
+        ProviderType::AnthropicMessages,
+        "https://proxy.example.com/v1",
+    );
+    let grok_scope =
+        encrypted_content_scope("grok", ProviderType::GrokResponses, "https://api.x.ai/v1");
+
+    let (body, _) = build_anthropic_request_with_scope(
+        &request(vec![
+            message("user", "continue"),
+            reasoning_item(
+                Some("foreign Anthropic"),
+                other_anthropic_scope
+                    .encode_anthropic(AnthropicEncryptedContentKind::Thinking, "sig_a"),
+            ),
+            reasoning_item(Some("foreign Grok"), grok_scope.encode("sig_g")),
+            reasoning_item(Some("legacy"), "legacy-unmarked".to_string()),
+            message("assistant", "safe history"),
+        ]),
+        AnthropicProviderProfile::Anthropic,
+        &anthropic_scope,
+    )
+    .unwrap();
+
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages.len(), 2);
+    let assistant_content = messages[1]["content"].as_array().unwrap();
+    assert_eq!(assistant_content.len(), 1);
+    assert_eq!(assistant_content[0]["type"], "text");
+    let encoded = serde_json::to_string(&body).unwrap();
+    assert!(!encoded.contains("foreign Anthropic"));
+    assert!(!encoded.contains("foreign Grok"));
+    assert!(!encoded.contains("legacy-unmarked"));
 }
 
 #[test]
@@ -1306,6 +1486,77 @@ fn converts_anthropic_thinking_response() {
 }
 
 #[test]
+fn scopes_anthropic_thinking_and_redacted_content_in_json_response() {
+    let scope = encrypted_content_scope(
+        "claude",
+        ProviderType::AnthropicMessages,
+        "https://api.anthropic.com/v1",
+    );
+    let response = json!({
+        "id": "msg_123",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-4-6",
+        "content": [
+            {"type": "thinking", "thinking": "think", "signature": "sig_123"},
+            {"type": "redacted_thinking", "data": "encrypted_456"}
+        ],
+        "stop_reason": "end_turn",
+        "usage": {"input_tokens": 10, "output_tokens": 3}
+    });
+
+    let mut converted = convert_response(&response);
+    scope_anthropic_response(&mut converted, &scope);
+
+    let thinking = converted.output[0].encrypted_content.as_deref().unwrap();
+    let redacted = converted.output[1].encrypted_content.as_deref().unwrap();
+    assert!(thinking.starts_with("codexhub:enc:v1:anthropic:"));
+    assert!(redacted.starts_with("codexhub:enc:v1:anthropic:"));
+    assert_eq!(
+        scope.decode_anthropic(thinking),
+        Some((AnthropicEncryptedContentKind::Thinking, "sig_123"))
+    );
+    assert_eq!(
+        scope.decode_anthropic(redacted),
+        Some((
+            AnthropicEncryptedContentKind::RedactedThinking,
+            "encrypted_456"
+        ))
+    );
+}
+
+#[test]
+fn preserves_omitted_anthropic_thinking_signature_in_json_response() {
+    let scope = encrypted_content_scope(
+        "claude",
+        ProviderType::AnthropicMessages,
+        "https://api.anthropic.com/v1",
+    );
+    let response = json!({
+        "id": "msg_omitted",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-opus-4-6",
+        "content": [
+            {"type": "thinking", "thinking": "", "signature": "sig_omitted"}
+        ],
+        "stop_reason": "tool_use",
+        "usage": {"input_tokens": 10, "output_tokens": 3}
+    });
+
+    let mut converted = convert_response(&response);
+    assert_eq!(converted.output.len(), 1);
+    assert!(converted.output[0].summary.as_ref().unwrap().is_empty());
+    scope_anthropic_response(&mut converted, &scope);
+
+    let encrypted_content = converted.output[0].encrypted_content.as_deref().unwrap();
+    assert_eq!(
+        scope.decode_anthropic(encrypted_content),
+        Some((AnthropicEncryptedContentKind::Thinking, "sig_omitted"))
+    );
+}
+
+#[test]
 fn converts_anthropic_tool_use_response() {
     let mut map = ToolNameMap::default();
     let encoded = map.encode_function(Some("browser"), "open page");
@@ -2149,6 +2400,141 @@ async fn streams_anthropic_thinking_as_responses_reasoning_sse() {
         .position(|(event, data)| event == "response.output_text.delta" && data["delta"] == "final")
         .unwrap();
     assert!(reasoning_done_pos < text_delta_pos);
+}
+
+#[tokio::test]
+async fn scopes_anthropic_thinking_in_responses_sse() {
+    let scope = encrypted_content_scope(
+        "claude",
+        ProviderType::AnthropicMessages,
+        "https://api.anthropic.com/v1",
+    );
+    let input = stream::iter(vec![
+        Ok::<_, std::io::Error>(Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"think\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_123\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        )),
+    ]);
+    let converted = response_stream(input, "fallback-model", ToolNameMap::default());
+    let chunks = ResponsesCompatSseStream::with_encrypted_content_scope(converted, scope.clone())
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    let joined = chunks
+        .iter()
+        .flat_map(|chunk| chunk.iter().copied())
+        .collect::<Vec<_>>();
+    let events = super::parse_converted_frames(&Bytes::from(joined));
+
+    let reasoning_done = events
+        .iter()
+        .find(|(event, data)| {
+            event == "response.output_item.done" && data["item"]["type"] == "reasoning"
+        })
+        .unwrap();
+    let encrypted_content = reasoning_done.1["item"]["encrypted_content"]
+        .as_str()
+        .unwrap();
+    assert!(encrypted_content.starts_with("codexhub:enc:v1:anthropic:"));
+    assert_eq!(
+        scope.decode_anthropic(encrypted_content),
+        Some((AnthropicEncryptedContentKind::Thinking, "sig_123"))
+    );
+
+    let completed = events
+        .iter()
+        .find(|(event, _)| event == "response.completed")
+        .unwrap();
+    let completed_content = completed.1["response"]["output"][0]["encrypted_content"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        scope.decode_anthropic(completed_content),
+        Some((AnthropicEncryptedContentKind::Thinking, "sig_123"))
+    );
+}
+
+#[tokio::test]
+async fn keeps_streamed_thinking_and_redacted_blocks_distinct() {
+    let scope = encrypted_content_scope(
+        "claude",
+        ProviderType::AnthropicMessages,
+        "https://api.anthropic.com/v1",
+    );
+    let input = stream::iter(vec![
+        Ok::<_, std::io::Error>(Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-sonnet-4-6\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig_omitted\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"encrypted_456\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        )),
+    ]);
+    let converted = response_stream(input, "fallback-model", ToolNameMap::default());
+    let chunks = ResponsesCompatSseStream::with_encrypted_content_scope(converted, scope.clone())
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    let joined = chunks
+        .iter()
+        .flat_map(|chunk| chunk.iter().copied())
+        .collect::<Vec<_>>();
+    let events = super::parse_converted_frames(&Bytes::from(joined));
+    let reasoning_items = events
+        .iter()
+        .filter(|(event, data)| {
+            event == "response.output_item.done" && data["item"]["type"] == "reasoning"
+        })
+        .map(|(_, data)| &data["item"])
+        .collect::<Vec<_>>();
+    let added_items = events
+        .iter()
+        .filter(|(event, data)| {
+            event == "response.output_item.added" && data["item"]["type"] == "reasoning"
+        })
+        .map(|(_, data)| &data["item"])
+        .collect::<Vec<_>>();
+
+    assert_eq!(added_items.len(), 2);
+    assert_eq!(added_items[0]["summary"], json!([]));
+    assert!(added_items[1].get("summary").is_none());
+    assert_eq!(reasoning_items.len(), 2);
+    assert_eq!(reasoning_items[0]["summary"], json!([]));
+    assert!(reasoning_items[1].get("summary").is_none());
+    assert_eq!(
+        scope.decode_anthropic(reasoning_items[0]["encrypted_content"].as_str().unwrap()),
+        Some((AnthropicEncryptedContentKind::Thinking, "sig_omitted"))
+    );
+    assert_eq!(
+        scope.decode_anthropic(reasoning_items[1]["encrypted_content"].as_str().unwrap()),
+        Some((
+            AnthropicEncryptedContentKind::RedactedThinking,
+            "encrypted_456"
+        ))
+    );
 }
 
 #[tokio::test]

@@ -5,6 +5,23 @@ use super::config::{ProviderConfig, ProviderType, provider_route_id};
 
 const MARKER_PREFIX: &str = "codexhub:enc:v1:";
 const FOOTPRINT_BYTES: usize = 6;
+const ANTHROPIC_THINKING_KIND: &str = "thinking";
+const ANTHROPIC_REDACTED_THINKING_KIND: &str = "redacted_thinking";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AnthropicEncryptedContentKind {
+    Thinking,
+    RedactedThinking,
+}
+
+impl AnthropicEncryptedContentKind {
+    fn marker(self) -> &'static str {
+        match self {
+            Self::Thinking => ANTHROPIC_THINKING_KIND,
+            Self::RedactedThinking => ANTHROPIC_REDACTED_THINKING_KIND,
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EncryptedContentScope {
@@ -52,6 +69,44 @@ impl EncryptedContentScope {
         )
     }
 
+    pub(crate) fn decode_matching<'a>(&self, content: &'a str) -> Option<&'a str> {
+        match self.decode(content) {
+            ScopedContent::Matching(content) => Some(content),
+            ScopedContent::Unmarked | ScopedContent::Foreign => None,
+        }
+    }
+
+    pub(crate) fn encode_anthropic(
+        &self,
+        kind: AnthropicEncryptedContentKind,
+        content: &str,
+    ) -> String {
+        if content.starts_with(MARKER_PREFIX) {
+            return content.to_string();
+        }
+        self.encode(&format!("{}:{content}", kind.marker()))
+    }
+
+    pub(crate) fn decode_anthropic<'a>(
+        &self,
+        content: &'a str,
+    ) -> Option<(AnthropicEncryptedContentKind, &'a str)> {
+        if self.protocol != "anthropic" {
+            return None;
+        }
+        let payload = self.decode_matching(content)?;
+        if let Some(content) = payload
+            .strip_prefix(ANTHROPIC_THINKING_KIND)
+            .and_then(|payload| payload.strip_prefix(':'))
+        {
+            return Some((AnthropicEncryptedContentKind::Thinking, content));
+        }
+        payload
+            .strip_prefix(ANTHROPIC_REDACTED_THINKING_KIND)
+            .and_then(|payload| payload.strip_prefix(':'))
+            .map(|content| (AnthropicEncryptedContentKind::RedactedThinking, content))
+    }
+
     fn decode<'a>(&self, content: &'a str) -> ScopedContent<'a> {
         let Some(encoded) = content.strip_prefix(MARKER_PREFIX) else {
             return ScopedContent::Unmarked;
@@ -81,13 +136,26 @@ pub(crate) fn encode_response_object(
     if !is_provider_private_item(object) {
         return false;
     }
+    let anthropic_kind = (scope.protocol == "anthropic").then(|| {
+        if object
+            .get("summary")
+            .is_some_and(|summary| !summary.is_null())
+        {
+            AnthropicEncryptedContentKind::Thinking
+        } else {
+            AnthropicEncryptedContentKind::RedactedThinking
+        }
+    });
     let Some(Value::String(content)) = object.get_mut("encrypted_content") else {
         return false;
     };
     if content.is_empty() || content.starts_with(MARKER_PREFIX) {
         return false;
     }
-    *content = scope.encode(content);
+    *content = match anthropic_kind {
+        Some(kind) => scope.encode_anthropic(kind, content),
+        None => scope.encode(content),
+    };
     true
 }
 
@@ -283,6 +351,93 @@ mod tests {
             "opaque-grok-content"
         );
         assert_eq!(request["input"][0]["id"], "rs_1");
+    }
+
+    #[test]
+    fn decode_matching_rejects_unmarked_and_foreign_content() {
+        let anthropic_scope = EncryptedContentScope::for_provider(&provider(
+            "anthropic",
+            ProviderType::AnthropicMessages,
+            "https://api.anthropic.com/v1",
+        ));
+        let grok_scope = EncryptedContentScope::for_provider(&provider(
+            "grok",
+            ProviderType::GrokResponses,
+            "https://api.x.ai/v1",
+        ));
+
+        let matching = anthropic_scope.encode("sig_123");
+        let foreign = grok_scope.encode("opaque-grok-content");
+
+        assert_eq!(anthropic_scope.decode_matching(&matching), Some("sig_123"));
+        assert_eq!(anthropic_scope.decode_matching(&foreign), None);
+        assert_eq!(anthropic_scope.decode_matching("legacy-unmarked"), None);
+    }
+
+    #[test]
+    fn anthropic_typed_content_round_trips_kind_and_raw_content() {
+        let scope = EncryptedContentScope::for_provider(&provider(
+            "anthropic",
+            ProviderType::AnthropicMessages,
+            "https://api.anthropic.com/v1",
+        ));
+
+        let thinking =
+            scope.encode_anthropic(AnthropicEncryptedContentKind::Thinking, "sig:with:colons");
+        let redacted = scope.encode_anthropic(
+            AnthropicEncryptedContentKind::RedactedThinking,
+            "opaque-redacted",
+        );
+
+        assert_eq!(
+            scope.decode_anthropic(&thinking),
+            Some((AnthropicEncryptedContentKind::Thinking, "sig:with:colons"))
+        );
+        assert_eq!(
+            scope.decode_anthropic(&redacted),
+            Some((
+                AnthropicEncryptedContentKind::RedactedThinking,
+                "opaque-redacted"
+            ))
+        );
+    }
+
+    #[test]
+    fn anthropic_response_object_uses_summary_presence_as_wire_kind() {
+        let scope = EncryptedContentScope::for_provider(&provider(
+            "anthropic",
+            ProviderType::AnthropicMessages,
+            "https://api.anthropic.com/v1",
+        ));
+        let mut thinking = json!({
+            "type": "reasoning",
+            "summary": [],
+            "encrypted_content": "sig_123"
+        });
+        let mut redacted = json!({
+            "type": "reasoning",
+            "encrypted_content": "encrypted_456"
+        });
+
+        assert!(encode_response_object(
+            thinking.as_object_mut().unwrap(),
+            &scope
+        ));
+        assert!(encode_response_object(
+            redacted.as_object_mut().unwrap(),
+            &scope
+        ));
+        assert_eq!(
+            scope.decode_anthropic(thinking["encrypted_content"].as_str().unwrap()),
+            Some((AnthropicEncryptedContentKind::Thinking, "sig_123"))
+        );
+        assert_eq!(
+            scope.decode_anthropic(redacted["encrypted_content"].as_str().unwrap()),
+            Some((
+                AnthropicEncryptedContentKind::RedactedThinking,
+                "encrypted_456"
+            ))
+        );
     }
 
     #[test]

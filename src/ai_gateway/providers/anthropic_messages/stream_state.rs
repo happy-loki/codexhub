@@ -124,12 +124,14 @@ impl AnthropicStreamState {
             }
             Some("server_tool_use") => self.start_server_tool_block(index, block, queue),
             Some("thinking") => {
+                self.close_reasoning_item(queue);
                 if let Some(text) = block.get("thinking").and_then(Value::as_str) {
                     self.handle_thinking_delta(text, queue);
                 }
             }
             Some("redacted_thinking") => {
-                self.handle_redacted_thinking(block.get("data").and_then(Value::as_str));
+                self.close_reasoning_item(queue);
+                self.handle_redacted_thinking(block.get("data").and_then(Value::as_str), queue);
             }
             Some("web_search_tool_result") => self.attach_web_search_result(index, block, queue),
             Some("tool_result")
@@ -165,7 +167,7 @@ impl AnthropicStreamState {
             }
             Some("signature_delta") => {
                 if let Some(signature) = delta.get("signature").and_then(Value::as_str) {
-                    self.handle_thinking_signature(signature);
+                    self.handle_thinking_signature(signature, queue);
                 }
             }
             Some("input_json_delta") => {

@@ -136,7 +136,11 @@ fn anthropic_content_to_response_item(
         }
         "thinking" => {
             let text = item.get("thinking").and_then(Value::as_str).unwrap_or("");
-            if text.is_empty() {
+            let encrypted_content = item
+                .get("signature")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if text.is_empty() && encrypted_content.is_none() {
                 return None;
             }
             Some(ResponseItem {
@@ -157,14 +161,15 @@ fn anthropic_content_to_response_item(
                 image_url: None,
                 detail: None,
                 action: None,
-                summary: Some(vec![SummaryPart {
-                    part_type: "summary_text".to_string(),
-                    text: text.to_string(),
-                }]),
-                encrypted_content: item
-                    .get("signature")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                summary: Some(if text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![SummaryPart {
+                        part_type: "summary_text".to_string(),
+                        text: text.to_string(),
+                    }]
+                }),
+                encrypted_content,
             })
         }
         "redacted_thinking" => Some(ResponseItem {

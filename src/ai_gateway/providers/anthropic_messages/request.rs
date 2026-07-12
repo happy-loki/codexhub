@@ -1,5 +1,6 @@
 use serde_json::{Map, Value, json};
 
+use crate::ai_gateway::encrypted_content::EncryptedContentScope;
 use crate::ai_gateway::error::GatewayError;
 use crate::ai_gateway::model::GatewayRequest;
 use crate::ai_gateway::tool_names::ToolNameMap;
@@ -10,9 +11,26 @@ use super::request_reasoning::insert_reasoning_options;
 use super::request_tools::{build_anthropic_tools, convert_tool_choice_to_anthropic};
 use super::types::DEFAULT_MAX_TOKENS;
 
+#[cfg(test)]
 pub(super) fn build_anthropic_request(
     request: &GatewayRequest,
     profile: AnthropicProviderProfile,
+) -> Result<(Value, ToolNameMap), GatewayError> {
+    build_anthropic_request_inner(request, profile, None)
+}
+
+pub(super) fn build_anthropic_request_with_scope(
+    request: &GatewayRequest,
+    profile: AnthropicProviderProfile,
+    encrypted_content_scope: &EncryptedContentScope,
+) -> Result<(Value, ToolNameMap), GatewayError> {
+    build_anthropic_request_inner(request, profile, Some(encrypted_content_scope))
+}
+
+fn build_anthropic_request_inner(
+    request: &GatewayRequest,
+    profile: AnthropicProviderProfile,
+    encrypted_content_scope: Option<&EncryptedContentScope>,
 ) -> Result<(Value, ToolNameMap), GatewayError> {
     let mut tool_name_map = ToolNameMap::default();
     let mut body = Map::new();
@@ -42,7 +60,8 @@ pub(super) fn build_anthropic_request(
     insert_reasoning_options(&mut body, profile, request.reasoning.as_ref());
     validate_thinking_budget(&body)?;
 
-    let messages = build_anthropic_messages(&request.input, &mut tool_name_map)?;
+    let messages =
+        build_anthropic_messages(&request.input, &mut tool_name_map, encrypted_content_scope)?;
     body.insert("messages".to_string(), Value::Array(messages));
 
     let tools = build_anthropic_tools(request, &mut tool_name_map);

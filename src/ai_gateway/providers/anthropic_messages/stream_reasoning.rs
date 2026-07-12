@@ -5,6 +5,7 @@ use serde_json::json;
 
 use super::stream_events::emit_sse;
 use super::stream_state::AnthropicStreamState;
+use crate::ai_gateway::encrypted_content::AnthropicEncryptedContentKind;
 use crate::ai_gateway::model::generate_item_id;
 
 pub(super) struct StreamReasoningItem {
@@ -13,6 +14,7 @@ pub(super) struct StreamReasoningItem {
     pub(super) text: String,
     pub(super) summary_part_started: bool,
     pub(super) encrypted_content: Option<String>,
+    pub(super) kind: AnthropicEncryptedContentKind,
 }
 
 impl AnthropicStreamState {
@@ -20,7 +22,7 @@ impl AnthropicStreamState {
         if text.is_empty() {
             return;
         }
-        self.ensure_reasoning_item(queue);
+        self.ensure_reasoning_item(queue, AnthropicEncryptedContentKind::Thinking);
 
         let mut added_part = None;
         let mut delta_event = None;
@@ -56,21 +58,29 @@ impl AnthropicStreamState {
         }
     }
 
-    pub(super) fn handle_thinking_signature(&mut self, signature: &str) {
+    pub(super) fn handle_thinking_signature(
+        &mut self,
+        signature: &str,
+        queue: &mut VecDeque<Bytes>,
+    ) {
         if signature.is_empty() {
             return;
         }
-        self.ensure_reasoning_item_without_event();
+        self.ensure_reasoning_item(queue, AnthropicEncryptedContentKind::Thinking);
         if let Some(item) = self.reasoning_item.as_mut() {
             item.encrypted_content = Some(signature.to_string());
         }
     }
 
-    pub(super) fn handle_redacted_thinking(&mut self, data: Option<&str>) {
+    pub(super) fn handle_redacted_thinking(
+        &mut self,
+        data: Option<&str>,
+        queue: &mut VecDeque<Bytes>,
+    ) {
         let Some(data) = data.filter(|value| !value.is_empty()) else {
             return;
         };
-        self.ensure_reasoning_item_without_event();
+        self.ensure_reasoning_item(queue, AnthropicEncryptedContentKind::RedactedThinking);
         if let Some(item) = self.reasoning_item.as_mut() {
             item.encrypted_content = Some(data.to_string());
         }
@@ -80,7 +90,7 @@ impl AnthropicStreamState {
         let Some(item) = self.reasoning_item.take() else {
             return;
         };
-        if item.summary_part_started {
+        if item.kind == AnthropicEncryptedContentKind::Thinking && item.summary_part_started {
             emit_sse(
                 queue,
                 "response.reasoning_summary_text.done",
@@ -111,12 +121,14 @@ impl AnthropicStreamState {
             "type": "reasoning",
             "id": item.item_id,
             "status": "completed",
-            "summary": if item.text.is_empty() {
+        });
+        if item.kind == AnthropicEncryptedContentKind::Thinking {
+            output_item["summary"] = if item.text.is_empty() {
                 json!([])
             } else {
                 json!([{"type": "summary_text", "text": item.text}])
-            },
-        });
+            };
+        }
         if let Some(encrypted_content) = item.encrypted_content {
             output_item["encrypted_content"] = json!(encrypted_content);
         }
@@ -134,13 +146,25 @@ impl AnthropicStreamState {
         self.completed_output.push(output_item);
     }
 
-    fn ensure_reasoning_item(&mut self, queue: &mut VecDeque<Bytes>) {
+    fn ensure_reasoning_item(
+        &mut self,
+        queue: &mut VecDeque<Bytes>,
+        kind: AnthropicEncryptedContentKind,
+    ) {
         if self.reasoning_item.is_some() {
             return;
         }
         let item_id = generate_item_id();
         let output_index = self.output_index;
         self.output_index += 1;
+        let mut added_item = json!({
+            "type": "reasoning",
+            "id": item_id,
+            "status": "in_progress",
+        });
+        if kind == AnthropicEncryptedContentKind::Thinking {
+            added_item["summary"] = json!([]);
+        }
         emit_sse(
             queue,
             "response.output_item.added",
@@ -148,12 +172,7 @@ impl AnthropicStreamState {
                 "type": "response.output_item.added",
                 "sequence_number": self.next_seq(),
                 "output_index": output_index,
-                "item": {
-                    "type": "reasoning",
-                    "id": item_id,
-                    "status": "in_progress",
-                    "summary": [],
-                }
+                "item": added_item,
             }),
         );
         self.reasoning_item = Some(StreamReasoningItem {
@@ -162,22 +181,7 @@ impl AnthropicStreamState {
             text: String::new(),
             summary_part_started: false,
             encrypted_content: None,
-        });
-    }
-
-    fn ensure_reasoning_item_without_event(&mut self) {
-        if self.reasoning_item.is_some() {
-            return;
-        }
-        let item_id = generate_item_id();
-        let output_index = self.output_index;
-        self.output_index += 1;
-        self.reasoning_item = Some(StreamReasoningItem {
-            item_id,
-            output_index,
-            text: String::new(),
-            summary_part_started: false,
-            encrypted_content: None,
+            kind,
         });
     }
 }

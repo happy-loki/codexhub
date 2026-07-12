@@ -1,5 +1,6 @@
 use serde_json::{Value, json};
 
+use crate::ai_gateway::encrypted_content::{AnthropicEncryptedContentKind, EncryptedContentScope};
 use crate::ai_gateway::error::GatewayError;
 use crate::ai_gateway::model::{
     ContentPart, FunctionCallOutput, FunctionCallOutputContentItem, ItemContent, ItemType,
@@ -10,6 +11,7 @@ use crate::ai_gateway::tool_names::ToolNameMap;
 pub(super) fn build_anthropic_messages(
     input: &[ResponseItem],
     tool_name_map: &mut ToolNameMap,
+    encrypted_content_scope: Option<&EncryptedContentScope>,
 ) -> Result<Vec<Value>, GatewayError> {
     let mut messages = Vec::new();
     for (item_index, item) in input.iter().enumerate() {
@@ -21,7 +23,22 @@ pub(super) fn build_anthropic_messages(
                 let role = anthropic_role(item.role.as_deref(), &item.item_type);
                 let content = anthropic_content_blocks(item);
                 if !content.is_empty() {
-                    push_anthropic_message(&mut messages, role, content, MergeMode::None);
+                    let merge_mode = if role == "assistant" {
+                        MergeMode::AssistantContent
+                    } else {
+                        MergeMode::None
+                    };
+                    push_anthropic_message(&mut messages, role, content, merge_mode);
+                }
+            }
+            ItemType::Reasoning => {
+                if let Some(block) = anthropic_reasoning_block(item, encrypted_content_scope) {
+                    push_anthropic_message(
+                        &mut messages,
+                        "assistant",
+                        vec![block],
+                        MergeMode::AssistantContent,
+                    );
                 }
             }
             ItemType::FunctionCallOutput
@@ -135,12 +152,42 @@ fn should_merge_with_last_message(messages: &[Value], role: &str, merge_mode: Me
     match merge_mode {
         MergeMode::None => false,
         MergeMode::AssistantContent => role == "assistant",
-        MergeMode::ToolUse => content
-            .iter()
-            .all(|block| block.get("type").and_then(Value::as_str) == Some("tool_use")),
+        MergeMode::ToolUse => role == "assistant",
         MergeMode::ToolResult => content
             .iter()
             .all(|block| block.get("type").and_then(Value::as_str) == Some("tool_result")),
+    }
+}
+
+fn anthropic_reasoning_block(
+    item: &ResponseItem,
+    encrypted_content_scope: Option<&EncryptedContentScope>,
+) -> Option<Value> {
+    let scope = encrypted_content_scope?;
+    let encrypted_content = item.encrypted_content.as_deref()?;
+    let (kind, raw_content) = scope.decode_anthropic(encrypted_content)?;
+    if raw_content.is_empty() {
+        return None;
+    }
+
+    match kind {
+        AnthropicEncryptedContentKind::Thinking => {
+            let thinking = item
+                .summary
+                .as_deref()?
+                .iter()
+                .map(|part| part.text.as_str())
+                .collect::<String>();
+            Some(json!({
+                "type": "thinking",
+                "thinking": thinking,
+                "signature": raw_content,
+            }))
+        }
+        AnthropicEncryptedContentKind::RedactedThinking => Some(json!({
+            "type": "redacted_thinking",
+            "data": raw_content,
+        })),
     }
 }
 

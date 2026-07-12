@@ -15,11 +15,13 @@ use tracing::{debug, error};
 
 use crate::ai_gateway::config::ProviderConfig;
 use crate::ai_gateway::context::GatewayContext;
+use crate::ai_gateway::encrypted_content::{AnthropicEncryptedContentKind, EncryptedContentScope};
 use crate::ai_gateway::error::GatewayError;
-use crate::ai_gateway::model::{GatewayRequest, generate_response_id};
+use crate::ai_gateway::model::{GatewayRequest, ItemType, ResponseObject, generate_response_id};
 use crate::ai_gateway::request_log::{
     self, RequestLogContext, RequestLogUpdate, ResponsesSseLogStream, UpstreamSseCaptureStream,
 };
+use crate::ai_gateway::responses_compat::ResponsesCompatSseStream;
 use crate::ai_gateway::tool_names::ToolNameMap;
 
 use super::{
@@ -54,7 +56,7 @@ use options::{
     AnthropicAuthStyle, AnthropicHeaderStyle, AnthropicProviderOptions, AnthropicProviderProfile,
     AnthropicVersionHeader,
 };
-use request::build_anthropic_request;
+use request::build_anthropic_request_with_scope;
 use response::convert_anthropic_response;
 use stream::AnthropicSseToResponsesSse;
 use stream_events::unix_timestamp;
@@ -75,7 +77,9 @@ pub async fn handle(
     log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
     let options = AnthropicProviderOptions::from_provider(provider)?;
-    let (mut anthropic_body, tool_name_map) = build_anthropic_request(request, options.profile)?;
+    let encrypted_content_scope = EncryptedContentScope::for_provider(provider);
+    let (mut anthropic_body, tool_name_map) =
+        build_anthropic_request_with_scope(request, options.profile, &encrypted_content_scope)?;
     insert_metadata_user_id(&mut anthropic_body, ctx);
     let has_internal_web_search = has_web_search_client_tool(&anthropic_body);
     let url = options.messages_url(provider);
@@ -94,6 +98,7 @@ pub async fn handle(
             response_model,
             provider,
             &options,
+            encrypted_content_scope.clone(),
             log_context.clone(),
             anthropic_body.clone(),
             tool_name_map.clone(),
@@ -157,6 +162,7 @@ pub async fn handle(
             response_model,
             tool_name_map,
             options.profile,
+            encrypted_content_scope,
             log_context,
         )
         .await;
@@ -165,12 +171,13 @@ pub async fn handle(
     let anthropic_resp: Value = upstream_resp.json().await.map_err(|e| {
         GatewayError::upstream(StatusCode::BAD_GATEWAY, format!("parse upstream json: {e}"))
     })?;
-    let response_obj = convert_anthropic_response(
+    let mut response_obj = convert_anthropic_response(
         &anthropic_resp,
         response_model,
         &tool_name_map,
         options.profile,
     );
+    scope_anthropic_response(&mut response_obj, &encrypted_content_scope);
     let body_bytes = serde_json::to_vec(&response_obj).unwrap_or_default();
 
     if let Some(log_context) = &log_context {
@@ -207,6 +214,7 @@ async fn handle_with_internal_web_search(
     response_model: &str,
     provider: &ProviderConfig,
     options: &AnthropicProviderOptions,
+    encrypted_content_scope: EncryptedContentScope,
     log_context: Option<RequestLogContext>,
     mut anthropic_body: Value,
     tool_name_map: ToolNameMap,
@@ -219,6 +227,7 @@ async fn handle_with_internal_web_search(
             response_model,
             provider,
             options,
+            encrypted_content_scope,
             log_context,
             anthropic_body,
             tool_name_map,
@@ -240,12 +249,13 @@ async fn handle_with_internal_web_search(
         .await?;
         let tool_uses = find_web_search_tool_uses(&step_resp);
         if tool_uses.is_empty() {
-            let response_obj = convert_anthropic_response(
+            let mut response_obj = convert_anthropic_response(
                 &step_resp,
                 response_model,
                 &tool_name_map,
                 options.profile,
             );
+            scope_anthropic_response(&mut response_obj, &encrypted_content_scope);
             return Ok(Some(response_from_response_object(
                 response_obj,
                 request.stream,
@@ -281,6 +291,7 @@ fn stream_internal_web_search_response(
     response_model: &str,
     provider: &ProviderConfig,
     options: &AnthropicProviderOptions,
+    encrypted_content_scope: EncryptedContentScope,
     log_context: Option<RequestLogContext>,
     anthropic_body: Value,
     tool_name_map: ToolNameMap,
@@ -318,13 +329,17 @@ fn stream_internal_web_search_response(
     let sse_stream = futures_stream::unfold(rx, |mut rx| async move {
         rx.recv().await.map(|item| (item, rx))
     });
+    let scoped_stream = ResponsesCompatSseStream::with_encrypted_content_scope(
+        Box::pin(sse_stream),
+        encrypted_content_scope,
+    );
     let body = if let Some(log_context) = log_context {
         Body::from_stream(ResponsesSseLogStream::new(
-            Box::pin(sse_stream),
+            Box::pin(scoped_stream),
             log_context,
         ))
     } else {
-        Body::from_stream(sse_stream)
+        Body::from_stream(scoped_stream)
     };
 
     let mut headers = HeaderMap::new();
@@ -1512,6 +1527,7 @@ async fn handle_stream(
     model: &str,
     tool_name_map: ToolNameMap,
     profile: AnthropicProviderProfile,
+    encrypted_content_scope: EncryptedContentScope,
     log_context: Option<RequestLogContext>,
 ) -> Result<Response<Body>, GatewayError> {
     let upstream_bytes = resp.bytes_stream();
@@ -1523,7 +1539,11 @@ async fn handle_stream(
             tool_name_map,
             profile,
         );
-        Body::from_stream(ResponsesSseLogStream::new(sse_stream, log_context))
+        let scoped_stream = ResponsesCompatSseStream::with_encrypted_content_scope(
+            sse_stream,
+            encrypted_content_scope,
+        );
+        Body::from_stream(ResponsesSseLogStream::new(scoped_stream, log_context))
     } else {
         let sse_stream = AnthropicSseToResponsesSse::new(
             upstream_bytes,
@@ -1531,7 +1551,11 @@ async fn handle_stream(
             tool_name_map,
             profile,
         );
-        Body::from_stream(sse_stream)
+        let scoped_stream = ResponsesCompatSseStream::with_encrypted_content_scope(
+            sse_stream,
+            encrypted_content_scope,
+        );
+        Body::from_stream(scoped_stream)
     };
 
     let mut headers = HeaderMap::new();
@@ -1552,4 +1576,27 @@ async fn handle_stream(
     *response.status_mut() = StatusCode::OK;
     *response.headers_mut() = headers;
     Ok(response)
+}
+
+fn scope_anthropic_response(
+    response_obj: &mut ResponseObject,
+    encrypted_content_scope: &EncryptedContentScope,
+) {
+    for item in &mut response_obj.output {
+        if item.item_type != ItemType::Reasoning {
+            continue;
+        }
+        let Some(encrypted_content) = item.encrypted_content.as_mut() else {
+            continue;
+        };
+        if encrypted_content.is_empty() {
+            continue;
+        }
+        let kind = if item.summary.is_some() {
+            AnthropicEncryptedContentKind::Thinking
+        } else {
+            AnthropicEncryptedContentKind::RedactedThinking
+        };
+        *encrypted_content = encrypted_content_scope.encode_anthropic(kind, encrypted_content);
+    }
 }
