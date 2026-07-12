@@ -105,7 +105,7 @@ pub fn clear_logs() -> anyhow::Result<usize> {
     if let Ok(entries) = std::fs::read_dir(&log_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if !path.is_file() || !is_chain_log_path(&path) {
+            if !path.is_file() || !is_codexhub_log_path(&path) {
                 continue;
             }
             if std::fs::remove_file(&path).is_ok() {
