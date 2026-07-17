@@ -17,7 +17,6 @@ pub struct AppConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
     #[serde(default)]
-    pub codex_app_fast_startup: bool,
     pub state_path: PathBuf,
     pub logging: LoggingConfig,
     pub feishu: FeishuConfig,
@@ -118,7 +117,6 @@ impl Default for AppConfig {
             outbound_proxy: OutboundProxyConfig::default(),
             language: None,
             theme: None,
-            codex_app_fast_startup: false,
             state_path: PathBuf::from("codexhub-state.json"),
             logging: LoggingConfig::default(),
             feishu: FeishuConfig::default(),
@@ -605,6 +603,14 @@ mod tests {
         let config: AppConfig = toml::from_str("bind = '127.0.0.1:3847'").unwrap();
         assert_eq!(config.outbound_proxy.mode, OutboundProxyMode::System);
         assert!(config.outbound_proxy.url.is_empty());
+    }
+
+    #[test]
+    fn legacy_fast_startup_setting_is_ignored_and_not_written_back() {
+        let config: AppConfig =
+            toml::from_str("bind = '127.0.0.1:3847'\ncodexAppFastStartup = true\n").unwrap();
+        let serialized = toml::to_string(&config).unwrap();
+        assert!(!serialized.contains("codexAppFastStartup"));
     }
 
     #[test]

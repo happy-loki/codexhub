@@ -7,6 +7,7 @@ mod chain_log;
 mod cli;
 mod codex;
 mod codex_app_config;
+mod codex_app_enhanced;
 mod codex_session_history;
 mod config;
 mod daemon_process;
@@ -91,7 +92,6 @@ async fn main() -> anyhow::Result<()> {
                     activate_provider: true,
                     image_generation_enabled: None,
                     provider_supports_websockets: None,
-                    fast_startup_enabled: config.codex_app_fast_startup,
                 },
             )?;
             println!("Codex App configured:");
@@ -185,18 +185,15 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
         .await;
     {
         let config = state.config.lock().await;
-        let gui_api_base = codex_app_config::configure_gui_environment(
-            &config.remote_control_base_url(),
-            config.codex_app_fast_startup,
-        );
+        let backend_url = config.remote_control_base_url();
+        let gui_api_base = codex_app_config::configure_gui_environment(&backend_url, true);
         let proxy_cleanup = codex_app_config::cleanup_legacy_app_server_proxy_environment();
         state
             .push_event(
                 "info",
-                "codex_app_fast_startup_environment_checked",
+                "codex_app_direct_api_environment_checked",
                 format!(
-                    "enabled={} configured={} value={} error={}",
-                    config.codex_app_fast_startup,
+                    "configured={} value={} error={}",
                     gui_api_base.configured,
                     gui_api_base.value.as_deref().unwrap_or_default(),
                     gui_api_base.error.as_deref().unwrap_or_default()
@@ -218,7 +215,6 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             )
             .await;
     }
-    let codex_app_dev_api_rx = state.codex_app_fast_startup_tx.subscribe();
     tokio::spawn(run_daemon_startup_tasks(state.clone()));
     let app = web::router(state).layer(TraceLayer::new_for_http());
     let addr: SocketAddr = bind
@@ -249,13 +245,6 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             }
         }
     }
-    companion_tasks.push(tokio::spawn(run_codex_app_dev_api_manager(
-        codex_app_dev_api_loopback_addrs(addr),
-        app.clone(),
-        codex_app_dev_api_rx,
-        server_shutdown_rx.clone(),
-    )));
-
     let shutdown_task_tx = server_shutdown_tx.clone();
     tokio::spawn(async move {
         let _ = shutdown_rx.await;
@@ -332,104 +321,6 @@ async fn serve_http(
         })
         .await?;
     Ok(())
-}
-
-async fn run_codex_app_dev_api_manager(
-    addrs: Vec<SocketAddr>,
-    app: Router,
-    mut enabled_rx: watch::Receiver<bool>,
-    mut server_shutdown_rx: watch::Receiver<bool>,
-) -> Result<()> {
-    let mut listener_shutdown: Option<watch::Sender<bool>> = None;
-    let mut listener_tasks: Vec<tokio::task::JoinHandle<Result<()>>> = Vec::new();
-
-    loop {
-        if *server_shutdown_rx.borrow() {
-            break;
-        }
-
-        let enabled = *enabled_rx.borrow();
-        if enabled && listener_shutdown.is_none() {
-            let (tx, rx) = watch::channel(false);
-            for addr in &addrs {
-                match TcpListener::bind(addr).await {
-                    Ok(listener) => {
-                        println!("codexhub Codex App dev API: http://{addr}");
-                        listener_tasks.push(tokio::spawn(serve_http(
-                            listener,
-                            app.clone(),
-                            rx.clone(),
-                        )));
-                    }
-                    Err(err) => {
-                        tracing::warn!(
-                            target: "codexhub::server",
-                            addr = %addr,
-                            error = %err,
-                            "Codex App fast startup listener unavailable"
-                        );
-                    }
-                }
-            }
-            listener_shutdown = Some(tx);
-            if listener_tasks.is_empty() {
-                tracing::warn!(
-                    target: "codexhub::server",
-                    "Codex App fast startup is enabled but no localhost:8000 listener was started"
-                );
-            }
-        } else if !enabled && listener_shutdown.is_some() {
-            if let Some(tx) = listener_shutdown.take() {
-                let _ = tx.send(true);
-            }
-            drain_listener_tasks(&mut listener_tasks).await;
-            tracing::info!(
-                target: "codexhub::server",
-                "Codex App fast startup listener stopped"
-            );
-        }
-
-        tokio::select! {
-            changed = enabled_rx.changed() => {
-                if changed.is_err() {
-                    break;
-                }
-            }
-            changed = server_shutdown_rx.changed() => {
-                if changed.is_err() || *server_shutdown_rx.borrow() {
-                    break;
-                }
-            }
-        }
-    }
-
-    if let Some(tx) = listener_shutdown {
-        let _ = tx.send(true);
-    }
-    drain_listener_tasks(&mut listener_tasks).await;
-    Ok(())
-}
-
-async fn drain_listener_tasks(tasks: &mut Vec<tokio::task::JoinHandle<Result<()>>>) {
-    for task in tasks.drain(..) {
-        match task.await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                tracing::warn!(
-                    target: "codexhub::server",
-                    error = %err,
-                    "Codex App fast startup listener stopped with error"
-                );
-            }
-            Err(err) => {
-                tracing::warn!(
-                    target: "codexhub::server",
-                    error = %err,
-                    "Codex App fast startup listener task failed"
-                );
-            }
-        }
-    }
 }
 
 async fn run_daemon_startup_tasks(state: crate::app_state::SharedState) {
@@ -562,18 +453,6 @@ fn adjacent_config_from_current_exe() -> Option<PathBuf> {
                 .map(config_directory_is_writable)
                 .unwrap_or(false)
         })
-}
-
-fn codex_app_dev_api_loopback_addrs(primary_addr: SocketAddr) -> Vec<SocketAddr> {
-    const CODEX_APP_DEV_API_PORT: u16 = 8000;
-    if primary_addr.port() == CODEX_APP_DEV_API_PORT {
-        return Vec::new();
-    }
-
-    vec![
-        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), CODEX_APP_DEV_API_PORT),
-        SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), CODEX_APP_DEV_API_PORT),
-    ]
 }
 
 /// Returns true when a config file can be created/replaced inside `dir`.

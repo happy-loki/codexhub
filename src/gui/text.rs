@@ -632,10 +632,10 @@ impl GuiText {
     pub(super) fn codex_visible_models_scope_warning(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "重要：当前版本的模型列表仅影响 Codex CLI 中的模型显示；Codex App 的模型显示仍在研究中。"
+                "重要：普通方式启动 Codex App 时，模型列表仍只影响 CLI；请使用上方“增强模式启动 Codex App”同步前端模型列表。"
             }
             GuiLocale::EnUs => {
-                "Important: In this version, the model list only affects model visibility in Codex CLI. Codex App model visibility is still under investigation."
+                "Important: With a normally launched Codex App, this list still only affects the CLI. Use Enhanced Launch above to sync the App model picker."
             }
         }
     }
@@ -868,6 +868,86 @@ impl GuiText {
         }
     }
 
+    pub(super) fn codex_enhanced_launch(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "增强模式启动 Codex App",
+            GuiLocale::EnUs => "Enhanced Launch Codex App",
+        }
+    }
+
+    pub(super) fn codex_enhanced_launching(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "正在启动增强模式...",
+            GuiLocale::EnUs => "Starting enhanced mode...",
+        }
+    }
+
+    pub(super) fn codex_enhanced_launch_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "以增强模式启动 Codex App，并同步 CodexHub 模型列表。Codex App 正在运行时，需要先完全退出。"
+            }
+            GuiLocale::EnUs => {
+                "Launch Codex App in enhanced mode and sync the CodexHub model list. Exit Codex App first if it is already running."
+            }
+        }
+    }
+
+    pub(super) fn codex_enhanced_launch_ready(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "Codex App 已进入增强模式，前端模型列表已同步。",
+            GuiLocale::EnUs => {
+                "Codex App is running in enhanced mode and its model picker is synchronized."
+            }
+        }
+    }
+
+    pub(super) fn codex_enhanced_launch_close_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请先关闭 Codex App",
+            GuiLocale::EnUs => "Exit Codex App First",
+        }
+    }
+
+    pub(super) fn codex_enhanced_launch_waiting_for_close(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "正在等待 Codex App 退出...",
+            GuiLocale::EnUs => "Waiting for Codex App to exit...",
+        }
+    }
+
+    pub(super) fn codex_enhanced_launch_confirm(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "启动增强模式",
+            GuiLocale::EnUs => "Launch Enhanced Mode",
+        }
+    }
+
+    pub(super) fn codex_enhanced_launch_close_running(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "检测到 Codex App 正在运行。请完全退出 Codex App，退出后即可启动增强模式。"
+            }
+            GuiLocale::EnUs => {
+                "Codex App is running. Exit it completely before launching enhanced mode."
+            }
+        }
+    }
+
+    pub(super) fn codex_enhanced_launch_ready_to_start(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "未检测到 Codex App 进程，可以使用增强模式启动。",
+            GuiLocale::EnUs => "Codex App is not running. Enhanced launch is ready.",
+        }
+    }
+
+    pub(super) fn codex_enhanced_launch_check_failed(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "暂时无法检测 Codex App 状态，请稍后重试。",
+            GuiLocale::EnUs => "Could not check Codex App status. Please try again.",
+        }
+    }
+
     pub(super) fn provider_websocket(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "启用 WebSocket",
@@ -900,42 +980,6 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "让 Codex 使用本地服务",
             GuiLocale::EnUs => "Use the local service from Codex",
-        }
-    }
-
-    pub(super) fn codex_fast_startup(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "快速启动",
-            GuiLocale::EnUs => "Fast startup",
-        }
-    }
-
-    pub(super) fn codex_fast_startup_help(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => {
-                "启用后 CodexHub 会监听 localhost:8000，加快无 VPN 环境下 Codex App 启动。"
-            }
-            GuiLocale::EnUs => {
-                "When enabled, CodexHub listens on localhost:8000 to speed up Codex App startup without a VPN."
-            }
-        }
-    }
-
-    pub(super) fn codex_fast_startup_confirm_title(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "快速启动会占用 8000 端口",
-            GuiLocale::EnUs => "Fast Startup Uses Port 8000",
-        }
-    }
-
-    pub(super) fn codex_fast_startup_confirm_message(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => {
-                "启用后 CodexHub 会立即尝试占用 localhost:8000，用于加快无 VPN 环境下 Codex App 启动。\n\n如果你正在用 localhost:8000 运行开发服务，请不要启用。取消勾选后会立即停止这个辅助监听，不影响主服务。"
-            }
-            GuiLocale::EnUs => {
-                "CodexHub will immediately try to use localhost:8000 to speed up Codex App startup without a VPN.\n\nDo not enable this if you use localhost:8000 for development. Unchecking it stops this helper listener immediately without affecting the main service."
-            }
         }
     }
 

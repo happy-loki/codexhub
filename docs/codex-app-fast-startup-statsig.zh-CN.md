@@ -1,5 +1,9 @@
 # Codex App 快速启动与 Statsig 兼容说明
 
+> 状态：`localhost:8000` 快速启动方案已于 2026-07-16 废弃。本文后续内容仅保留为历史协议记录。
+>
+> 当前 CodexHub 默认设置 `CODEX_API_BASE_URL=http://127.0.0.1:3847/api`，在 3847 主服务上复用旧 dev API 的轻量协议语义，不再提供 8000 listener，也不再显示快速启动开关。需要同步 Codex App 前端模型列表时，用户从 Codex 接入页主动选择“增强模式启动 Codex App”。
+
 日期: 2026-07-02
 
 这份文档记录 CodexHub 开启 Codex App 快速启动时的后端切换原理、Statsig feature gate 的构造规则，以及 Codex App 升级后如何快速复查。
@@ -285,5 +289,5 @@ layer_configs
 1. Statsig 只补必要 gate，不做全量 true。
 2. 路由只补 CodexHub 实际需要的 contract。
 3. 不用 API key auth 规避问题，因为 API key 模式不支持 CodexHub 需要的 remote-control。
-4. 快速启动保持可关闭，用户不启用时回到官方 backend。
+4. 历史版本曾允许关闭快速启动并回到官方 backend；当前版本已改为默认直连 CodexHub 3847 backend API，不再提供开关。
 5. 每次 Codex App 更新后先扫描再改，不根据旧 ID 盲目迁移。

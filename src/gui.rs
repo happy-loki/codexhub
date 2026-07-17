@@ -4802,9 +4802,6 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         codex_tab::refresh_configured(&handles.codex_tab, false);
     }
     codex_tab::refresh_local_connection_mode(&handles.codex_tab, snapshot.local_connection_mode);
-    if let Some(status) = &snapshot.status {
-        codex_tab::refresh_fast_startup(&handles.codex_tab, status.codex_app_fast_startup);
-    }
     if let Some(gw) = &snapshot.ai_gateway {
         refresh_ai_gw_filter_image_generation(handles, gw.filter_image_generation_tool);
         refresh_ai_gw_enable_logging(

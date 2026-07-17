@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
@@ -250,6 +250,24 @@ pub fn router() -> Router<SharedState> {
             "/api/codex/remote/control/client",
             get(clients::client_websocket),
         )
+        .route(
+            "/api/wham/remote/control/server/enroll",
+            post(enrollment::enroll),
+        )
+        .route(
+            "/api/wham/remote/control/server/refresh",
+            post(enrollment::refresh),
+        )
+        .route(
+            "/api/remote/control/server/enroll",
+            post(enrollment::enroll),
+        )
+        .route(
+            "/api/remote/control/server/refresh",
+            post(enrollment::refresh),
+        )
+        .route("/api/wham/remote/control/server", get(websocket::websocket))
+        .route("/api/remote/control/server", get(websocket::websocket))
         .route(
             "/backend-api/wham/accounts/check",
             get(compatibility::accounts_check),

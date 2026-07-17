@@ -35,6 +35,16 @@ const LOCAL_BUNDLED_REMOTE_ID_PREFIX: &str = "local~openai-bundled~";
 
 pub fn router() -> Router<SharedState> {
     Router::new()
+        .route("/api/ps/plugins/list", get(list_plugins))
+        .route("/api/ps/plugins/installed", get(installed_plugins))
+        .route("/api/ps/plugins/suggested", get(suggested_plugins))
+        .route("/api/ps/plugins/{plugin_id}/install", post(install_plugin))
+        .route(
+            "/api/ps/plugins/{plugin_id}/skills/{skill_name}",
+            get(plugin_skill_detail),
+        )
+        .route("/api/ps/plugins/{plugin_id}", get(plugin_detail))
+        .route("/api/plugins/featured", get(featured_plugins))
         .route("/backend-api/ps/plugins/list", get(list_plugins))
         .route("/backend-api/ps/plugins/installed", get(installed_plugins))
         .route("/backend-api/ps/plugins/suggested", get(suggested_plugins))

@@ -752,7 +752,7 @@ cargo test --features gui
 2. 确认 `~/.codex/auth.json` 是 `chatgptAuthTokens`。
 3. 确认 `~/.codex/config.toml` 有 `chatgpt_base_url`、`ai-gateway`，且没有旧版 CodexHub 写入的 `marketplaces.openai-bundled`。
 4. 如果本机存在 `~/.codex/.tmp/plugins/.agents/plugins/marketplace.json`，确认 `config.toml` 有 `marketplaces.openai-curated`。
-5. 确认 `config.toml` 没有 `apps = false`、`plugins = false` 等阻断项。
+5. （历史验证项，当前已废弃）当时要求 `config.toml` 没有 `apps = false`、`plugins = false` 等阻断项。当前策略会主动写入 `apps = false`，只继续禁止 `plugins = false` 等本地插件阻断项；详见文末 2026-07-16 结论。
 6. 重启 Codex App，确认 remote-control 能连接 CodexHub。
 7. 在 Codex App 里确认 bundled plugins 不再出现重复项，且 cached curated 插件能显示。
 
@@ -779,4 +779,46 @@ cargo test --features gui
 5. `features.remote_plugin = false` 已验证不可取：它确实关闭了远端 catalog（chain log 不再出现 `/ps/plugins`），但会让「由 OpenAI 提供」标签页空转卡在「正在加载插件…」，且不修复 detail 展示。保持 `remote_plugin` 默认开启时，列表刷新快、computer-use 功能正常，仅详情页无法展示。因此**不把 `remote_plugin = false` 写入 `configure-codex-app`**。
 6. 持续出现的 `sa_server_request_failed net::ERR_CONNECTION_CLOSED`/401（`/wham/tasks/list`、`/wham/usage`、`/wham/accounts/check`）是 App 直连 `chatgpt.com` 后端的固有噪音，不经过 CodexHub，与插件详情无关。
 
-最终状态：保持当前配置（`chatgptAuthTokens` auth、`remote_plugin` 默认开启、bundled 走 Codex App 本地 marketplace、CodexHub 仅保留 `openai-curated` 最小 fallback 与 bundled 旧 ID 只读 detail 兼容）。`computer-use` 详情页展示问题归类为 Codex App 前端行为，接受现状，不再继续改 CodexHub 接口。
+2026-06-29 当时的最终状态：保持 `chatgptAuthTokens` auth、`remote_plugin` 默认开启、bundled 走 Codex App 本地 marketplace，CodexHub 仅保留 `openai-curated` 最小 fallback 与 bundled 旧 ID 只读 detail 兼容。`computer-use` 详情页展示问题归类为 Codex App 前端行为，接受现状，不再继续改 CodexHub 接口。Provider 后续已切换为 Actor Authorization 方案，当前界面结论以紧随其后的 2026-07-16 小节为准。
+
+## 2026-07-16 `requires_openai_auth=false` 下的市场可见性
+
+本节是 Provider 切换到 Actor Authorization 方案后的新结论，优先级高于前文 2026-06-29 基于 `requires_openai_auth=true` 的界面判断。前面的接口兼容和 bundled 插件结论仍有效，但“cached curated 插件一定会显示”的假设已经不成立。
+
+当前默认 Provider 为：
+
+```toml
+[model_providers.ai-gateway]
+name = "ai-gateway"
+requires_openai_auth = false
+http_headers = { x-openai-actor-authorization = "codexhub-local" }
+```
+
+该配置用于同时获得原生 `web.run` 和本地压缩。Codex app-server 会因此向 renderer 报告 `authMethod=null`、`requiresAuth=false`，不会因为 `auth.json` 中仍有 `chatgptAuthTokens` 而报告 ChatGPT 登录态。
+
+Codex App `26.707.91948` renderer 的插件过滤函数只把以下 Auth Method 视为可显示 OpenAI curated marketplace：
+
+```text
+chatgpt
+apikey
+amazonBedrock
+```
+
+其他值（包括 `null`）会过滤：
+
+```text
+openai-curated
+openai-curated-remote
+```
+
+实机验证结果：
+
+1. `plugins`、`remote_plugin` 和远端插件 Statsig gate 都处于开启状态；
+2. 左侧插件入口存在，`openai-bundled` 与 `openai-primary-runtime` 的 10 个本地插件可见；
+3. `~/.codex/.tmp/plugins/.agents/plugins/marketplace.json` 中仍有 25 个经过过滤的本地兼容插件；
+4. React Query 把对应请求标记为 `openai-curated-marketplaces-hidden`，因此这 25 个插件没有进入页面；
+5. CodexHub 仍收到 `/backend-api/ps/plugins/list`，不是接口 404、目录丢失或 `remote_plugin` gate 关闭。
+
+`features.apps=false` 是另一项独立策略。它只关闭需要官方 ChatGPT `codex_apps` MCP 后端的 Apps/Connectors；Computer Use、Chrome、primary runtime plugin 和普通 skill 不依赖这个开关。CodexHub 未实现官方 Apps streamable HTTP 后端前，不应仅为恢复图标而开启它。
+
+后续修复候选是把已确认可本地运行的过滤目录迁移为 `codexhub-curated`，避免 renderer 针对 OpenAI marketplace 名称的账号态过滤。实现前必须一并设计旧 `<plugin>@openai-curated` 状态迁移、featured id、安装/卸载和更新重建流程。当前只记录方案，不修改目录身份。

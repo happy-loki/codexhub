@@ -2,7 +2,7 @@
 
 日期：2026-07-15
 
-状态：暂缓实现，等待 Codex 后续版本放宽条件或提供正式配置入口。
+状态：方案 1 的 Codex App 模型显示已通过可选增强启动解决；普通启动模型显示和账号态相关市场仍有边界。
 
 本文记录 CodexHub 接入 Codex App 时，自定义模型显示、原生 `web.run` 和本地压缩之间的条件冲突。该结论基于 `references/codex-main` 最新源码和 Codex App `26.707.9981` 的实际 renderer bundle 分析。
 
@@ -20,10 +20,10 @@
 
 | 方案 | Provider 配置 | 已解决 | 待解决 |
 | --- | --- | --- | --- |
-| 方案 1 | `ai-gateway + requires_openai_auth=false + Actor Authorization` | `web.run`、本地压缩 | Codex App 前端模型显示 |
+| 方案 1 | `ai-gateway + requires_openai_auth=false + Actor Authorization` | `web.run`、本地压缩、增强模式下的 Codex App 模型显示 | 普通启动下的模型显示；账号态相关的 curated 市场 |
 | 方案 2 | `ai-gateway + requires_openai_auth=true` | 模型显示、账号态、本地压缩 | `web.run` 注册 |
 
-当前不再继续扩大兼容层。后续等待 Codex 新版本，再重新检查源码条件。
+CodexHub 不修改 ASAR，也不接管默认官方入口。需要完整模型列表时，用户从 CodexHub 主动使用增强模式启动。
 
 ## 2. 方案 1：Actor Authorization
 
@@ -93,6 +93,65 @@ CodexHub /models
   -> Remote Control 可见
   -> Codex App renderer 再次过滤
 ```
+
+### 2.3 可选增强启动
+
+CodexHub 可以用 loopback-only CDP 启动 Codex App，在 renderer 第一帧增量合并 Statsig `107580212` 和关键 gate。该模式已实机验证完整显示 DeepSeek、Grok、GLM、Opus 和 Sonnet，同时保留官方 primary runtime 和插件配置。
+
+增强模式不修改 ASAR、LevelDB 或快捷方式，只影响本次由 CodexHub 启动的 Codex App。VS Code 插件和用户从官方入口普通启动的 Codex App 不受影响。
+
+### 2.4 插件市场与账号态副作用
+
+`requires_openai_auth=false` 不只影响模型白名单。Codex app-server 会基于当前 Provider 明确返回等价状态：`account/read` 中 `account=null`、`requiresOpenaiAuth=false`，`getAuthStatus` 中 `authMethod=null`、`requiresOpenaiAuth=false`。
+
+```json
+{
+  "account": null,
+  "authMethod": null,
+  "requiresOpenaiAuth": false
+}
+```
+
+这个结果由当前 Provider 决定。即使 `~/.codex/auth.json` 仍保存 `chatgptAuthTokens`，renderer 看到的 `authMethod` 依然是 `null`。
+
+Codex App `26.707.91948` 的插件 renderer 还有一层独立过滤：当 `authMethod` 不是 `chatgpt`、`apikey` 或 `amazonBedrock` 时，会从 `plugin/list` 结果中移除以下两个 marketplace：
+
+```text
+openai-curated
+openai-curated-remote
+```
+
+2026-07-16 实机读取 renderer 的 React 查询缓存确认：
+
+1. `plugins=true`、`remote_plugin=true`，Statsig gate `4218407052=true`；
+2. 左侧“插件”入口仍存在；
+3. `openai-bundled` 和 `openai-primary-runtime` 共 10 个本地插件正常显示，包括 Computer Use、Chrome、Documents、PDF、Spreadsheets、Presentations、LaTeX 和 Visualize；
+4. 本地 `openai-curated` manifest 仍有 25 个经过 CodexHub 过滤、理论上可本地使用的插件，但查询键被标记为 `openai-curated-marketplaces-hidden`，renderer 不渲染它们；
+5. `/backend-api/ps/plugins/list` 仍被请求，因此问题不是 CodexHub 路由中断，也不是增强模式漏补 Statsig gate。
+
+增强模式目前只修补模型 dynamic config 和已经确认的功能 gate，不修改 React Auth Context。它解决模型显示，但不会把 `authMethod=null` 伪造成 ChatGPT 登录态。
+
+### 2.5 Apps/Connectors 是另一条链路
+
+CodexHub 当前还会写入：
+
+```toml
+[features]
+apps = false
+```
+
+该开关关闭的是 `codex_apps` MCP 以及依赖 ChatGPT 官方后端的 Apps/Connectors，例如 Gmail、Google Drive 等；它不关闭本地 plugin、skill、Computer Use 或 Chrome。CodexHub 尚未实现官方 `.../backend-api/wham/apps` streamable HTTP 后端，因此不能为了恢复入口而直接改成 `apps=true`，否则只会展示无法工作的功能并产生 MCP 启动错误。
+
+### 2.6 后续可选修复
+
+若要在方案 1 下恢复本地可用的 curated 插件，优先评估以下窄范围方案：
+
+1. 将 CodexHub 已过滤过的本地目录改用 `codexhub-curated` marketplace 身份；
+2. 同步迁移 `<plugin>@openai-curated` 的安装/启用状态和 featured plugin id；
+3. 保持官方 Apps/Connectors 关闭，不把远端依赖伪装成本地可用；
+4. 验证插件安装、详情、卸载和 Codex 更新后 marketplace 重建流程。
+
+不采用 CDP 修改全局 `authMethod`。该值还控制账号区域、套餐、共享市场和其他 ChatGPT 行为，伪造后影响面远大于插件列表。也不把 `requires_openai_auth` 改回 `true` 作为局部修复，因为这会重新关闭 Actor Authorization 路径下的原生 `web.run`。
 
 ## 3. 方案 2：保留 OpenAI 账号要求
 
@@ -188,6 +247,8 @@ Codex App `26.707.9981` 的 renderer 模型过滤逻辑位于独立的 `model-li
 5. Codex App renderer
    - 是否仍用 Statsig `107580212` 二次过滤 `model/list`。
    - 是否开始直接信任 app-server 的模型目录。
+   - `authMethod=null` 时是否仍过滤 `openai-curated` / `openai-curated-remote`。
+   - 插件目录是否提供了与 OpenAI 账号态解耦的公开能力开关。
 
 满足下面任意一项，就值得重新启动适配：
 
@@ -195,6 +256,7 @@ Codex App `26.707.9981` 的 renderer 模型过滤逻辑位于独立的 `model-li
 2. Actor Authorization 可以与 `requires_openai_auth=true` 共存。
 3. Codex App renderer 不再用 pre-login Statsig 白名单过滤 app-server 模型。
 4. Codex App 提供正式的自定义模型目录配置或扩展接口。
+5. Codex App 允许无 OpenAI Auth Provider 使用本地 curated marketplace。
 
 ## 8. 维护原则
 
@@ -202,4 +264,4 @@ Codex App `26.707.9981` 的 renderer 模型过滤逻辑位于独立的 `model-li
 2. 不实现 Gateway Remote Compact V2 模拟。
 3. 不通过请求注入伪造 Codex 本地没有注册的工具。
 4. 不修改 Codex App 安装文件作为默认产品能力。
-5. 在官方条件没有变化前，接受两套方案各自保留一个待解决项。
+5. 普通启动接受官方白名单限制；需要完整模型列表时由用户主动选择增强模式。

@@ -90,7 +90,6 @@ pub struct ConfigureCodexAppOptions {
     #[allow(dead_code)]
     pub image_generation_enabled: Option<bool>,
     pub provider_supports_websockets: Option<bool>,
-    pub fast_startup_enabled: bool,
 }
 
 impl ConfigureCodexAppOptions {
@@ -300,7 +299,7 @@ pub fn configure_codex_app(options: ConfigureCodexAppOptions) -> Result<Configur
     #[cfg(not(test))]
     chain_log::write_line("[codex_app_config] event=gui_environment_configure_start");
     #[cfg(not(test))]
-    let _ = configure_gui_environment(&options.backend_url, options.fast_startup_enabled);
+    let _ = configure_gui_environment(&options.backend_url, true);
     #[cfg(not(test))]
     cleanup_app_server_proxy_environment().map_err(anyhow::Error::msg)?;
     #[cfg(not(test))]
@@ -365,7 +364,7 @@ pub fn inspect_codex_app_config(
 pub fn inspect_codex_app_config_for_mode(
     codex_home: Option<PathBuf>,
     backend_url: &str,
-    fast_startup_enabled: bool,
+    _legacy_mode: bool,
 ) -> CodexAppConfigStatus {
     let codex_home = codex_home.unwrap_or_else(default_codex_home);
     let config_path = codex_home.join("config.toml");
@@ -377,7 +376,7 @@ pub fn inspect_codex_app_config_for_mode(
     let provider_ok = inspect_managed_ai_gateway_provider(&config_path, backend_url);
     let connection_mode = inspect_connection_mode(&config_path, backend_url);
 
-    let gui_api_base = inspect_gui_api_base_url_for_mode(backend_url, fast_startup_enabled);
+    let gui_api_base = inspect_gui_api_base_url(backend_url);
     let gui_ok = gui_api_base.configured && gui_api_base.login_issuer_configured;
     let remote_control_switch = inspect_remote_control_switch_in_home(&codex_home);
     let remote_control_ok = remote_control_switch.configured;
@@ -878,18 +877,14 @@ fn read_remote_control_switch_db(path: &Path) -> Result<(Option<bool>, Option<i6
 }
 
 pub fn inspect_gui_api_base_url(backend_url: &str) -> CodexAppGuiApiBaseStatus {
-    inspect_gui_api_base_url_for_mode(backend_url, false)
+    inspect_gui_api_base_url_for_mode(backend_url, true)
 }
 
 pub fn inspect_gui_api_base_url_for_mode(
-    _backend_url: &str,
-    fast_startup_enabled: bool,
+    backend_url: &str,
+    _legacy_mode: bool,
 ) -> CodexAppGuiApiBaseStatus {
-    let expected = if fast_startup_enabled {
-        "localhost".to_string()
-    } else {
-        String::new()
-    };
+    let expected = codex_app_gui_api_base_url(backend_url);
     let login_issuer_expected = String::new();
     #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
@@ -899,7 +894,7 @@ pub fn inspect_gui_api_base_url_for_mode(
                 return CodexAppGuiApiBaseStatus {
                     supported: true,
                     configured: false,
-                    expected: String::new(),
+                    expected: expected.clone(),
                     value: None,
                     login_issuer_configured: false,
                     login_issuer_expected,
@@ -914,7 +909,7 @@ pub fn inspect_gui_api_base_url_for_mode(
                 return CodexAppGuiApiBaseStatus {
                     supported: true,
                     configured: false,
-                    expected,
+                    expected: expected.clone(),
                     value: api_base,
                     login_issuer_configured: false,
                     login_issuer_expected,
@@ -946,17 +941,14 @@ pub fn inspect_gui_api_base_url_for_mode(
                     .as_ref()
                     .map(|value| format!("{CODEX_API_BASE_URL_ENV}={value}"))
             });
+        let direct_expected = expected.as_str();
+        let direct_configured = api_base
+            .as_deref()
+            .map(str::trim_end)
+            .is_some_and(|value| value.eq_ignore_ascii_case(direct_expected));
         CodexAppGuiApiBaseStatus {
             supported: true,
-            configured: if fast_startup_enabled {
-                api_base.is_none()
-                    && api_endpoint
-                        .as_deref()
-                        .map(|value| value.eq_ignore_ascii_case(&expected))
-                        .unwrap_or(false)
-            } else {
-                api_base.is_none() && api_endpoint.is_none()
-            },
+            configured: direct_configured && api_endpoint.is_none(),
             expected,
             value,
             login_issuer_configured: login_issuer.is_none(),
@@ -983,51 +975,44 @@ pub fn inspect_gui_api_base_url_for_mode(
 
 pub fn configure_gui_environment(
     backend_url: &str,
-    fast_startup_enabled: bool,
+    _legacy_mode: bool,
 ) -> CodexAppGuiApiBaseStatus {
-    #[cfg(target_os = "windows")]
-    {
-        let legacy_proxy_cleanup_result = cleanup_legacy_global_proxy_bypass();
-        let configure_result = if fast_startup_enabled {
-            gui_unsetenv_many(&[CODEX_API_BASE_URL_ENV])
-                .and_then(|_| gui_setenv(CODEX_API_ENDPOINT_ENV, "localhost"))
-                .and_then(|_| gui_unsetenv_many(&[CODEX_APP_SERVER_LOGIN_ISSUER_ENV]))
-        } else {
-            gui_unsetenv_many(&[
-                CODEX_API_BASE_URL_ENV,
-                CODEX_API_ENDPOINT_ENV,
-                CODEX_APP_SERVER_LOGIN_ISSUER_ENV,
-            ])
-        };
-        let mut status = inspect_gui_api_base_url_for_mode(backend_url, fast_startup_enabled);
-        status.error = configure_result
-            .err()
-            .or_else(|| legacy_proxy_cleanup_result.err());
-        status
-    }
+    let configure_result = configure_gui_direct_api_base(backend_url);
+    let mut status = inspect_gui_api_base_url(backend_url);
+    status.error = configure_result.err();
+    status
+}
 
-    #[cfg(target_os = "macos")]
+pub fn configure_gui_direct_api_base(backend_url: &str) -> Result<(), String> {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     {
-        let legacy_proxy_cleanup_result = cleanup_legacy_global_proxy_bypass();
-        let api_result = if fast_startup_enabled {
-            gui_unsetenv(CODEX_API_BASE_URL_ENV)
-                .and_then(|_| gui_setenv(CODEX_API_ENDPOINT_ENV, "localhost"))
-        } else {
-            gui_unsetenv(CODEX_API_BASE_URL_ENV).and_then(|_| gui_unsetenv(CODEX_API_ENDPOINT_ENV))
-        };
-        let issuer_result = gui_unsetenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV);
-        let mut status = inspect_gui_api_base_url_for_mode(backend_url, fast_startup_enabled);
-        status.error = api_result
-            .err()
-            .or_else(|| issuer_result.err())
-            .or_else(|| legacy_proxy_cleanup_result.err());
-        status
+        let gui_api_base_url = codex_app_gui_api_base_url(backend_url);
+        cleanup_legacy_global_proxy_bypass()?;
+        gui_setenv(CODEX_API_BASE_URL_ENV, &gui_api_base_url)?;
+        gui_unsetenv(CODEX_API_ENDPOINT_ENV)?;
+        gui_unsetenv(CODEX_APP_SERVER_LOGIN_ISSUER_ENV)?;
+        Ok(())
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        inspect_gui_api_base_url_for_mode(backend_url, fast_startup_enabled)
+        let _ = backend_url;
+        Err("Codex App GUI environment is only supported on Windows and macOS".to_string())
     }
+}
+
+pub fn codex_app_gui_api_base_url(backend_url: &str) -> String {
+    if let Ok(mut url) = url::Url::parse(backend_url) {
+        url.set_path("/api");
+        url.set_query(None);
+        url.set_fragment(None);
+        return url.to_string().trim_end_matches('/').to_string();
+    }
+    backend_url
+        .trim_end_matches('/')
+        .strip_suffix("/backend-api")
+        .map(|base| format!("{base}/api"))
+        .unwrap_or_else(|| backend_url.trim_end_matches('/').to_string())
 }
 
 pub fn cleanup_gui_environment(backend_url: &str) -> CodexAppGuiApiBaseStatus {
@@ -3263,7 +3248,6 @@ mod tests {
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: Some(true),
-            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -3316,7 +3300,6 @@ mod tests {
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: None,
-            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -3434,7 +3417,6 @@ http_headers = { x-openai-actor-authorization = "codexhub-local" }
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: Some(false),
-            fast_startup_enabled: true,
         })
         .expect("configure");
 
@@ -3606,7 +3588,6 @@ command = "print-token"
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: None,
-            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -3658,7 +3639,6 @@ http_headers = { x-existing = "keep", X-OpenAI-Actor-Authorization = "codexhub-l
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: None,
-            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -3714,7 +3694,6 @@ name = "old-provider"
             activate_provider: true,
             image_generation_enabled: Some(true),
             provider_supports_websockets: None,
-            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -4092,7 +4071,6 @@ experimental_bearer_token = "existing-qwen-key"
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: None,
-            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -4140,7 +4118,6 @@ base_url = "https://old.example.invalid"
             activate_provider: false,
             image_generation_enabled: None,
             provider_supports_websockets: Some(false),
-            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -4245,7 +4222,6 @@ base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: None,
-            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -4303,7 +4279,6 @@ base_url = "https://dashscope.aliyuncs.com/compatible-mode/v1"
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: None,
-            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -4355,7 +4330,6 @@ requires_openai_auth = true
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: None,
-            fast_startup_enabled: true,
         })
         .expect("configure codex app");
 
@@ -4885,7 +4859,6 @@ base_url = "https://api.example.invalid"
             activate_provider: true,
             image_generation_enabled: None,
             provider_supports_websockets: None,
-            fast_startup_enabled: true,
         }
     }
 
@@ -5132,5 +5105,17 @@ base_url = "https://api.example.invalid"
         assert!(curated_catalog.is_file());
 
         let _ = std::fs::remove_dir_all(codex_home);
+    }
+
+    #[test]
+    fn codex_app_gui_base_uses_lightweight_api_path_on_same_origin() {
+        assert_eq!(
+            codex_app_gui_api_base_url("http://127.0.0.1:3847/backend-api"),
+            "http://127.0.0.1:3847/api"
+        );
+        assert_eq!(
+            codex_app_gui_api_base_url("http://localhost:3847/backend-api/"),
+            "http://localhost:3847/api"
+        );
     }
 }

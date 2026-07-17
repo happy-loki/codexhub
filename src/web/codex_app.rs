@@ -3,9 +3,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
+    ai_gateway::catalog::configured_models_response_with_etag,
     app_state::SharedState,
     codex_app_config::{self, ConfigureCodexAppOptions},
-    codex_session_history,
+    codex_app_enhanced, codex_session_history,
     config::LocalConnectionMode,
     remote_control_backend,
 };
@@ -22,7 +23,6 @@ pub(super) struct ConfigureCodexAppRequest {
     #[allow(dead_code)]
     image_generation_enabled: Option<bool>,
     supports_websockets: Option<bool>,
-    fast_startup: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -35,12 +35,6 @@ pub(super) struct DeleteCodexAppProviderRequest {
 #[serde(rename_all = "camelCase")]
 pub(super) struct SetCodexAppProviderWebSocketRequest {
     provider_name: String,
-    enabled: bool,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct SetCodexAppFastStartupRequest {
     enabled: bool,
 }
 
@@ -93,24 +87,10 @@ pub(super) async fn configure_codex_app(
         .and_then(|value| value.activate)
         .unwrap_or(true);
     let provider_supports_websockets = request.as_ref().and_then(|value| value.supports_websockets);
-    let fast_startup_enabled = request
-        .as_ref()
-        .and_then(|value| value.fast_startup)
-        .unwrap_or(config.codex_app_fast_startup);
     let connection_mode = request
         .as_ref()
         .and_then(|value| value.connection_mode)
         .unwrap_or(config.local_connection_mode);
-
-    if let Err(err) = apply_codex_app_fast_startup(&state, fast_startup_enabled).await {
-        state
-            .push_event("error", "config_save_failed", err.to_string())
-            .await;
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": err.to_string() })),
-        );
-    }
 
     let backend_url = config.remote_control_base_url();
     state
@@ -138,13 +118,9 @@ pub(super) async fn configure_codex_app(
         activate_provider,
         image_generation_enabled: None,
         provider_supports_websockets,
-        fast_startup_enabled,
     }) {
         Ok(report) => {
-            let gui_api_base = codex_app_config::inspect_gui_api_base_url_for_mode(
-                &backend_url,
-                fast_startup_enabled,
-            );
+            let gui_api_base = codex_app_config::inspect_gui_api_base_url(&backend_url);
             let remote_control_switch = report.remote_control_switch.clone();
             state
                 .push_event(
@@ -185,73 +161,6 @@ pub(super) async fn configure_codex_app(
     }
 }
 
-pub(super) async fn set_codex_app_fast_startup(
-    State(state): State<SharedState>,
-    Json(request): Json<SetCodexAppFastStartupRequest>,
-) -> impl IntoResponse {
-    let config = state.config.lock().await.clone();
-    let backend_url = config.remote_control_base_url();
-    let gui_api_base = codex_app_config::configure_gui_environment(&backend_url, request.enabled);
-    if !gui_api_base.configured
-        || !gui_api_base.login_issuer_configured
-        || gui_api_base.error.is_some()
-    {
-        state
-            .push_event(
-                "error",
-                "codex_app_fast_startup_set_failed",
-                gui_api_base
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "Codex App GUI environment was not configured".to_string()),
-            )
-            .await;
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({
-                "ok": false,
-                "error": gui_api_base
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "Codex App GUI environment was not configured".to_string()),
-                "guiApiBase": gui_api_base,
-            })),
-        );
-    }
-    if let Err(err) = apply_codex_app_fast_startup(&state, request.enabled).await {
-        state
-            .push_event(
-                "error",
-                "codex_app_fast_startup_set_failed",
-                err.to_string(),
-            )
-            .await;
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "ok": false, "error": err.to_string(), "guiApiBase": gui_api_base })),
-        );
-    }
-    state
-        .push_event(
-            "info",
-            "codex_app_fast_startup_set",
-            format!(
-                "enabled={} gui_api_base={}",
-                request.enabled,
-                gui_api_base.value.as_deref().unwrap_or_default()
-            ),
-        )
-        .await;
-    (
-        StatusCode::OK,
-        Json(json!({
-            "ok": true,
-            "enabled": request.enabled,
-            "guiApiBase": gui_api_base,
-        })),
-    )
-}
-
 pub(super) async fn set_codex_app_provider_websocket(
     State(state): State<SharedState>,
     Json(request): Json<SetCodexAppProviderWebSocketRequest>,
@@ -268,11 +177,8 @@ pub(super) async fn set_codex_app_provider_websocket(
     let backend_url = config.remote_control_base_url();
     match codex_app_config::set_codex_app_provider_websocket(None, provider_name, request.enabled) {
         Ok(config_path) => {
-            let status = codex_app_config::inspect_codex_app_config_for_mode(
-                None,
-                &backend_url,
-                config.codex_app_fast_startup,
-            );
+            let status =
+                codex_app_config::inspect_codex_app_config_for_mode(None, &backend_url, true);
             state
                 .push_event(
                     "info",
@@ -299,18 +205,6 @@ pub(super) async fn set_codex_app_provider_websocket(
     }
 }
 
-async fn apply_codex_app_fast_startup(state: &SharedState, enabled: bool) -> anyhow::Result<()> {
-    let mut config = state.config.lock().await;
-    if config.codex_app_fast_startup != enabled {
-        let mut next_config = config.clone();
-        next_config.codex_app_fast_startup = enabled;
-        next_config.save(&state.config_path)?;
-        *config = next_config;
-    }
-    let _ = state.codex_app_fast_startup_tx.send(enabled);
-    Ok(())
-}
-
 pub(super) async fn delete_codex_app_provider(
     State(state): State<SharedState>,
     Json(request): Json<DeleteCodexAppProviderRequest>,
@@ -319,11 +213,8 @@ pub(super) async fn delete_codex_app_provider(
     let backend_url = config.remote_control_base_url();
     match codex_app_config::delete_codex_app_provider(None, request.provider_name.trim()) {
         Ok(config_path) => {
-            let status = codex_app_config::inspect_codex_app_config_for_mode(
-                None,
-                &backend_url,
-                config.codex_app_fast_startup,
-            );
+            let status =
+                codex_app_config::inspect_codex_app_config_for_mode(None, &backend_url, true);
             state
                 .push_event(
                     "info",
@@ -440,6 +331,73 @@ pub(super) async fn refresh_codex_app_models(
     }
 }
 
+pub(super) async fn launch_codex_app_enhanced(
+    State(state): State<SharedState>,
+) -> impl IntoResponse {
+    let (models, backend_url) = {
+        let config = state.config.lock().await;
+        let (response, _) = configured_models_response_with_etag(&config.ai_gateway);
+        let models = response["models"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|model| model.get("slug").and_then(serde_json::Value::as_str))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        (models, config.remote_control_base_url())
+    };
+    state
+        .push_event(
+            "info",
+            "codex_app_enhanced_launch_start",
+            format!("models={}", models.len()),
+        )
+        .await;
+    match codex_app_enhanced::launch_and_inject(models, &backend_url).await {
+        Ok(report) => {
+            state
+                .push_event(
+                    "info",
+                    "codex_app_enhanced_launch_ready",
+                    format!(
+                        "launched={} port={} models={} gates={}",
+                        report.launched,
+                        report.port,
+                        report.available_models.len(),
+                        report.key_gates_enabled
+                    ),
+                )
+                .await;
+            (
+                StatusCode::OK,
+                Json(json!({ "ok": true, "report": report })),
+            )
+        }
+        Err(err) => {
+            state
+                .push_event("error", "codex_app_enhanced_launch_failed", err.to_string())
+                .await;
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "ok": false, "error": err.to_string() })),
+            )
+        }
+    }
+}
+
+pub(super) async fn codex_app_enhanced_preflight() -> impl IntoResponse {
+    match codex_app_enhanced::preflight().await {
+        Ok(status) => (
+            StatusCode::OK,
+            Json(json!({ "ok": true, "status": status })),
+        ),
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "ok": false, "error": err.to_string() })),
+        ),
+    }
+}
+
 pub(super) async fn codex_app_sessions(State(state): State<SharedState>) -> impl IntoResponse {
     const PAGE_LIMIT: u32 = 100;
     const MAX_PAGES: usize = 20;
@@ -524,11 +482,7 @@ pub(super) async fn repair_codex_app_gui_environment(
 ) -> impl IntoResponse {
     let config = state.config.lock().await.clone();
     let backend_url = config.remote_control_base_url();
-    let status = codex_app_config::inspect_codex_app_config_for_mode(
-        None,
-        &backend_url,
-        config.codex_app_fast_startup,
-    );
+    let status = codex_app_config::inspect_codex_app_config_for_mode(None, &backend_url, true);
     if !status.config_ok || !status.auth_ok {
         return (
             StatusCode::BAD_REQUEST,
@@ -557,8 +511,7 @@ pub(super) async fn repair_codex_app_gui_environment(
                 );
             }
         };
-    let gui_api_base =
-        codex_app_config::configure_gui_environment(&backend_url, config.codex_app_fast_startup);
+    let gui_api_base = codex_app_config::configure_gui_environment(&backend_url, true);
     state
         .push_event(
             "info",
@@ -597,6 +550,6 @@ pub(super) async fn codex_app_status_snapshot(
     codex_app_config::inspect_codex_app_config_for_mode(
         None,
         &config.remote_control_base_url(),
-        config.codex_app_fast_startup,
+        true,
     )
 }

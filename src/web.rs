@@ -60,12 +60,16 @@ pub fn router(state: SharedState) -> Router {
         )
         .route("/api/codex-app/status", get(codex_app::codex_app_status))
         .route(
-            "/api/codex-app/fast-startup",
-            post(codex_app::set_codex_app_fast_startup),
-        )
-        .route(
             "/api/codex-app/models/refresh",
             post(codex_app::refresh_codex_app_models),
+        )
+        .route(
+            "/api/codex-app/enhanced-launch",
+            post(codex_app::launch_codex_app_enhanced),
+        )
+        .route(
+            "/api/codex-app/enhanced-launch/preflight",
+            get(codex_app::codex_app_enhanced_preflight),
         )
         .route(
             "/api/codex-app/sessions",
@@ -167,7 +171,6 @@ struct StatusResponse {
     bind: String,
     local_connection_mode: crate::config::LocalConnectionMode,
     outbound_proxy_mode: crate::config::OutboundProxyMode,
-    codex_app_fast_startup: bool,
     state_path: String,
     feishu_ws: FeishuWsState,
     telegram: TelegramState,
@@ -207,7 +210,6 @@ async fn status_snapshot(state: &SharedState) -> StatusResponse {
         bind: config.bind.clone(),
         local_connection_mode: config.local_connection_mode,
         outbound_proxy_mode: config.outbound_proxy.mode,
-        codex_app_fast_startup: config.codex_app_fast_startup,
         state_path: config.state_path.to_string_lossy().to_string(),
         feishu_ws,
         telegram,

@@ -15,7 +15,7 @@ use crate::ai_gateway::catalog::visible_catalog_model_options;
 use crate::ai_gateway::config::AiGatewayConfig;
 use crate::config::LocalConnectionMode;
 
-use super::api::{ApiClient, ConfigureRequest, SetCodexAppFastStartupRequest};
+use super::api::{ApiClient, ConfigureRequest};
 use super::text::GuiText;
 use super::theme;
 use super::widgets::card_section;
@@ -30,7 +30,6 @@ type CodexModelsInitialized = Rc<Cell<bool>>;
 type CodexConfigured = Rc<Cell<bool>>;
 type CodexHubReady = Rc<Cell<bool>>;
 type CodexServiceEnabled = Rc<Cell<bool>>;
-type FastStartupSyncing = Rc<Cell<bool>>;
 
 #[derive(Clone)]
 pub(super) struct CodexTab {
@@ -39,7 +38,7 @@ pub(super) struct CodexTab {
     inject_button: Button,
     clear_button: Button,
     session_history_button: Button,
-    fast_startup_check: CheckBox,
+    enhanced_launch_button: Button,
     save_models_button: Button,
     model_checks: CodexModelChecks,
     model_slugs: CodexModelSlugs,
@@ -48,7 +47,6 @@ pub(super) struct CodexTab {
     remote_ready: CodexHubReady,
     service_enabled: CodexServiceEnabled,
     local_connection_mode: Rc<Cell<LocalConnectionMode>>,
-    fast_startup_syncing: FastStartupSyncing,
 }
 
 pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
@@ -70,13 +68,11 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         .build();
     inject_button.set_tooltip(text.inject_codex_access_help());
     inject_button.enable(false);
-    let fast_startup_check = CheckBox::builder(&local_config_box)
-        .with_label(text.codex_fast_startup())
-        .with_value(false)
+    let enhanced_launch_button = Button::builder(&local_config_box)
+        .with_label(text.codex_enhanced_launch())
         .build();
-    fast_startup_check.set_tooltip(text.codex_fast_startup_help());
-    fast_startup_check.set_foreground_color(theme::theme().ink_primary);
-    fast_startup_check.enable(false);
+    enhanced_launch_button.set_tooltip(text.codex_enhanced_launch_help());
+    enhanced_launch_button.enable(false);
     let clear_button = Button::builder(&local_config_box)
         .with_label(text.clear_codex_access())
         .build();
@@ -91,7 +87,7 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
     let local_config_actions = BoxSizer::builder(Orientation::Horizontal).build();
     local_config_actions.add_stretch_spacer(1);
     local_config_actions.add(
-        &fast_startup_check,
+        &enhanced_launch_button,
         0,
         SizerFlag::AlignCenterVertical | SizerFlag::Right,
         12,
@@ -256,7 +252,7 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         inject_button,
         clear_button,
         session_history_button,
-        fast_startup_check,
+        enhanced_launch_button,
         save_models_button,
         model_checks,
         model_slugs,
@@ -265,7 +261,6 @@ pub(super) fn create(parent: &Notebook, text: GuiText) -> CodexTab {
         remote_ready: Rc::new(Cell::new(false)),
         service_enabled: Rc::new(Cell::new(false)),
         local_connection_mode: Rc::new(Cell::new(LocalConnectionMode::Standard)),
-        fast_startup_syncing: Rc::new(Cell::new(false)),
     }
 }
 
@@ -278,7 +273,7 @@ pub(super) fn bind_actions(
     in_flight: &Arc<AtomicBool>,
 ) {
     bind_inject_action(api, frame, tab, refresh, gui_tx, in_flight);
-    bind_fast_startup_action(api, frame, tab, refresh, gui_tx, in_flight);
+    bind_enhanced_launch_action(api, frame, tab, refresh, gui_tx, in_flight);
     bind_save_models_action(api, frame, tab, refresh, gui_tx, in_flight);
     bind_clear_action(api, frame, tab, refresh, gui_tx, in_flight);
     bind_session_history_action(api, frame, tab, refresh);
@@ -287,7 +282,7 @@ pub(super) fn bind_actions(
 pub(super) fn set_actions_enabled(tab: &CodexTab, enabled: bool) {
     tab.service_enabled.set(enabled);
     tab.save_models_button.enable(enabled);
-    tab.fast_startup_check.enable(enabled);
+    tab.enhanced_launch_button.enable(enabled);
     for checkbox in tab.model_checks.iter() {
         checkbox.enable(enabled);
     }
@@ -303,16 +298,6 @@ pub(super) fn refresh_configured(tab: &CodexTab, configured: bool) {
 
 pub(super) fn refresh_local_connection_mode(tab: &CodexTab, mode: LocalConnectionMode) {
     tab.local_connection_mode.set(mode);
-}
-
-pub(super) fn refresh_fast_startup(tab: &CodexTab, enabled: bool) {
-    set_fast_startup_check(tab, enabled);
-}
-
-fn set_fast_startup_check(tab: &CodexTab, enabled: bool) {
-    tab.fast_startup_syncing.set(true);
-    tab.fast_startup_check.set_value(enabled);
-    tab.fast_startup_syncing.set(false);
 }
 
 pub(super) fn refresh_remote_ready(tab: &CodexTab, remote_ready: bool) {
@@ -350,9 +335,12 @@ pub(super) fn apply_pending_action(
     tab.inject_button.set_label(text.inject_codex_access());
     tab.clear_button.set_label(text.clear_codex_access());
     tab.save_models_button.set_label(text.save_codex_models());
+    tab.enhanced_launch_button
+        .set_label(text.codex_enhanced_launch());
     let service_enabled = tab.service_enabled.get();
     refresh_config_buttons(tab, service_enabled);
     tab.save_models_button.enable(service_enabled);
+    tab.enhanced_launch_button.enable(service_enabled);
 
     match result {
         CodexActionResult::Inject(Ok(_)) => {
@@ -371,20 +359,19 @@ pub(super) fn apply_pending_action(
             show_error(frame, &err);
             force_dashboard_refresh(api, refresh);
         }
-        CodexActionResult::FastStartup(Ok(enabled)) => {
-            set_fast_startup_check(tab, enabled);
-            force_dashboard_refresh(api, refresh);
-        }
-        CodexActionResult::FastStartup(Err(err)) => {
-            set_fast_startup_check(tab, !tab.fast_startup_check.is_checked());
-            show_error(frame, &err);
-            force_dashboard_refresh(api, refresh);
-        }
         CodexActionResult::SaveModels(Ok(())) => {
             show_info(frame, text.codex_models_saved());
             force_dashboard_refresh(api, refresh);
         }
         CodexActionResult::SaveModels(Err(err)) => {
+            show_error(frame, &err);
+            force_dashboard_refresh(api, refresh);
+        }
+        CodexActionResult::EnhancedLaunch(Ok(_)) => {
+            show_info(frame, text.codex_enhanced_launch_ready());
+            force_dashboard_refresh(api, refresh);
+        }
+        CodexActionResult::EnhancedLaunch(Err(err)) => {
             show_error(frame, &err);
             force_dashboard_refresh(api, refresh);
         }
@@ -394,15 +381,15 @@ pub(super) fn apply_pending_action(
 fn refresh_config_buttons(tab: &CodexTab, service_enabled: bool) {
     let configured = tab.configured.get();
     tab.inject_button.enable(service_enabled && !configured);
-    tab.fast_startup_check.enable(service_enabled);
+    tab.enhanced_launch_button.enable(service_enabled);
     tab.clear_button.enable(service_enabled && configured);
 }
 
 pub(super) enum CodexActionResult {
     Inject(Result<serde_json::Value, String>),
     Clear(Result<serde_json::Value, String>),
-    FastStartup(Result<bool, String>),
     SaveModels(Result<(), String>),
+    EnhancedLaunch(Result<serde_json::Value, String>),
 }
 
 fn bind_inject_action(
@@ -439,7 +426,6 @@ fn bind_inject_action(
             activate: true,
             image_generation_enabled: None,
             supports_websockets: false,
-            fast_startup: tab.fast_startup_check.is_checked(),
         };
         let thread_api = api.clone();
         let gui_tx = gui_tx.clone();
@@ -456,7 +442,7 @@ fn bind_inject_action(
     });
 }
 
-fn bind_fast_startup_action(
+fn bind_enhanced_launch_action(
     api: &ApiClient,
     frame: &Frame,
     tab: &CodexTab,
@@ -470,36 +456,39 @@ fn bind_fast_startup_action(
     let tab = tab.clone();
     let gui_tx = gui_tx.clone();
     let in_flight = in_flight.clone();
-    let checkbox = tab.fast_startup_check;
-    checkbox.on_toggled(move |_| {
-        if tab.fast_startup_syncing.get() {
-            return;
-        }
-        let enabled = checkbox.is_checked();
-        if enabled && !confirm_fast_startup(&frame, tab.text) {
-            set_fast_startup_check(&tab, false);
-            return;
-        }
+    let button = tab.enhanced_launch_button;
+    button.on_click(move |_| {
         if in_flight.swap(true, Ordering::SeqCst) {
-            set_fast_startup_check(&tab, !enabled);
             return;
         }
         if !ensure_service_ready_for_action(&api, &frame, &refresh) {
-            set_fast_startup_check(&tab, !enabled);
             in_flight.store(false, Ordering::SeqCst);
             return;
         }
-        checkbox.enable(false);
+        match api.codex_app_enhanced_preflight() {
+            Ok(response) if response.status.running => {
+                if !wait_for_codex_app_to_close(&frame, tab.text, &api) {
+                    in_flight.store(false, Ordering::SeqCst);
+                    return;
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {
+                show_error(&frame, tab.text.codex_enhanced_launch_check_failed());
+                in_flight.store(false, Ordering::SeqCst);
+                return;
+            }
+        }
+        button.set_label(tab.text.codex_enhanced_launching());
+        button.enable(false);
         let thread_api = api.clone();
         let gui_tx = gui_tx.clone();
         let in_flight = in_flight.clone();
         thread::spawn(move || {
-            let outcome = thread_api
-                .set_codex_app_fast_startup(&SetCodexAppFastStartupRequest { enabled })
-                .map(|_| enabled);
+            let outcome = thread_api.launch_codex_app_enhanced();
             in_flight.store(false, Ordering::SeqCst);
             let _ = gui_tx.send(super::GuiMessage::CodexAction(
-                CodexActionResult::FastStartup(outcome),
+                CodexActionResult::EnhancedLaunch(outcome),
             ));
             wxdragon::wake_up_idle();
         });
@@ -507,16 +496,126 @@ fn bind_fast_startup_action(
     });
 }
 
-fn confirm_fast_startup(parent: &dyn WxWidget, text: GuiText) -> bool {
-    MessageDialog::builder(
-        parent,
-        text.codex_fast_startup_confirm_message(),
-        text.codex_fast_startup_confirm_title(),
-    )
-    .with_style(MessageDialogStyle::YesNo | MessageDialogStyle::IconQuestion)
-    .build()
-    .show_modal()
-        == ID_YES
+fn wait_for_codex_app_to_close(parent: &Frame, text: GuiText, api: &ApiClient) -> bool {
+    let dialog = Dialog::builder(parent, text.codex_enhanced_launch_close_title())
+        .with_style(DialogStyle::DefaultDialogStyle)
+        .with_size(520, 230)
+        .build();
+    dialog.set_background_color(theme::theme().bg_card);
+    let panel = Panel::builder(&dialog).build();
+    panel.set_background_color(theme::theme().bg_card);
+    let sizer = BoxSizer::builder(Orientation::Vertical).build();
+
+    let title = StaticText::builder(&panel)
+        .with_label(text.codex_enhanced_launch_close_title())
+        .build();
+    title.set_font(&theme::font(theme::TextRole::Title));
+    title.set_foreground_color(theme::theme().ink_primary);
+    sizer.add(
+        &title,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        18,
+    );
+
+    let message = StaticText::builder(&panel)
+        .with_label(text.codex_enhanced_launch_close_running())
+        .build();
+    message.set_foreground_color(theme::theme().ink_muted);
+    message.wrap(510);
+    sizer.add(
+        &message,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        18,
+    );
+
+    let status = StaticText::builder(&panel)
+        .with_label(text.codex_enhanced_launch_waiting_for_close())
+        .build();
+    status.set_min_size(Size::new(470, 32));
+    status.set_foreground_color(theme::theme().warn);
+    status.wrap(510);
+    sizer.add(
+        &status,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        16,
+    );
+
+    let actions = BoxSizer::builder(Orientation::Horizontal).build();
+    let cancel_button = Button::builder(&panel)
+        .with_id(ID_CANCEL)
+        .with_label(text.cancel())
+        .build();
+    let confirm_button = Button::builder(&panel)
+        .with_id(ID_OK)
+        .with_label(text.codex_enhanced_launch_confirm())
+        .build();
+    confirm_button.enable(false);
+    confirm_button.set_default();
+    actions.add_stretch_spacer(1);
+    actions.add(&cancel_button, 0, SizerFlag::Right, 8);
+    actions.add(&confirm_button, 0, SizerFlag::Right, 0);
+    sizer.add_sizer(
+        &actions,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top | SizerFlag::Bottom,
+        18,
+    );
+
+    panel.set_sizer(sizer, true);
+    let dialog_sizer = BoxSizer::builder(Orientation::Vertical).build();
+    dialog_sizer.add(&panel, 1, SizerFlag::Expand, 0);
+    dialog.set_sizer(dialog_sizer, true);
+    dialog.center();
+
+    let timer = Timer::new(&dialog);
+    {
+        let api = api.clone();
+        timer.on_tick(move |_| {
+            refresh_enhanced_launch_preflight(&api, text, &status, &confirm_button);
+        });
+    }
+    timer.start(500, false);
+    {
+        let dialog = dialog;
+        cancel_button.on_click(move |_| dialog.end_modal(ID_CANCEL));
+    }
+    {
+        let dialog = dialog;
+        confirm_button.on_click(move |_| dialog.end_modal(ID_OK));
+    }
+
+    let confirmed = dialog.show_modal() == ID_OK;
+    timer.stop();
+    dialog.destroy();
+    confirmed
+}
+
+fn refresh_enhanced_launch_preflight(
+    api: &ApiClient,
+    text: GuiText,
+    status: &StaticText,
+    confirm_button: &Button,
+) {
+    match api.codex_app_enhanced_preflight() {
+        Ok(response) if response.status.running => {
+            status.set_label(text.codex_enhanced_launch_waiting_for_close());
+            status.set_foreground_color(theme::theme().warn);
+            confirm_button.enable(false);
+        }
+        Ok(_) => {
+            status.set_label(text.codex_enhanced_launch_ready_to_start());
+            status.set_foreground_color(theme::theme().ok);
+            confirm_button.enable(true);
+        }
+        Err(_) => {
+            status.set_label(text.codex_enhanced_launch_check_failed());
+            status.set_foreground_color(theme::theme().error);
+            confirm_button.enable(false);
+        }
+    }
 }
 
 fn bind_save_models_action(
