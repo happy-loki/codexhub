@@ -451,7 +451,7 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     Ok(format!(
         r#"(() => {{
   const MARKER = "__CODEXHUB_ENHANCED_MODE__";
-  const SCRIPT_VERSION = 7;
+  const SCRIPT_VERSION = 8;
   const MODELS = {models};
   const SUPPORTED_GATES = {gates};
   const LEGACY_CODEXHUB_GATES = {legacy_gates};
@@ -611,6 +611,47 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     return values;
   }};
 
+  const isObject = (value) => value !== null
+    && typeof value === "object"
+    && !Array.isArray(value);
+  const isCodexHubLocalEntry = (entry) => isObject(entry)
+    && (entry.rule_id === "codexhub-local" || entry.r === "codexhub-local");
+  const statsigEntryValue = (values, entry) => {{
+    if (!isObject(entry)) return null;
+    if (isObject(entry.value)) return entry.value;
+    if (typeof entry.v === "string" && isObject(values.values?.[entry.v])) {{
+      return values.values[entry.v];
+    }}
+    return null;
+  }};
+  // A local compatibility payload is not a substitute for the official evaluation.
+  // Only a structurally complete evaluation with at least one official entry may be
+  // used as the fast-start base.
+  const isCompleteOfficialValues = (values) => {{
+    if (!isObject(values)
+      || !isObject(values.feature_gates)
+      || !isObject(values.dynamic_configs)
+      || !isObject(values.layer_configs)) return false;
+    const entries = [
+      ...Object.values(values.feature_gates),
+      ...Object.values(values.dynamic_configs),
+      ...Object.values(values.layer_configs),
+    ];
+    const hasOfficialEntry = entries.some((entry) => isObject(entry)
+      && !isCodexHubLocalEntry(entry));
+    if (!hasOfficialEntry) return false;
+    const valueCount = isObject(values.values) ? Object.keys(values.values).length : 0;
+    const sectionCount = Object.keys(values.feature_gates).length
+      + Object.keys(values.dynamic_configs).length
+      + Object.keys(values.layer_configs).length;
+    const runtimeValue = statsigEntryValue(values, values.layer_configs["2096615506"]);
+    const hasRuntimeConfig = isObject(runtimeValue) && Object.keys(runtimeValue).length > 0;
+    const hasEvaluationMetadata = isObject(values.evaluated_keys)
+      || isObject(values.sdkParams)
+      || isObject(values.sdk_flags);
+    return hasRuntimeConfig || hasEvaluationMetadata || valueCount > 0 || sectionCount >= 4;
+  }};
+
   const STORE_PATCH_MARKER = "__CODEXHUB_ENHANCED_SET_VALUES_PATCH__";
   const installStorePatch = (client) => {{
     const store = client?._store;
@@ -650,7 +691,24 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     client.initializeAsync = (options) => {{
       if (control.promise) return control.promise;
       try {{
-        const values = JSON.parse(buildBootstrapPayload());
+        const bootstrapPayload = buildBootstrapPayload();
+        if (!bootstrapPayload) {{
+          state.fastInitializeSource = "official-network";
+          try {{
+            const details = control.original(options);
+            control.promise = Promise.resolve(details).then((result) => {{
+              try {{ applyClient(client); }} catch (error) {{
+                state.fastInitializeError = String(error?.stack ?? error);
+              }}
+              return result;
+            }});
+          }} catch (error) {{
+            state.fastInitializeError = String(error?.stack ?? error);
+            control.promise = Promise.reject(error);
+          }}
+          return control.promise;
+        }}
+        const values = JSON.parse(bootstrapPayload);
         const currentUser = client.getContext?.().user ?? client._user;
         if (currentUser && typeof currentUser === "object") {{
           values.user = structuredClone(currentUser);
@@ -662,7 +720,7 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
         }}
         state.fastInitializeApplied = true;
         state.fastInitializeAppliedAtMs = Math.round(performance.now());
-        state.fastInitializeSource = state.bootstrapSource ?? "codexhub-minimal";
+        state.fastInitializeSource = state.bootstrapSource ?? "statsig-cache-official";
         control.promise = Promise.resolve(details);
       }} catch (error) {{
         state.fastInitializeError = String(error?.stack ?? error);
@@ -751,7 +809,9 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
         }}
         if (Array.isArray(value)) return value.map((item) => visit(item, depth + 1));
         if (typeof value !== "object") return value;
-        if (value.dynamic_configs?.[CONFIG_ID] || value.layer_configs?.["72216192"]) {{
+        if (isCompleteOfficialValues(value)
+          || value.dynamic_configs?.[CONFIG_ID]
+          || value.layer_configs?.["72216192"]) {{
           patchValues(value);
         }}
         for (const key of Object.keys(value)) value[key] = visit(value[key], depth + 1);
@@ -790,61 +850,14 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     }};
   }};
 
-  const minimalBootstrapValues = () => ({{
-    response_format: "init-v2",
-    feature_gates: {{}},
-    dynamic_configs: {{
-      "107580212": {{
-        v: "codexhub_model_list_config",
-        r: "codexhub-local",
-        s: [],
-        i: "userID",
-        ue: false,
-        p: true,
-      }},
-    }},
-    layer_configs: {{
-      "2096615506": {{
-        v: "codexhub_primary_runtime_config",
-        r: "codexhub-local",
-        s: [],
-        i: "userID",
-        ue: false,
-        p: true,
-      }},
-      "72216192": {{
-        v: "codexhub_i18n_layer_config",
-        r: "codexhub-local",
-        s: [],
-        i: "userID",
-        ue: false,
-        p: true,
-      }},
-    }},
-    param_stores: {{}},
-    values: {{
-      codexhub_model_list_config: {{}},
-      codexhub_primary_runtime_config: {{}},
-      codexhub_i18n_layer_config: {{
-        enable_i18n: true,
-        locale_source: "FIRST_AVAILABLE",
-      }},
-    }},
-    exposures: {{}},
-    sdkParams: {{}},
-    sdk_flags: {{}},
-    has_updates: true,
-    time: Date.now(),
-  }});
-
-  const buildBootstrapPayload = () => {{
+  const selectOfficialBootstrap = () => {{
     let selected = null;
     for (const key of Object.keys(localStorage)) {{
       if (!key.startsWith("statsig.cached.evaluations.")) continue;
       try {{
         const envelope = JSON.parse(originalGetItem.call(localStorage, key));
         const values = JSON.parse(envelope?.data);
-        if (!values || typeof values !== "object") continue;
+        if (!isCompleteOfficialValues(values)) continue;
         const receivedAt = Number(envelope.receivedAt ?? values.time ?? 0);
         const evaluatedUserID = values?.evaluated_keys?.userID;
         const priority = evaluatedUserID == null
@@ -857,14 +870,20 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
         }}
       }} catch {{}}
     }}
+    return selected;
+  }};
 
-    const values = patchValues(structuredClone(selected?.values ?? minimalBootstrapValues()));
+  const buildBootstrapPayload = () => {{
+    const selected = selectOfficialBootstrap();
+    if (!selected) {{
+      state.bootstrapSource = "official-network";
+      return null;
+    }}
+    const values = patchValues(structuredClone(selected.values));
     values.user = localUser(values, selected?.envelope);
-    state.bootstrapSource = selected
-      ? selected.priority === 2
-        ? "statsig-cache-prelogin"
-        : selected.priority === 1 ? "statsig-cache-local" : "statsig-cache-other"
-      : "codexhub-minimal";
+    state.bootstrapSource = selected.priority === 2
+      ? "statsig-cache-prelogin"
+      : selected.priority === 1 ? "statsig-cache-local" : "statsig-cache-other";
     return JSON.stringify(values);
   }};
 
@@ -894,7 +913,9 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
       || String(message.method).toUpperCase() !== "POST"
       || message.url !== "/wham/statsig/bootstrap") return;
     try {{
-      dispatchFetchResponse(message, {{ statsigPayload: buildBootstrapPayload() }});
+      const payload = buildBootstrapPayload();
+      if (!payload) return;
+      dispatchFetchResponse(message, {{ statsigPayload: payload }});
       state.bootstrapIntercepted = true;
       state.bootstrapInterceptedAtMs = Math.round(performance.now());
     }} catch (error) {{
@@ -970,10 +991,15 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     if (!client?._store?.setValues || typeof client._finalizeUpdate !== "function") return false;
     installStorePatch(client);
     const stored = client._store.getValues?.();
-    const hasStoredValues = stored && typeof stored === "object"
-      && stored.feature_gates && stored.dynamic_configs && stored.layer_configs;
-    const current = hasStoredValues ? stored : minimalBootstrapValues();
-    if (!hasStoredValues) state.bootstrapSource ??= "codexhub-minimal-store";
+    if (!isCompleteOfficialValues(stored)) {{
+      state.bootstrapSource ??= "official-network";
+      return false;
+    }}
+    const current = stored;
+    current.feature_gates ??= {{}};
+    current.dynamic_configs ??= {{}};
+    current.layer_configs ??= {{}};
+    current.values ??= {{}};
     const currentConfigEntry = current.dynamic_configs[CONFIG_ID];
     const currentConfig = currentConfigEntry?.v
       && current.values?.[currentConfigEntry.v]
@@ -1279,13 +1305,17 @@ mod tests {
         assert!(script.contains("const modelIsV2"));
         assert!(script.contains("installStorePatch"));
         assert!(script.contains("patchCachedI18nLayer"));
-        assert!(script.contains("SCRIPT_VERSION = 7"));
+        assert!(script.contains("SCRIPT_VERSION = 8"));
+        assert!(script.contains("isCompleteOfficialValues"));
+        assert!(script.contains("selectOfficialBootstrap"));
+        assert!(script.contains("state.fastInitializeSource = \"official-network\""));
         assert!(script.contains("installFastInitializePatch"));
         assert!(script.contains("client.initializeSync({ disableBackgroundCacheRefresh: true })"));
         assert!(script.contains("fastInitializeAppliedAtMs"));
-        assert!(script.contains("const hasStoredValues"));
-        assert!(script.contains("current = hasStoredValues ? stored : minimalBootstrapValues()"));
-        assert!(script.contains("codexhub-minimal-store"));
+        assert!(script.contains("isCompleteOfficialValues(stored)"));
+        assert!(script.contains("const current = stored"));
+        assert!(!script.contains("JSON.parse(buildBootstrapPayload())"));
+        assert!(!script.contains("codexhub-minimal-store"));
         assert!(script.contains("invalidateI18nReactCache"));
         assert!(script.contains("__reactContainer"));
         assert!(script.contains("memoCache?.data"));

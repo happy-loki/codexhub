@@ -6,7 +6,7 @@
 >
 > 影响范围：Codex App `26.715.4045`，CodexHub 增强模式启动功能
 >
-> 最终增强脚本版本：`SCRIPT_VERSION = 6`
+> 复盘时增强脚本版本：`SCRIPT_VERSION = 6`；当前增强脚本已升级为 `SCRIPT_VERSION = 8`
 
 ## 1. 为什么要单独写这份复盘
 
@@ -59,12 +59,11 @@ Codex App 已启动，但自定义模型列表未能生效
 
 只是这个超时的表象，不是模型接口、语言设置或 Codex App 崩溃。
 
-最终处理：当 store 没有完整容器时，直接使用 `minimalBootstrapValues()` 构造完整的纯 V2 容器，
-再通过 Statsig 自己的 `setValues` 提交。该路径标记为：
-
-```text
-bootstrap_source = codexhub-minimal-store
-```
+当时的临时处理是使用 `minimalBootstrapValues()` 构造纯 V2 容器，再通过 Statsig 自己的
+`setValues` 提交。这个方案虽然能让模型和中文尽快出现，却会丢掉官方 runtime、插件和浏览器配置，
+因此不再作为增强模式的初始化路径。当前实现改为：有完整官方 evaluation 就以它为底座做局部
+overlay；没有完整缓存就回到官方 `initializeAsync()`，官方结果进入 store 后再修补模型、i18n 和
+必要 gate。诊断日志中的 `fast_initialize_source=official-network` 表示走了这个保守路径。
 
 ### 2.2 React 已缓存首次的 `enable_i18n=false`
 
