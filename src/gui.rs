@@ -884,6 +884,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     let request_log_cleanup_status = StaticText::builder(&request_logs_page)
         .with_label("")
         .build();
+    request_log_cleanup_status.show(false);
     request_log_cleanup_status.set_min_size(Size::new(220, 24));
     request_log_cleanup_status.set_foreground_color(theme::theme().error);
     let request_log_toolbar = BoxSizer::builder(Orientation::Horizontal).build();
@@ -1459,8 +1460,8 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
             request_log_cleanup_status.set_label(text.request_log_clearing(frame));
         });
     }
-    request_log_cleanup_timer.start(450, false);
-    request_log_cleanup_timer.stop();
+    // A new wxTimer is already stopped; starting it during setup can queue a
+    // tick that incorrectly shows "Cleaning" when the page first opens.
     request_log_cleanup_timer_store
         .borrow_mut()
         .replace(request_log_cleanup_timer);
@@ -1523,6 +1524,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
             request_log_clear_all_button.enable(false);
             request_log_cleanup_animation_frame.set(0);
             request_log_cleanup_status.set_label(text.request_log_clearing(0));
+            request_log_cleanup_status.show(true);
             request_log_cleanup_status.set_foreground_color(theme::theme().error);
             start_request_log_cleanup_animation(&request_log_cleanup_timer_store);
             let thread_api = api.clone();
@@ -1560,6 +1562,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
             request_log_clear_all_button.enable(false);
             request_log_cleanup_animation_frame.set(0);
             request_log_cleanup_status.set_label(text.request_log_clearing(0));
+            request_log_cleanup_status.show(true);
             request_log_cleanup_status.set_foreground_color(theme::theme().error);
             start_request_log_cleanup_animation(&request_log_cleanup_timer_store);
             let thread_api = api.clone();

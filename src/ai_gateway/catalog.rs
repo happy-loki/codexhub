@@ -352,6 +352,53 @@ mod tests {
     }
 
     #[test]
+    fn gpt_5_6_models_use_current_official_capabilities() {
+        for (slug, priority) in [
+            ("gpt-5.6-sol", 1),
+            ("gpt-5.6-terra", 2),
+            ("gpt-5.6-luna", 3),
+        ] {
+            let model = catalog_models()
+                .iter()
+                .find(|model| model_slug(model) == Some(slug))
+                .expect("catalog model should exist");
+
+            assert_eq!(model["context_window"], 272_000, "model {slug}");
+            assert_eq!(model["max_context_window"], 272_000, "model {slug}");
+            assert_eq!(model["use_responses_lite"], true, "model {slug}");
+            assert_eq!(
+                model["supports_reasoning_summary_parameter"], true,
+                "model {slug}"
+            );
+            assert_eq!(model["visibility"], "list", "model {slug}");
+            assert_eq!(model["priority"], priority, "model {slug}");
+        }
+    }
+
+    #[test]
+    fn gpt_5_4_models_remain_visible_for_codexhub() {
+        let gpt_5_5 = catalog_models()
+            .iter()
+            .find(|model| model_slug(model) == Some("gpt-5.5"))
+            .expect("gpt-5.5 should exist");
+        assert_eq!(gpt_5_5["visibility"], "list");
+        assert_eq!(gpt_5_5["supports_reasoning_summary_parameter"], true);
+        assert_eq!(gpt_5_5.get("availability_nux"), Some(&Value::Null));
+
+        for slug in ["gpt-5.4", "gpt-5.4-mini"] {
+            let model = catalog_models()
+                .iter()
+                .find(|model| model_slug(model) == Some(slug))
+                .expect("catalog model should exist");
+
+            assert_eq!(model["visibility"], "list", "model {slug}");
+            assert_eq!(model["include_skills_usage_instructions"], true);
+            assert_eq!(model["supports_reasoning_summary_parameter"], true);
+            assert_eq!(model.get("upgrade"), Some(&Value::Null), "model {slug}");
+        }
+    }
+
+    #[test]
     fn visible_catalog_model_options_returns_listable_api_models() {
         let options = visible_catalog_model_options();
         let slugs = options
@@ -364,6 +411,8 @@ mod tests {
             "gpt-5.6-luna",
             "grok-4.5",
             "gpt-5.5",
+            "gpt-5.4",
+            "gpt-5.4-mini",
         ] {
             assert!(
                 slugs.contains(&expected),

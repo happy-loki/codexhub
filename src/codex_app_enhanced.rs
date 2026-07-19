@@ -16,6 +16,12 @@ use crate::chain_log;
 
 const DEFAULT_CDP_PORT: u16 = 9335;
 const CODEX_APP_READY_TIMEOUT: Duration = Duration::from_secs(30);
+const ENHANCED_INJECTION_TIMEOUT: Duration = Duration::from_secs(45);
+// The injected script retries internally for about 24 seconds. Re-run it only
+// after that window so a cold renderer does not accumulate retry timers.
+const ENHANCED_SCRIPT_RETRY_INTERVAL: Duration = Duration::from_secs(26);
+const ENHANCED_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const ENHANCED_SCRIPT_VERSION: u64 = 8;
 type CdpSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 static ENHANCED_CDP_SESSION: OnceLock<Mutex<Option<tokio::task::JoinHandle<()>>>> = OnceLock::new();
 const SUPPORTED_FEATURE_GATES: &[&str] = &[
@@ -75,7 +81,7 @@ pub async fn preflight() -> Result<EnhancedLaunchPreflight> {
     Ok(EnhancedLaunchPreflight { running })
 }
 
-#[derive(Debug, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CdpTarget {
     id: String,
@@ -132,13 +138,12 @@ pub async fn launch_and_inject(
         target.id
     ));
 
-    inject_target(&target, DEFAULT_CDP_PORT, &models).await?;
+    let (target, status) = inject_until_ready(&client, DEFAULT_CDP_PORT, target, &models).await?;
     chain_log::write_line(format!(
         "[codex_app_enhanced] event=injection_applied elapsed_ms={} target_id={}",
         started.elapsed().as_millis(),
         target.id
     ));
-    let status = wait_for_injected_status(&client, DEFAULT_CDP_PORT, &target.id, &models).await?;
     let startup_elapsed_ms = started.elapsed().as_millis() as u64;
     chain_log::write_line(format!(
         "[codex_app_enhanced] event=config_ready elapsed_ms={startup_elapsed_ms} i18n_enabled={} fast_initialize_applied={} fast_initialize_source={} routes_mounted={} renderer_ready_ms={} bootstrap_intercepted={} bootstrap_source={}",
@@ -224,14 +229,28 @@ fn validated_websocket_url(target: &CdpTarget, expected_port: u16) -> Result<Str
     Ok(raw.to_string())
 }
 
-async fn inject_target(target: &CdpTarget, port: u16, models: &[String]) -> Result<()> {
+fn same_cdp_target(left: &CdpTarget, right: &CdpTarget) -> bool {
+    left.id == right.id && left.web_socket_debugger_url == right.web_socket_debugger_url
+}
+
+struct ActiveInjection {
+    target: CdpTarget,
+    socket: CdpSocket,
+    command_id: u64,
+    installed_at: Instant,
+}
+
+async fn connect_and_install(
+    target: &CdpTarget,
+    port: u16,
+    source: &str,
+) -> Result<ActiveInjection> {
     let websocket_url = validated_websocket_url(target, port)?;
     let (mut socket, _) = connect_async(websocket_url)
         .await
         .context("连接 Codex App CDP 失败")?;
-    let source = enhanced_statsig_script(models)?;
     let mut command_id = 1_u64;
-    for (method, params) in enhanced_script_install_commands(&source) {
+    for (method, params) in enhanced_script_install_commands(source) {
         let result = cdp_command(&mut socket, &mut command_id, method, params).await?;
         if method == "Runtime.evaluate" {
             ensure_runtime_evaluation_succeeded(&result)?;
@@ -241,32 +260,31 @@ async fn inject_target(target: &CdpTarget, port: u16, models: &[String]) -> Resu
         "[codex_app_enhanced] event=script_installed reload=false target_id={}",
         target.id
     ));
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
-        let applied = cdp_command(
-            &mut socket,
-            &mut command_id,
-            "Runtime.evaluate",
-            json!({
-                "expression": "Boolean(window.__CODEXHUB_ENHANCED_MODE__?.applied)",
-                "returnByValue": true
-            }),
-        )
-        .await
-        .ok()
-        .and_then(|result| result.pointer("/result/value").and_then(Value::as_bool))
-        .unwrap_or(false);
-        if applied {
-            break;
-        }
-        if tokio::time::Instant::now() >= deadline {
-            bail!(
-                "Codex App 已启动，但增强配置（模型列表/语言）未能生效；可以继续普通使用 Codex App"
-            );
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    retain_cdp_session(socket);
+    Ok(ActiveInjection {
+        target: target.clone(),
+        socket,
+        command_id,
+        installed_at: Instant::now(),
+    })
+}
+
+async fn reapply_script(active: &mut ActiveInjection, source: &str) -> Result<()> {
+    let result = cdp_command(
+        &mut active.socket,
+        &mut active.command_id,
+        "Runtime.evaluate",
+        json!({
+            "expression": source,
+            "returnByValue": true,
+        }),
+    )
+    .await?;
+    ensure_runtime_evaluation_succeeded(&result)?;
+    active.installed_at = Instant::now();
+    chain_log::write_line(format!(
+        "[codex_app_enhanced] event=script_retry target_id={}",
+        active.target.id
+    ));
     Ok(())
 }
 
@@ -359,6 +377,9 @@ where
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct InjectedStatus {
+    script_installed: bool,
+    script_applied: bool,
+    script_version: Option<u64>,
     ready: bool,
     available_models: Vec<String>,
     use_hidden_models: bool,
@@ -372,50 +393,114 @@ struct InjectedStatus {
     renderer_ready_ms: Option<u64>,
 }
 
-async fn wait_for_injected_status(
+async fn inject_until_ready(
     client: &reqwest::Client,
     port: u16,
-    target_id: &str,
+    initial_target: CdpTarget,
     expected_models: &[String],
-) -> Result<InjectedStatus> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+) -> Result<(CdpTarget, InjectedStatus)> {
+    let source = enhanced_statsig_script(expected_models)?;
+    let deadline = tokio::time::Instant::now() + ENHANCED_INJECTION_TIMEOUT;
+    let mut initial_target = Some(initial_target);
+    let mut active: Option<ActiveInjection> = None;
+    let mut last_error = None::<String>;
     loop {
-        if let Some(target) = find_app_target(client, port).await?
-            && target.id == target_id
-            && let Ok(status) = inspect_injected_status(&target, port).await
-            && injected_status_is_ready(&status, expected_models)
-        {
-            return Ok(status);
+        let target = match initial_target.take() {
+            Some(target) => Some(target),
+            None => match find_app_target(client, port).await {
+                Ok(target) => target,
+                Err(err) => {
+                    last_error = Some(err.to_string());
+                    None
+                }
+            },
+        };
+        if let Some(target) = target {
+            let replace_session = active
+                .as_ref()
+                .map(|current| !same_cdp_target(&current.target, &target))
+                .unwrap_or(true);
+            if replace_session {
+                if let Some(current) = active.as_ref() {
+                    chain_log::write_line(format!(
+                        "[codex_app_enhanced] event=target_changed old_target_id={} new_target_id={}",
+                        current.target.id, target.id
+                    ));
+                }
+                active = None;
+                match connect_and_install(&target, port, &source).await {
+                    Ok(connection) => active = Some(connection),
+                    Err(err) => last_error = Some(err.to_string()),
+                }
+            }
+
+            if let Some(connection) = active.as_mut() {
+                match inspect_injected_status_on_socket(connection).await {
+                    Ok(status) if injected_status_is_ready(&status, expected_models) => {
+                        let connection = active
+                            .take()
+                            .expect("active injection exists after status check");
+                        retain_cdp_session(connection.socket);
+                        return Ok((connection.target, status));
+                    }
+                    Ok(status)
+                        if should_reapply_script(&status, connection.installed_at.elapsed()) =>
+                    {
+                        if let Err(err) = reapply_script(connection, &source).await {
+                            last_error = Some(err.to_string());
+                            active = None;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        last_error = Some(err.to_string());
+                        active = None;
+                    }
+                }
+            }
         }
         if tokio::time::Instant::now() >= deadline {
-            bail!("Codex App 已启动，但增强配置（模型列表/语言）未在 20 秒内生效");
+            let detail = last_error
+                .map(|error| format!("（最近一次 CDP 状态：{error}）"))
+                .unwrap_or_default();
+            bail!("Codex App 已启动，但增强配置（模型列表/语言）未在 45 秒内生效{detail}");
         }
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(ENHANCED_STATUS_POLL_INTERVAL).await;
     }
+}
+
+fn should_reapply_script(status: &InjectedStatus, installed_for: Duration) -> bool {
+    (!status.script_installed && installed_for >= Duration::from_secs(2))
+        || installed_for >= ENHANCED_SCRIPT_RETRY_INTERVAL
 }
 
 fn injected_status_is_ready(status: &InjectedStatus, expected_models: &[String]) -> bool {
     // Renderer routes may mount well after Statsig is updated; the retained script
     // will keep the enhanced configuration active while the UI finishes loading.
-    status.ready
+    status.script_installed
+        && status.script_applied
+        && status.script_version == Some(ENHANCED_SCRIPT_VERSION)
+        && status.ready
         && status.available_models == expected_models
         && !status.use_hidden_models
         && status.key_gates_enabled == SUPPORTED_FEATURE_GATES.len()
         && status.i18n_enabled
 }
 
-async fn inspect_injected_status(target: &CdpTarget, port: u16) -> Result<InjectedStatus> {
-    let websocket_url = validated_websocket_url(target, port)?;
-    let (mut socket, _) = connect_async(websocket_url).await?;
+async fn inspect_injected_status_on_socket(active: &mut ActiveInjection) -> Result<InjectedStatus> {
     let gates = serde_json::to_string(SUPPORTED_FEATURE_GATES)?;
     let expression = format!(
         r#"(() => {{
-          const client = window.__STATSIG__?.firstInstance;
-          const config = client?.getDynamicConfig?.("107580212")?.value;
+           const client = window.__STATSIG__?.firstInstance;
+           const enhanced = window.__CODEXHUB_ENHANCED_MODE__;
+           const config = client?.getDynamicConfig?.("107580212")?.value;
           const i18n = client?.getLayer?.("72216192");
-          const gates = {gates};
-          return {{
-            ready: Boolean(Array.isArray(config?.available_models)),
+           const gates = {gates};
+           return {{
+             scriptInstalled: Boolean(enhanced?.installed),
+             scriptApplied: Boolean(enhanced?.applied),
+             scriptVersion: enhanced?.version ?? null,
+             ready: Boolean(Array.isArray(config?.available_models)),
             availableModels: config?.available_models ?? [],
             useHiddenModels: config?.use_hidden_models ?? true,
             keyGatesEnabled: gates.filter((gate) => client?.checkGate?.(gate) === true).length,
@@ -429,10 +514,9 @@ async fn inspect_injected_status(target: &CdpTarget, port: u16) -> Result<Inject
           }};
         }})()"#
     );
-    let mut command_id = 1;
     let result = cdp_command(
-        &mut socket,
-        &mut command_id,
+        &mut active.socket,
+        &mut active.command_id,
         "Runtime.evaluate",
         json!({ "expression": expression, "returnByValue": true }),
     )
@@ -1400,6 +1484,9 @@ mod tests {
     fn enhanced_config_ready_does_not_require_renderer_routes_or_bootstrap_interception() {
         let expected_models = vec!["gpt-5.6-sol".to_string()];
         let mut status = InjectedStatus {
+            script_installed: true,
+            script_applied: true,
+            script_version: Some(ENHANCED_SCRIPT_VERSION),
             ready: true,
             available_models: expected_models.clone(),
             use_hidden_models: false,
@@ -1416,6 +1503,49 @@ mod tests {
         assert!(injected_status_is_ready(&status, &expected_models));
         status.i18n_enabled = false;
         assert!(!injected_status_is_ready(&status, &expected_models));
+    }
+
+    #[test]
+    fn cold_start_retries_after_the_script_attempt_window() {
+        let status = InjectedStatus {
+            script_installed: true,
+            script_applied: false,
+            script_version: Some(ENHANCED_SCRIPT_VERSION),
+            ready: false,
+            available_models: Vec::new(),
+            use_hidden_models: true,
+            key_gates_enabled: 0,
+            i18n_enabled: false,
+            fast_initialize_applied: false,
+            fast_initialize_source: None,
+            bootstrap_intercepted: false,
+            bootstrap_source: None,
+            routes_mounted: false,
+            renderer_ready_ms: None,
+        };
+
+        assert!(!should_reapply_script(&status, Duration::from_secs(2)));
+        assert!(should_reapply_script(
+            &status,
+            ENHANCED_SCRIPT_RETRY_INTERVAL
+        ));
+    }
+
+    #[test]
+    fn target_replacement_is_detected_even_when_id_is_reused() {
+        let first = CdpTarget {
+            id: "renderer".into(),
+            target_type: "page".into(),
+            url: "app://-/index.html".into(),
+            web_socket_debugger_url: Some("ws://127.0.0.1:9335/devtools/page/first".into()),
+        };
+        let replacement = CdpTarget {
+            web_socket_debugger_url: Some("ws://127.0.0.1:9335/devtools/page/replacement".into()),
+            ..first.clone()
+        };
+
+        assert!(same_cdp_target(&first, &first));
+        assert!(!same_cdp_target(&first, &replacement));
     }
 
     #[tokio::test]

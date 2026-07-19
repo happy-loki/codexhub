@@ -48,8 +48,8 @@ layer_configs = missing
 ```
 
 为避免再次混写 V1/V2，增强脚本 v3 曾要求这三个容器全部存在后才写入。这个保护条件在已有缓存的
-热页面上成立，在真实冷启动的 `NoValues` 页面上永远不成立。脚本最终重试 302 次，`applied` 一直是
-false，15 秒后启动 API 返回 500。
+热页面上成立，在真实冷启动的 `NoValues` 页面上永远不成立。旧启动器只等待 15 秒就关闭 CDP 会话，
+所以即使 Codex 随后完成官方 Statsig 初始化，增强脚本也可能失去当前 renderer 的生命周期保障。
 
 截图中的错误：
 
@@ -58,6 +58,17 @@ Codex App 已启动，但自定义模型列表未能生效
 ```
 
 只是这个超时的表象，不是模型接口、语言设置或 Codex App 崩溃。
+
+### 2.1.1 冷启动时 renderer 可能被替换
+
+冷启动期间 `app://` 页面可能先出现一个 CDP target，随后由 Codex 自己重建 renderer。旧实现只对首次
+target 注入一次；target ID 或 WebSocket 改变后，新的 renderer 没有增强脚本，因此日志会出现
+`target_ready`、`script_installed`，但没有 `injection_applied`。
+
+当前启动器把“发现 target、安装脚本、检查 Statsig、保留 CDP 会话”作为一个整体：最多等待 45 秒；
+发现 target 更换就重新连接并安装；同一 renderer 只在脚本自身约 24 秒的重试窗口结束后再执行一次脚本。
+整个过程不调用 `Page.reload`，也不注册持久后台轮询。增强状态真正满足模型、语言和关键 gate 条件后，
+才把最终 CDP 会话交给保持任务。
 
 当时的临时处理是使用 `minimalBootstrapValues()` 构造纯 V2 容器，再通过 Statsig 自己的
 `setValues` 提交。这个方案虽然能让模型和中文尽快出现，却会丢掉官方 runtime、插件和浏览器配置，
