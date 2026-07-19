@@ -632,10 +632,10 @@ impl GuiText {
     pub(super) fn codex_visible_models_scope_warning(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "重要：普通方式启动 Codex App 时，模型列表仍只影响 CLI；请使用上方“自定义模型列表启动 Codex”同步前端模型列表。"
+                "重要：普通方式启动 Codex App 时，模型列表仍只影响 CLI；请使用上方“增强模式启动 Codex”同步前端模型列表。"
             }
             GuiLocale::EnUs => {
-                "Important: With a normally launched Codex App, this list still only affects the CLI. Use Launch Codex with Custom Models above to sync the App model picker."
+                "Important: With a normally launched Codex App, this list still only affects the CLI. Use Launch Codex in Enhanced Mode above to sync the App model picker."
             }
         }
     }
@@ -870,15 +870,15 @@ impl GuiText {
 
     pub(super) fn codex_enhanced_launch(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "自定义模型列表启动 Codex",
-            GuiLocale::EnUs => "Launch Codex with Custom Models",
+            GuiLocale::ZhCn => "增强模式启动 Codex",
+            GuiLocale::EnUs => "Enhanced Launch",
         }
     }
 
     pub(super) fn codex_enhanced_launching(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "正在使用自定义模型列表启动 Codex...",
-            GuiLocale::EnUs => "Launching Codex with custom models...",
+            GuiLocale::ZhCn => "正在增强模式启动 Codex...",
+            GuiLocale::EnUs => "Launching Codex in enhanced mode...",
         }
     }
 
@@ -895,8 +895,10 @@ impl GuiText {
 
     pub(super) fn codex_enhanced_launch_ready(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "Codex 已使用自定义模型列表启动，前端模型列表已同步。",
-            GuiLocale::EnUs => "Codex is running with the custom model list synchronized.",
+            GuiLocale::ZhCn => "Codex 已使用增强模式启动，前端模型列表已同步。",
+            GuiLocale::EnUs => {
+                "Codex is running in enhanced mode with the custom model list synchronized."
+            }
         }
     }
 
@@ -916,26 +918,26 @@ impl GuiText {
 
     pub(super) fn codex_enhanced_launch_confirm(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "使用自定义模型列表启动",
-            GuiLocale::EnUs => "Launch with Custom Models",
+            GuiLocale::ZhCn => "增强模式启动",
+            GuiLocale::EnUs => "Launch in Enhanced Mode",
         }
     }
 
     pub(super) fn codex_enhanced_launch_close_running(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "检测到 Codex App 正在运行。请完全退出 Codex App，退出后即可使用自定义模型列表启动。"
+                "检测到 Codex App 正在运行。请完全退出 Codex App，退出后即可使用增强模式启动。"
             }
             GuiLocale::EnUs => {
-                "Codex App is running. Exit it completely before launching with custom models."
+                "Codex App is running. Exit it completely before launching in enhanced mode."
             }
         }
     }
 
     pub(super) fn codex_enhanced_launch_ready_to_start(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "未检测到 Codex App 进程，可以使用自定义模型列表启动 Codex。",
-            GuiLocale::EnUs => "Codex App is not running. Custom model launch is ready.",
+            GuiLocale::ZhCn => "未检测到 Codex App 进程，可以使用增强模式启动 Codex。",
+            GuiLocale::EnUs => "Codex App is not running. Enhanced mode is ready.",
         }
     }
 
@@ -1087,6 +1089,17 @@ impl GuiText {
         }
     }
 
+    pub(super) fn request_log_clearing(self, frame: usize) -> &'static str {
+        match (self.locale, frame % 3) {
+            (GuiLocale::ZhCn, 0) => "正在清理.",
+            (GuiLocale::ZhCn, 1) => "正在清理..",
+            (GuiLocale::ZhCn, _) => "正在清理...",
+            (GuiLocale::EnUs, 0) => "Cleaning.",
+            (GuiLocale::EnUs, 1) => "Cleaning..",
+            (GuiLocale::EnUs, _) => "Cleaning...",
+        }
+    }
+
     pub(super) fn request_log_clear_old_confirm_title(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "清理请求日志",
@@ -1119,8 +1132,22 @@ impl GuiText {
 
     pub(super) fn request_log_clear_done(self, deleted: usize) -> String {
         match self.locale {
-            GuiLocale::ZhCn => format!("已清理 {deleted} 条请求日志"),
-            GuiLocale::EnUs => format!("Deleted {deleted} request logs"),
+            GuiLocale::ZhCn => format!("清理完成，已删除 {deleted} 条请求日志。"),
+            GuiLocale::EnUs => format!("Cleanup complete. Deleted {deleted} request logs."),
+        }
+    }
+
+    pub(super) fn request_log_clear_done_status(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "清理完成",
+            GuiLocale::EnUs => "Cleanup complete",
+        }
+    }
+
+    pub(super) fn request_log_clear_failed_status(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "清理失败，请重试。",
+            GuiLocale::EnUs => "Cleanup failed. Please try again.",
         }
     }
 

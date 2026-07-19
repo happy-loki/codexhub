@@ -4,7 +4,11 @@ use std::{
     fs,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{
+        Arc, Mutex, MutexGuard, TryLockError,
+        atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
+        mpsc::{Receiver, SyncSender, TrySendError, sync_channel},
+    },
     task::{Context, Poll},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -20,6 +24,7 @@ use tracing::{debug, warn};
 use crate::config::AppConfig;
 
 const DB_FILE_NAME: &str = "ai-gateway-request-logs.sqlite";
+const WRITE_QUEUE_CAPACITY: usize = 256;
 
 #[derive(Debug, Clone, Default)]
 pub struct LogUsage {
@@ -131,6 +136,31 @@ pub struct RequestLogStore {
 struct RequestLogStoreInner {
     db_path: PathBuf,
     conn: Mutex<Option<Connection>>,
+    write_tx: SyncSender<RequestLogWrite>,
+    next_id: AtomicI64,
+    dropped_writes: AtomicU64,
+    maintenance_active: AtomicBool,
+    maintenance: Mutex<()>,
+}
+
+enum RequestLogWrite {
+    Insert {
+        id: i64,
+        record: RequestLogRecord,
+    },
+    Update {
+        id: i64,
+        update: RequestLogUpdate,
+    },
+    RecordTtft {
+        id: i64,
+        ttft_ms: i64,
+    },
+    Barrier(SyncSender<()>),
+    Maintenance {
+        operation: Box<dyn FnOnce(&Connection) -> rusqlite::Result<usize> + Send>,
+        done: SyncSender<rusqlite::Result<usize>>,
+    },
 }
 
 impl RequestLogStore {
@@ -146,10 +176,40 @@ impl RequestLogStore {
                 None
             }
         };
+        let next_id = conn
+            .as_ref()
+            .and_then(|conn| max_log_id_with_conn(conn).ok())
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1);
+        let writer_conn = match open(&db_path) {
+            Ok(conn) => Some(conn),
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    path = %db_path.display(),
+                    "failed to open AI Gateway request log writer database"
+                );
+                None
+            }
+        };
+        let (write_tx, write_rx) = sync_channel(WRITE_QUEUE_CAPACITY);
+        let writer_path = db_path.clone();
+        if let Err(err) = std::thread::Builder::new()
+            .name("codexhub-request-log-writer".to_string())
+            .spawn(move || request_log_writer_loop(writer_path, writer_conn, write_rx))
+        {
+            warn!(error = %err, "failed to start AI Gateway request log writer");
+        }
         Self {
             inner: Arc::new(RequestLogStoreInner {
                 db_path,
                 conn: Mutex::new(conn),
+                write_tx,
+                next_id: AtomicI64::new(next_id),
+                dropped_writes: AtomicU64::new(0),
+                maintenance_active: AtomicBool::new(false),
+                maintenance: Mutex::new(()),
             }),
         }
     }
@@ -160,11 +220,20 @@ impl RequestLogStore {
     }
 
     pub fn insert_record(&self, record: &RequestLogRecord) -> rusqlite::Result<i64> {
-        self.with_conn(|conn| insert_record_with_conn(conn, record))
+        let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
+        self.enqueue_write(RequestLogWrite::Insert {
+            id,
+            record: record.clone(),
+        });
+        Ok(id)
     }
 
     pub fn update_record(&self, id: i64, update: &RequestLogUpdate) -> rusqlite::Result<()> {
-        self.with_conn(|conn| update_record_with_conn(conn, id, update))
+        self.enqueue_write(RequestLogWrite::Update {
+            id,
+            update: update.clone(),
+        });
+        Ok(())
     }
 
     /// Records time-to-first-token only if it has not been set yet. Some
@@ -172,29 +241,33 @@ impl RequestLogStore {
     /// several upstream round-trips per request; without this guard a later
     /// round would overwrite the genuine first-token timestamp.
     pub fn record_ttft_once(&self, id: i64, ttft_ms: i64) -> rusqlite::Result<()> {
-        self.with_conn(|conn| {
-            conn.execute(
-                "UPDATE ai_gateway_request_logs SET ttft_ms = ?1 \
-                 WHERE id = ?2 AND ttft_ms IS NULL",
-                params![ttft_ms, id],
-            )?;
-            Ok(())
-        })
+        self.enqueue_write(RequestLogWrite::RecordTtft { id, ttft_ms });
+        Ok(())
     }
 
     pub fn list_recent(&self, limit: usize) -> rusqlite::Result<Vec<RequestLogEntry>> {
+        if self.inner.maintenance_active.load(Ordering::Acquire) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let _maintenance = try_lock_maintenance(&self.inner.maintenance)?;
+        self.flush_pending_writes()?;
         self.with_conn(|conn| list_recent_with_conn(conn, limit))
     }
 
     pub fn delete_older_than(&self, cutoff_ms: i64) -> rusqlite::Result<usize> {
-        self.with_conn(|conn| delete_older_than_with_conn(conn, cutoff_ms))
+        self.run_maintenance(move |conn| delete_older_than_with_conn(conn, cutoff_ms))
     }
 
     pub fn delete_all(&self) -> rusqlite::Result<usize> {
-        self.with_conn(delete_all_with_conn)
+        self.run_maintenance(delete_all_with_conn)
     }
 
     pub fn get_detail(&self, id: i64) -> rusqlite::Result<Option<RequestLogDetail>> {
+        if self.inner.maintenance_active.load(Ordering::Acquire) {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let _maintenance = try_lock_maintenance(&self.inner.maintenance)?;
+        self.flush_pending_writes()?;
         self.with_conn(|conn| get_detail_with_conn(conn, id))
     }
 
@@ -217,6 +290,51 @@ impl RequestLogStore {
         );
         result
     }
+
+    fn enqueue_write(&self, command: RequestLogWrite) {
+        match self.inner.write_tx.try_send(command) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) | Err(TrySendError::Disconnected(_)) => {
+                let dropped = self
+                    .inner
+                    .dropped_writes
+                    .fetch_add(1, Ordering::Relaxed)
+                    .saturating_add(1);
+                if dropped == 1 || dropped % 100 == 0 {
+                    warn!(
+                        dropped,
+                        "AI Gateway request log queue is unavailable; dropping log writes"
+                    );
+                }
+            }
+        }
+    }
+
+    fn flush_pending_writes(&self) -> rusqlite::Result<()> {
+        let (done_tx, done_rx) = sync_channel(0);
+        self.inner
+            .write_tx
+            .send(RequestLogWrite::Barrier(done_tx))
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        done_rx.recv().map_err(|_| rusqlite::Error::InvalidQuery)
+    }
+
+    fn run_maintenance(
+        &self,
+        operation: impl FnOnce(&Connection) -> rusqlite::Result<usize> + Send + 'static,
+    ) -> rusqlite::Result<usize> {
+        let _maintenance = lock_maintenance(&self.inner.maintenance);
+        let _active = MaintenanceActiveGuard::new(&self.inner.maintenance_active);
+        let (done_tx, done_rx) = sync_channel(0);
+        self.inner
+            .write_tx
+            .send(RequestLogWrite::Maintenance {
+                operation: Box::new(operation),
+                done: done_tx,
+            })
+            .map_err(|_| rusqlite::Error::InvalidQuery)?;
+        done_rx.recv().map_err(|_| rusqlite::Error::InvalidQuery)?
+    }
 }
 
 fn lock_connection(mutex: &Mutex<Option<Connection>>) -> MutexGuard<'_, Option<Connection>> {
@@ -225,6 +343,101 @@ fn lock_connection(mutex: &Mutex<Option<Connection>>) -> MutexGuard<'_, Option<C
         Err(poisoned) => {
             warn!("AI Gateway request log connection lock was poisoned; continuing");
             poisoned.into_inner()
+        }
+    }
+}
+
+fn lock_maintenance(mutex: &Mutex<()>) -> MutexGuard<'_, ()> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            warn!("AI Gateway request log maintenance lock was poisoned; continuing");
+            poisoned.into_inner()
+        }
+    }
+}
+
+fn try_lock_maintenance(mutex: &Mutex<()>) -> rusqlite::Result<MutexGuard<'_, ()>> {
+    match mutex.try_lock() {
+        Ok(guard) => Ok(guard),
+        Err(TryLockError::WouldBlock) => Err(rusqlite::Error::InvalidQuery),
+        Err(TryLockError::Poisoned(poisoned)) => {
+            warn!("AI Gateway request log maintenance lock was poisoned; continuing");
+            Ok(poisoned.into_inner())
+        }
+    }
+}
+
+struct MaintenanceActiveGuard<'a> {
+    active: &'a AtomicBool,
+}
+
+impl<'a> MaintenanceActiveGuard<'a> {
+    fn new(active: &'a AtomicBool) -> Self {
+        active.store(true, Ordering::Release);
+        Self { active }
+    }
+}
+
+impl Drop for MaintenanceActiveGuard<'_> {
+    fn drop(&mut self) {
+        self.active.store(false, Ordering::Release);
+    }
+}
+
+fn request_log_writer_loop(
+    db_path: PathBuf,
+    mut connection: Option<Connection>,
+    receiver: Receiver<RequestLogWrite>,
+) {
+    while let Ok(command) = receiver.recv() {
+        if let RequestLogWrite::Barrier(done) = command {
+            let _ = done.send(());
+            continue;
+        }
+        if connection.is_none() {
+            match open(&db_path) {
+                Ok(conn) => connection = Some(conn),
+                Err(err) => {
+                    warn!(
+                        error = %err,
+                        path = %db_path.display(),
+                        "failed to reopen AI Gateway request log writer database"
+                    );
+                    if let RequestLogWrite::Maintenance { done, .. } = command {
+                        let _ = done.send(Err(err));
+                    }
+                    continue;
+                }
+            }
+        }
+        let conn = connection
+            .as_ref()
+            .expect("request log writer connection initialized");
+        let result = match command {
+            RequestLogWrite::Insert { id, record } => {
+                insert_record_with_id(conn, id, &record).map(|_| ())
+            }
+            RequestLogWrite::Update { id, update } => update_record_with_conn(conn, id, &update),
+            RequestLogWrite::RecordTtft { id, ttft_ms } => conn
+                .execute(
+                    "UPDATE ai_gateway_request_logs SET ttft_ms = ?1 \
+                     WHERE id = ?2 AND ttft_ms IS NULL",
+                    params![ttft_ms, id],
+                )
+                .map(|_| ()),
+            RequestLogWrite::Barrier(_) => unreachable!(),
+            RequestLogWrite::Maintenance { operation, done } => {
+                let result = conn
+                    .busy_timeout(std::time::Duration::from_secs(30))
+                    .and_then(|()| operation(conn));
+                let _ = conn.busy_timeout(std::time::Duration::from_millis(1000));
+                let _ = done.send(result);
+                continue;
+            }
+        };
+        if let Err(err) = result {
+            warn!(error = %err, "failed to persist queued AI Gateway request log write");
         }
     }
 }
@@ -441,17 +654,34 @@ pub fn insert_record(db_path: &Path, record: &RequestLogRecord) -> rusqlite::Res
 }
 
 fn insert_record_with_conn(conn: &Connection, record: &RequestLogRecord) -> rusqlite::Result<i64> {
+    insert_record_with_optional_id(conn, None, record)
+}
+
+fn insert_record_with_id(
+    conn: &Connection,
+    id: i64,
+    record: &RequestLogRecord,
+) -> rusqlite::Result<i64> {
+    insert_record_with_optional_id(conn, Some(id), record)
+}
+
+fn insert_record_with_optional_id(
+    conn: &Connection,
+    id: Option<i64>,
+    record: &RequestLogRecord,
+) -> rusqlite::Result<i64> {
     conn.execute(
         "INSERT INTO ai_gateway_request_logs (
-            request_id, model_id, stream, channel, provider_type, status,
+            id, request_id, model_id, stream, channel, provider_type, status,
             input_tokens, output_tokens, total_tokens, read_cache_tokens,
             read_cache_hit_rate, write_cache_tokens, cost_usd, latency_ms,
             ttft_ms, created_at_ms, error_message, request_headers_json, request_json,
             upstream_request_body_bytes, upstream_request_headers_json, upstream_request_json,
             upstream_response_sse, response_json,
             write_cache_5m_tokens, write_cache_1h_tokens
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
         params![
+            id,
             &record.request_id,
             &record.model_id,
             record.stream as i64,
@@ -480,7 +710,7 @@ fn insert_record_with_conn(conn: &Connection, record: &RequestLogRecord) -> rusq
             record.usage.write_cache_1h_tokens,
         ],
     )?;
-    Ok(conn.last_insert_rowid())
+    Ok(id.unwrap_or_else(|| conn.last_insert_rowid()))
 }
 
 #[cfg(test)]
@@ -652,37 +882,43 @@ pub fn delete_older_than(db_path: &Path, cutoff_ms: i64) -> rusqlite::Result<usi
     delete_older_than_with_conn(&conn, cutoff_ms)
 }
 
-fn delete_older_than_with_conn(conn: &Connection, cutoff_ms: i64) -> rusqlite::Result<usize> {
-    let deleted = conn.execute(
-        "DELETE FROM ai_gateway_request_logs WHERE created_at_ms < ?1",
-        params![cutoff_ms],
-    )?;
-    compact_after_delete(conn, deleted)?;
-    Ok(deleted)
-}
-
 #[cfg(test)]
 pub fn delete_all(db_path: &Path) -> rusqlite::Result<usize> {
     let conn = open(db_path)?;
     delete_all_with_conn(&conn)
 }
 
-fn delete_all_with_conn(conn: &Connection) -> rusqlite::Result<usize> {
-    let deleted = conn.execute("DELETE FROM ai_gateway_request_logs", [])?;
-    compact_after_delete(conn, deleted)?;
+fn delete_older_than_with_conn(conn: &Connection, cutoff_ms: i64) -> rusqlite::Result<usize> {
+    let deleted = conn.execute(
+        "DELETE FROM ai_gateway_request_logs WHERE created_at_ms < ?1",
+        params![cutoff_ms],
+    )?;
+    vacuum_after_delete(conn, deleted)?;
     Ok(deleted)
 }
 
-fn compact_after_delete(conn: &Connection, deleted: usize) -> rusqlite::Result<()> {
+fn delete_all_with_conn(conn: &Connection) -> rusqlite::Result<usize> {
+    let deleted = conn.execute("DELETE FROM ai_gateway_request_logs", [])?;
+    vacuum_after_delete(conn, deleted)?;
+    Ok(deleted)
+}
+
+fn max_log_id_with_conn(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COALESCE(MAX(id), 0) FROM ai_gateway_request_logs",
+        [],
+        |row| row.get(0),
+    )
+}
+
+fn vacuum_after_delete(conn: &Connection, deleted: usize) -> rusqlite::Result<()> {
     if deleted == 0 {
         return Ok(());
     }
     conn.execute_batch(
-        r#"
-        PRAGMA wal_checkpoint(TRUNCATE);
-        VACUUM;
-        PRAGMA wal_checkpoint(TRUNCATE);
-        "#,
+        "PRAGMA wal_checkpoint(TRUNCATE);
+         VACUUM;
+         PRAGMA wal_checkpoint(TRUNCATE);",
     )
 }
 
@@ -1844,6 +2080,140 @@ mod tests {
         assert_eq!(logs.len(), 1);
         assert_eq!(logs[0].request_id, "recent");
         let _ = std::fs::remove_file(db_path);
+    }
+
+    #[test]
+    fn request_log_store_vacuums_deleted_history_and_reclaims_disk_space() {
+        let db_path = temp_db_path();
+        let store = test_store(&db_path);
+        let now = now_ms();
+        let old_count = 8;
+        store
+            .with_conn(|conn| {
+                conn.execute_batch("BEGIN IMMEDIATE")?;
+                for index in 0..old_count {
+                    let response_json = "x".repeat(512 * 1024);
+                    conn.execute(
+                        "INSERT INTO ai_gateway_request_logs (
+                            request_id, model_id, stream, channel, provider_type,
+                            status, created_at_ms, response_json
+                         ) VALUES (?1, 'test-model', 1, 'test', 'responses',
+                                   'completed', ?2, ?3)",
+                        params![format!("old-{index}"), now - 5_000, response_json],
+                    )?;
+                }
+                conn.execute(
+                    "INSERT INTO ai_gateway_request_logs (
+                        request_id, model_id, stream, channel, provider_type,
+                        status, created_at_ms
+                     ) VALUES ('recent', 'test-model', 1, 'test', 'responses',
+                               'completed', ?1)",
+                    params![now],
+                )?;
+                conn.execute_batch("COMMIT")
+            })
+            .expect("seed request logs");
+
+        let size_before = std::fs::metadata(&db_path).unwrap().len();
+
+        let deleted = store
+            .delete_older_than(now - 1_000)
+            .expect("delete old request logs");
+        let size_after = std::fs::metadata(&db_path).unwrap().len();
+
+        assert_eq!(deleted, old_count);
+        let logs = store.list_recent(10).expect("list retained logs");
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].request_id, "recent");
+        assert!(
+            size_after < size_before / 2,
+            "VACUUM should reclaim most deleted pages: before={size_before}, after={size_after}"
+        );
+        drop(store);
+        remove_legacy_database_files(&db_path);
+    }
+
+    #[test]
+    fn request_log_writes_queue_during_maintenance_and_flush_afterwards() {
+        let db_path = temp_db_path();
+        let store = test_store(&db_path);
+        let old_record = RequestLogRecord {
+            request_id: "before-maintenance".to_string(),
+            model_id: "test-model".to_string(),
+            stream: true,
+            channel: "test".to_string(),
+            provider_type: "responses".to_string(),
+            status: "completed".to_string(),
+            usage: LogUsage::default(),
+            cost_usd: None,
+            latency_ms: None,
+            ttft_ms: None,
+            created_at_ms: now_ms(),
+            error_message: None,
+            request_headers_json: None,
+            request_json: None,
+            upstream_request_body_bytes: None,
+            upstream_request_headers_json: None,
+            upstream_request_json: None,
+            upstream_response_sse: None,
+            response_json: Some("x".repeat(512 * 1024)),
+        };
+        store.insert_record(&old_record).unwrap();
+        store.list_recent(10).expect("flush seed log");
+
+        let (maintenance_started_tx, maintenance_started_rx) = sync_channel(0);
+        let (finish_maintenance_tx, finish_maintenance_rx) = sync_channel(0);
+        let maintenance_store = store.clone();
+        let maintenance = std::thread::spawn(move || {
+            maintenance_store.run_maintenance(move |conn| {
+                maintenance_started_tx.send(()).unwrap();
+                finish_maintenance_rx.recv().unwrap();
+                delete_all_with_conn(conn)
+            })
+        });
+        maintenance_started_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .expect("maintenance should start");
+
+        let queued_record = RequestLogRecord {
+            request_id: "during-maintenance".to_string(),
+            response_json: None,
+            ..old_record
+        };
+        let (write_done_tx, write_done_rx) = sync_channel(0);
+        let writer_store = store.clone();
+        let write = std::thread::spawn(move || {
+            let result = writer_store.insert_record(&queued_record);
+            write_done_tx.send(result).unwrap();
+        });
+        let queued_id = match write_done_rx.recv_timeout(std::time::Duration::from_secs(1)) {
+            Ok(result) => result.expect("enqueue request log"),
+            Err(err) => {
+                let _ = finish_maintenance_tx.send(());
+                let _ = maintenance.join();
+                panic!("request logging blocked AI Gateway during maintenance: {err}");
+            }
+        };
+        write.join().unwrap();
+
+        finish_maintenance_tx.send(()).unwrap();
+        assert_eq!(maintenance.join().unwrap().unwrap(), 1);
+
+        let detail = store
+            .get_detail(queued_id)
+            .expect("flush queued write")
+            .expect("queued log should be persisted after maintenance");
+        assert_eq!(detail.summary.request_id, "during-maintenance");
+        assert!(
+            store
+                .list_recent(10)
+                .unwrap()
+                .iter()
+                .all(|entry| entry.request_id != "before-maintenance")
+        );
+
+        drop(store);
+        remove_legacy_database_files(&db_path);
     }
 
     #[test]

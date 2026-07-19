@@ -2999,6 +2999,15 @@ fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<()> {
             return Err(err).with_context(|| format!("failed to inspect {}", path.display()));
         }
     };
+    if std::fs::read(&write_path).is_ok_and(|existing| existing == contents) {
+        chain_log::write_diagnostic_lazy(|| {
+            format!(
+                "[codex_app_config] event=atomic_write_skipped_unchanged path={}",
+                write_path.display()
+            )
+        });
+        return Ok(());
+    }
     let parent = write_path.parent().ok_or_else(|| {
         anyhow!(
             "cannot atomically write path without a parent: {}",
@@ -3327,6 +3336,25 @@ mod tests {
             .map(|entry| entry.expect("read entry").file_name())
             .collect::<Vec<_>>();
         assert_eq!(files, vec![std::ffi::OsString::from("config.toml")]);
+    }
+
+    #[test]
+    fn atomic_config_write_keeps_unchanged_file_in_place() {
+        let codex_home = unique_temp_dir();
+        let config_path = codex_home.join("config.toml");
+        let linked_path = codex_home.join("config-link.toml");
+        let contents = b"model = \"same\"\n";
+        std::fs::write(&config_path, contents).expect("write config");
+        std::fs::hard_link(&config_path, &linked_path).expect("link config");
+
+        write_file_atomically(&config_path, contents).expect("skip unchanged config");
+        std::fs::write(&linked_path, "model = \"updated through link\"\n")
+            .expect("write linked config");
+
+        assert_eq!(
+            std::fs::read_to_string(&config_path).expect("read config"),
+            "model = \"updated through link\"\n"
+        );
     }
 
     #[test]

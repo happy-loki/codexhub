@@ -13,6 +13,7 @@ use super::{GUI_ACTION_TIMEOUT, GUI_CONFIG_TIMEOUT, GUI_CONNECT_TIMEOUT, GUI_STA
 
 const GUI_SESSION_HISTORY_TIMEOUT: Duration = Duration::from_secs(30);
 const GUI_CODEX_ENHANCED_LAUNCH_TIMEOUT: Duration = Duration::from_secs(45);
+const GUI_REQUEST_LOG_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const GUI_WECHAT_ONBOARD_POLL_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Clone)]
@@ -341,13 +342,16 @@ impl ApiClient {
     pub(super) fn ai_gateway_clear_old_request_logs(
         &self,
     ) -> Result<ClearRequestLogsResponse, String> {
-        self.delete_with_timeout("/ai-gateway/request-logs/old?days=3", GUI_CONFIG_TIMEOUT)
+        self.delete_with_timeout(
+            "/ai-gateway/request-logs/old?days=3",
+            GUI_REQUEST_LOG_CLEANUP_TIMEOUT,
+        )
     }
 
     pub(super) fn ai_gateway_clear_all_request_logs(
         &self,
     ) -> Result<ClearRequestLogsResponse, String> {
-        self.delete_with_timeout("/ai-gateway/request-logs", GUI_CONFIG_TIMEOUT)
+        self.delete_with_timeout("/ai-gateway/request-logs", GUI_REQUEST_LOG_CLEANUP_TIMEOUT)
     }
 }
 

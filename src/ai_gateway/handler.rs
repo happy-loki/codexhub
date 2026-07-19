@@ -994,11 +994,12 @@ pub async fn handle_request_logs(
 
 /// DELETE /ai-gateway/request-logs
 pub async fn handle_clear_request_logs(State(state): State<SharedState>) -> impl IntoResponse {
-    match state.ai_gateway_request_logs.delete_all() {
+    let store = state.ai_gateway_request_logs.clone();
+    match run_request_log_cleanup(move || store.delete_all()).await {
         Ok(deleted) => Json(json!({ "deleted": deleted })).into_response(),
         Err(err) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": err.to_string() })),
+            Json(json!({ "error": err })),
         )
             .into_response(),
     }
@@ -1011,14 +1012,24 @@ pub async fn handle_clear_old_request_logs(
 ) -> impl IntoResponse {
     let days = query.days.unwrap_or(3).clamp(1, 3650);
     let cutoff_ms = request_log::now_ms().saturating_sub((days as i64) * 24 * 60 * 60 * 1000);
-    match state.ai_gateway_request_logs.delete_older_than(cutoff_ms) {
+    let store = state.ai_gateway_request_logs.clone();
+    match run_request_log_cleanup(move || store.delete_older_than(cutoff_ms)).await {
         Ok(deleted) => Json(json!({ "deleted": deleted })).into_response(),
         Err(err) => (
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "error": err.to_string() })),
+            Json(json!({ "error": err })),
         )
             .into_response(),
     }
+}
+
+async fn run_request_log_cleanup(
+    operation: impl FnOnce() -> rusqlite::Result<usize> + Send + 'static,
+) -> Result<usize, String> {
+    tokio::task::spawn_blocking(operation)
+        .await
+        .map_err(|err| format!("request log cleanup task failed: {err}"))?
+        .map_err(|err| err.to_string())
 }
 
 /// GET /ai-gateway/request-logs/{id}

@@ -53,6 +53,8 @@ pub struct EnhancedLaunchReport {
     pub use_hidden_models: bool,
     pub key_gates_enabled: usize,
     pub i18n_enabled: bool,
+    pub fast_initialize_applied: bool,
+    pub fast_initialize_source: Option<String>,
     pub bootstrap_intercepted: bool,
     pub bootstrap_source: Option<String>,
     pub routes_mounted: bool,
@@ -114,7 +116,7 @@ pub async fn launch_and_inject(
                     .map_err(|err| anyhow!("配置 CODEX_API_BASE_URL 失败: {err}"))?;
                 target
             }
-            None => bail!("Codex App 正在运行。请先完全退出，再使用自定义模型列表启动 Codex"),
+            None => bail!("Codex App 正在运行。请先完全退出，再使用增强模式启动 Codex"),
         }
     } else {
         crate::codex_app_config::configure_gui_direct_api_base(backend_url)
@@ -139,8 +141,10 @@ pub async fn launch_and_inject(
     let status = wait_for_injected_status(&client, DEFAULT_CDP_PORT, &target.id, &models).await?;
     let startup_elapsed_ms = started.elapsed().as_millis() as u64;
     chain_log::write_line(format!(
-        "[codex_app_enhanced] event=config_ready elapsed_ms={startup_elapsed_ms} i18n_enabled={} routes_mounted={} renderer_ready_ms={} bootstrap_intercepted={} bootstrap_source={}",
+        "[codex_app_enhanced] event=config_ready elapsed_ms={startup_elapsed_ms} i18n_enabled={} fast_initialize_applied={} fast_initialize_source={} routes_mounted={} renderer_ready_ms={} bootstrap_intercepted={} bootstrap_source={}",
         status.i18n_enabled,
+        status.fast_initialize_applied,
+        status.fast_initialize_source.as_deref().unwrap_or("none"),
         status.routes_mounted,
         status
             .renderer_ready_ms
@@ -158,6 +162,8 @@ pub async fn launch_and_inject(
         use_hidden_models: status.use_hidden_models,
         key_gates_enabled: status.key_gates_enabled,
         i18n_enabled: status.i18n_enabled,
+        fast_initialize_applied: status.fast_initialize_applied,
+        fast_initialize_source: status.fast_initialize_source,
         bootstrap_intercepted: status.bootstrap_intercepted,
         bootstrap_source: status.bootstrap_source,
         routes_mounted: status.routes_mounted,
@@ -201,7 +207,7 @@ async fn wait_for_app_target(client: &reqwest::Client, port: u16) -> Result<CdpT
         if tokio::time::Instant::now() >= deadline {
             bail!("Codex App 未在 30 秒内开放本地 CDP 端口 {port}");
         }
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
@@ -225,7 +231,6 @@ async fn inject_target(target: &CdpTarget, port: u16, models: &[String]) -> Resu
         .context("连接 Codex App CDP 失败")?;
     let source = enhanced_statsig_script(models)?;
     let mut command_id = 1_u64;
-    cdp_command(&mut socket, &mut command_id, "Page.enable", json!({})).await?;
     for (method, params) in enhanced_script_install_commands(&source) {
         let result = cdp_command(&mut socket, &mut command_id, method, params).await?;
         if method == "Runtime.evaluate" {
@@ -268,15 +273,15 @@ async fn inject_target(target: &CdpTarget, port: u16, models: &[String]) -> Resu
 fn enhanced_script_install_commands(source: &str) -> Vec<(&'static str, Value)> {
     vec![
         (
-            "Page.addScriptToEvaluateOnNewDocument",
-            json!({ "source": source }),
-        ),
-        (
             "Runtime.evaluate",
             json!({
                 "expression": source,
                 "returnByValue": true,
             }),
+        ),
+        (
+            "Page.addScriptToEvaluateOnNewDocument",
+            json!({ "source": source }),
         ),
     ]
 }
@@ -359,6 +364,8 @@ struct InjectedStatus {
     use_hidden_models: bool,
     key_gates_enabled: usize,
     i18n_enabled: bool,
+    fast_initialize_applied: bool,
+    fast_initialize_source: Option<String>,
     bootstrap_intercepted: bool,
     bootstrap_source: Option<String>,
     routes_mounted: bool,
@@ -413,6 +420,8 @@ async fn inspect_injected_status(target: &CdpTarget, port: u16) -> Result<Inject
             useHiddenModels: config?.use_hidden_models ?? true,
             keyGatesEnabled: gates.filter((gate) => client?.checkGate?.(gate) === true).length,
             i18nEnabled: i18n?.get?.("enable_i18n", false) === true,
+            fastInitializeApplied: Boolean(window.__CODEXHUB_ENHANCED_MODE__?.fastInitializeApplied),
+            fastInitializeSource: window.__CODEXHUB_ENHANCED_MODE__?.fastInitializeSource ?? null,
             bootstrapIntercepted: Boolean(window.__CODEXHUB_ENHANCED_MODE__?.bootstrapIntercepted),
             bootstrapSource: window.__CODEXHUB_ENHANCED_MODE__?.bootstrapSource ?? null,
             routesMounted: Boolean(window.__CODEXHUB_ENHANCED_MODE__?.routesMounted),
@@ -442,7 +451,7 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     Ok(format!(
         r#"(() => {{
   const MARKER = "__CODEXHUB_ENHANCED_MODE__";
-  const SCRIPT_VERSION = 6;
+  const SCRIPT_VERSION = 7;
   const MODELS = {models};
   const SUPPORTED_GATES = {gates};
   const LEGACY_CODEXHUB_GATES = {legacy_gates};
@@ -463,6 +472,10 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     bootstrapIntercepted: false,
     bootstrapInterceptedAtMs: null,
     bootstrapSource: null,
+    fastInitializeApplied: false,
+    fastInitializeAppliedAtMs: null,
+    fastInitializeSource: null,
+    fastInitializeError: null,
     i18nReactCacheInvalidated: 0,
     routesMounted: false,
     routesMountedAtMs: null,
@@ -623,16 +636,66 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     return true;
   }};
 
+  const FAST_INITIALIZE_PATCH_MARKER = "__CODEXHUB_ENHANCED_FAST_INITIALIZE_PATCH__";
+  const installFastInitializePatch = (client) => {{
+    if (!client
+      || typeof client.initializeAsync !== "function"
+      || typeof client.initializeSync !== "function"
+      || typeof client.dataAdapter?.setData !== "function") return false;
+    if (client[FAST_INITIALIZE_PATCH_MARKER]) return true;
+    const control = {{
+      original: client.initializeAsync.bind(client),
+      promise: null,
+    }};
+    client.initializeAsync = (options) => {{
+      if (control.promise) return control.promise;
+      try {{
+        const values = JSON.parse(buildBootstrapPayload());
+        const currentUser = client.getContext?.().user ?? client._user;
+        if (currentUser && typeof currentUser === "object") {{
+          values.user = structuredClone(currentUser);
+        }}
+        client.dataAdapter.setData(JSON.stringify(values));
+        const details = client.initializeSync({{ disableBackgroundCacheRefresh: true }});
+        if (client.loadingStatus !== "Ready") {{
+          throw new Error(`local Statsig initialization ended in ${{client.loadingStatus}}`);
+        }}
+        state.fastInitializeApplied = true;
+        state.fastInitializeAppliedAtMs = Math.round(performance.now());
+        state.fastInitializeSource = state.bootstrapSource ?? "codexhub-minimal";
+        control.promise = Promise.resolve(details);
+      }} catch (error) {{
+        state.fastInitializeError = String(error?.stack ?? error);
+        control.promise = control.original(options);
+      }}
+      return control.promise;
+    }};
+    client[FAST_INITIALIZE_PATCH_MARKER] = control;
+    return true;
+  }};
+
+  const installClientPatches = (client) => {{
+    installStorePatch(client);
+    installFastInitializePatch(client);
+  }};
+
+  const installStatsigClientPatches = (statsig) => {{
+    installClientPatches(statsig?.firstInstance);
+    for (const client of Object.values(statsig?.instances ?? {{}})) {{
+      installClientPatches(client);
+    }}
+  }};
+
   const hookFirstInstance = (statsig) => {{
     if (!statsig || typeof statsig !== "object") return;
     const marker = "__CODEXHUB_ENHANCED_FIRST_INSTANCE_HOOK__";
     if (statsig[marker]) {{
-      installStorePatch(statsig.firstInstance);
+      installStatsigClientPatches(statsig);
       return;
     }}
     const descriptor = Object.getOwnPropertyDescriptor(statsig, "firstInstance");
     if (descriptor?.configurable === false) {{
-      installStorePatch(statsig.firstInstance);
+      installStatsigClientPatches(statsig);
       return;
     }}
     let current = statsig.firstInstance;
@@ -642,11 +705,11 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
       get: () => current,
       set: (client) => {{
         current = client;
-        installStorePatch(client);
+        installClientPatches(client);
       }},
     }});
     statsig[marker] = true;
-    installStorePatch(current);
+    installStatsigClientPatches(statsig);
   }};
 
   const hookStatsigGlobal = () => {{
@@ -1005,59 +1068,149 @@ async fn launch_codex_app(port: u16) -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn launch_codex_app_blocking(port: u16) -> Result<()> {
-    use std::os::windows::process::CommandExt;
+const CODEX_APP_USER_MODEL_ID: &str = "OpenAI.Codex_2p2nqsd0c76g0!App";
 
-    use base64::{Engine as _, engine::general_purpose::STANDARD};
+#[cfg(target_os = "windows")]
+const IID_IAPPLICATION_ACTIVATION_MANAGER: windows_sys::core::GUID =
+    windows_sys::core::GUID::from_u128(0x2e941141_7f97_4756_ba1d_9decde894a3d);
 
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let script = format!(
-        r#"$ErrorActionPreference='Stop'
-$package=Get-AppxPackage OpenAI.Codex|Sort-Object Version -Descending|Select-Object -First 1
-if(-not $package){{throw 'OpenAI.Codex Store package is not installed'}}
-$source=@'
-using System;
-using System.Runtime.InteropServices;
-[ComImport,Guid("2e941141-7f97-4756-ba1d-9decde894a3d"),InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-interface IApplicationActivationManager {{
- int ActivateApplication([MarshalAs(UnmanagedType.LPWStr)] string appUserModelId,[MarshalAs(UnmanagedType.LPWStr)] string arguments,uint options,out uint processId);
- int ActivateForFile(IntPtr appUserModelId,IntPtr itemArray,IntPtr verb,out uint processId);
- int ActivateForProtocol(IntPtr appUserModelId,IntPtr itemArray,out uint processId);
-}}
-[ComImport,Guid("45BA127D-10A8-46EA-8AB7-56EA9078943C")]
-class ApplicationActivationManager {{}}
-public static class CodexHubEnhancedLauncher {{
- public static uint Launch(string appId,string arguments) {{
-  var manager=(IApplicationActivationManager)new ApplicationActivationManager();
-  uint processId; int result=manager.ActivateApplication(appId,arguments,0,out processId);
-  Marshal.ThrowExceptionForHR(result); return processId;
- }}
-}}
-'@
-Add-Type -TypeDefinition $source
-$appId="$($package.PackageFamilyName)!App"
-[CodexHubEnhancedLauncher]::Launch($appId,'--remote-debugging-address=127.0.0.1 --remote-debugging-port={port}')|Out-Null"#
-    );
-    let encoded: Vec<u8> = script
-        .encode_utf16()
-        .flat_map(|unit| unit.to_le_bytes())
-        .collect();
-    let status = Command::new("powershell.exe")
-        .args([
-            "-NoProfile",
-            "-NonInteractive",
-            "-WindowStyle",
-            "Hidden",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-EncodedCommand",
-            &STANDARD.encode(encoded),
-        ])
-        .creation_flags(CREATE_NO_WINDOW)
-        .status()?;
-    if !status.success() {
-        bail!("Windows 无法使用自定义模型列表启动 Codex App");
+#[cfg(target_os = "windows")]
+#[repr(C)]
+struct ApplicationActivationManagerInterface {
+    vtable: *const ApplicationActivationManagerVtable,
+}
+
+#[cfg(target_os = "windows")]
+#[allow(dead_code)]
+#[repr(C)]
+struct ApplicationActivationManagerVtable {
+    query_interface: unsafe extern "system" fn(
+        *mut ApplicationActivationManagerInterface,
+        *const windows_sys::core::GUID,
+        *mut *mut std::ffi::c_void,
+    ) -> windows_sys::core::HRESULT,
+    add_ref: unsafe extern "system" fn(*mut ApplicationActivationManagerInterface) -> u32,
+    release: unsafe extern "system" fn(*mut ApplicationActivationManagerInterface) -> u32,
+    activate_application: unsafe extern "system" fn(
+        *mut ApplicationActivationManagerInterface,
+        *const u16,
+        *const u16,
+        u32,
+        *mut u32,
+    ) -> windows_sys::core::HRESULT,
+}
+
+#[cfg(target_os = "windows")]
+struct ComApartmentGuard {
+    should_uninitialize: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for ComApartmentGuard {
+    fn drop(&mut self) {
+        if self.should_uninitialize {
+            unsafe { windows_sys::Win32::System::Com::CoUninitialize() };
+        }
     }
+}
+
+#[cfg(target_os = "windows")]
+struct ApplicationActivationManagerHandle(*mut ApplicationActivationManagerInterface);
+
+#[cfg(target_os = "windows")]
+impl Drop for ApplicationActivationManagerHandle {
+    fn drop(&mut self) {
+        if self.0.is_null() {
+            return;
+        }
+        let vtable = unsafe { (*self.0).vtable };
+        if !vtable.is_null() {
+            unsafe { ((*vtable).release)(self.0) };
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn initialize_com_apartment() -> Result<ComApartmentGuard> {
+    use windows_sys::Win32::{
+        Foundation::RPC_E_CHANGED_MODE,
+        System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx},
+    };
+
+    let result = unsafe { CoInitializeEx(std::ptr::null(), COINIT_APARTMENTTHREADED as u32) };
+    if result < 0 && result != RPC_E_CHANGED_MODE {
+        bail!("Windows COM 初始化失败（HRESULT 0x{:08X}）", result as u32);
+    }
+    Ok(ComApartmentGuard {
+        should_uninitialize: result >= 0,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn create_application_activation_manager() -> Result<ApplicationActivationManagerHandle> {
+    use windows_sys::Win32::{
+        System::Com::{CLSCTX_LOCAL_SERVER, CoCreateInstance},
+        UI::Shell::ApplicationActivationManager,
+    };
+
+    let mut raw = std::ptr::null_mut();
+    let result = unsafe {
+        CoCreateInstance(
+            &ApplicationActivationManager,
+            std::ptr::null_mut(),
+            CLSCTX_LOCAL_SERVER,
+            &IID_IAPPLICATION_ACTIVATION_MANAGER,
+            &mut raw,
+        )
+    };
+    if result < 0 || raw.is_null() {
+        bail!(
+            "Windows 应用激活服务不可用（HRESULT 0x{:08X}）",
+            result as u32
+        );
+    }
+    Ok(ApplicationActivationManagerHandle(raw.cast()))
+}
+
+#[cfg(target_os = "windows")]
+fn wide_null_terminated(value: &str) -> Vec<u16> {
+    value.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(target_os = "windows")]
+fn codex_app_activation_arguments(port: u16) -> String {
+    format!("--remote-debugging-address=127.0.0.1 --remote-debugging-port={port}")
+}
+
+#[cfg(target_os = "windows")]
+fn launch_codex_app_blocking(port: u16) -> Result<()> {
+    let _apartment = initialize_com_apartment()?;
+    let manager = create_application_activation_manager()?;
+    let app_id = wide_null_terminated(CODEX_APP_USER_MODEL_ID);
+    let arguments = wide_null_terminated(&codex_app_activation_arguments(port));
+    let mut process_id = 0_u32;
+    let vtable = unsafe { (*manager.0).vtable };
+    if vtable.is_null() {
+        bail!("Windows 应用激活服务返回了无效接口");
+    }
+    let result = unsafe {
+        ((*vtable).activate_application)(
+            manager.0,
+            app_id.as_ptr(),
+            arguments.as_ptr(),
+            0,
+            &mut process_id,
+        )
+    };
+    if result < 0 {
+        bail!(
+            "Windows 无法激活 Codex App 商店包 {CODEX_APP_USER_MODEL_ID}（HRESULT 0x{:08X}）",
+            result as u32
+        );
+    }
+    chain_log::write_line(format!(
+        "[codex_app_enhanced] event=windows_native_activation process_id={process_id} port={port}"
+    ));
     Ok(())
 }
 
@@ -1078,7 +1231,7 @@ fn launch_codex_app_blocking(port: u16) -> Result<()> {
 
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 fn launch_codex_app_blocking(_port: u16) -> Result<()> {
-    bail!("自定义模型列表启动当前仅支持 Windows 和 macOS")
+    bail!("增强模式启动当前仅支持 Windows 和 macOS")
 }
 
 #[cfg(target_os = "windows")]
@@ -1126,7 +1279,10 @@ mod tests {
         assert!(script.contains("const modelIsV2"));
         assert!(script.contains("installStorePatch"));
         assert!(script.contains("patchCachedI18nLayer"));
-        assert!(script.contains("SCRIPT_VERSION = 6"));
+        assert!(script.contains("SCRIPT_VERSION = 7"));
+        assert!(script.contains("installFastInitializePatch"));
+        assert!(script.contains("client.initializeSync({ disableBackgroundCacheRefresh: true })"));
+        assert!(script.contains("fastInitializeAppliedAtMs"));
         assert!(script.contains("const hasStoredValues"));
         assert!(script.contains("current = hasStoredValues ? stored : minimalBootstrapValues()"));
         assert!(script.contains("codexhub-minimal-store"));
@@ -1158,10 +1314,10 @@ mod tests {
 
         assert_eq!(
             methods,
-            vec!["Page.addScriptToEvaluateOnNewDocument", "Runtime.evaluate"]
+            vec!["Runtime.evaluate", "Page.addScriptToEvaluateOnNewDocument"]
         );
         assert!(!methods.contains(&"Page.reload"));
-        assert_eq!(commands[1].1["expression"], "window.testEnhanced = true;");
+        assert_eq!(commands[0].1["expression"], "window.testEnhanced = true;");
     }
 
     #[test]
@@ -1185,6 +1341,31 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn windows_launcher_builds_native_activation_inputs() {
+        assert_eq!(CODEX_APP_USER_MODEL_ID, "OpenAI.Codex_2p2nqsd0c76g0!App");
+        assert_eq!(
+            codex_app_activation_arguments(9335),
+            "--remote-debugging-address=127.0.0.1 --remote-debugging-port=9335"
+        );
+        let encoded = wide_null_terminated("Codex");
+        assert_eq!(encoded.last(), Some(&0));
+        assert_eq!(
+            String::from_utf16(&encoded[..encoded.len() - 1]).unwrap(),
+            "Codex"
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "requires an interactive Windows shell COM service"]
+    fn windows_native_activation_manager_is_available() {
+        let _apartment = initialize_com_apartment().expect("initialize COM apartment");
+        let manager = create_application_activation_manager().expect("create activation manager");
+        assert!(!manager.0.is_null());
+    }
+
     #[test]
     fn enhanced_config_ready_does_not_require_renderer_routes_or_bootstrap_interception() {
         let expected_models = vec!["gpt-5.6-sol".to_string()];
@@ -1194,6 +1375,8 @@ mod tests {
             use_hidden_models: false,
             key_gates_enabled: SUPPORTED_FEATURE_GATES.len(),
             i18n_enabled: true,
+            fast_initialize_applied: false,
+            fast_initialize_source: None,
             bootstrap_intercepted: false,
             bootstrap_source: None,
             routes_mounted: false,

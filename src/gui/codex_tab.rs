@@ -282,7 +282,6 @@ pub(super) fn bind_actions(
 pub(super) fn set_actions_enabled(tab: &CodexTab, enabled: bool) {
     tab.service_enabled.set(enabled);
     tab.save_models_button.enable(enabled);
-    tab.enhanced_launch_button.enable(enabled);
     for checkbox in tab.model_checks.iter() {
         checkbox.enable(enabled);
     }
@@ -340,10 +339,10 @@ pub(super) fn apply_pending_action(
     let service_enabled = tab.service_enabled.get();
     refresh_config_buttons(tab, service_enabled);
     tab.save_models_button.enable(service_enabled);
-    tab.enhanced_launch_button.enable(service_enabled);
 
     match result {
         CodexActionResult::Inject(Ok(_)) => {
+            refresh_configured(tab, true);
             show_info(frame, text.codex_app_config_injected());
             force_dashboard_refresh(api, refresh);
         }
@@ -352,6 +351,7 @@ pub(super) fn apply_pending_action(
             force_dashboard_refresh(api, refresh);
         }
         CodexActionResult::Clear(Ok(_)) => {
+            refresh_configured(tab, false);
             show_info(frame, text.codex_app_config_uninstalled());
             force_dashboard_refresh(api, refresh);
         }
@@ -381,7 +381,8 @@ pub(super) fn apply_pending_action(
 fn refresh_config_buttons(tab: &CodexTab, service_enabled: bool) {
     let configured = tab.configured.get();
     tab.inject_button.enable(service_enabled && !configured);
-    tab.enhanced_launch_button.enable(service_enabled);
+    tab.enhanced_launch_button
+        .enable(service_enabled && configured);
     tab.clear_button.enable(service_enabled && configured);
 }
 
