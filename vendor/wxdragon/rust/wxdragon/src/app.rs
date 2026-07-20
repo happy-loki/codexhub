@@ -451,7 +451,7 @@ impl crate::event::AppEvents for App {
 
     fn on_reopen_app<F>(&self, callback: F)
     where
-        F: Fn() + Send + 'static,
+        F: Fn() + 'static,
     {
         #[cfg(target_os = "macos")]
         {
@@ -540,7 +540,7 @@ where
 #[cfg(target_os = "macos")]
 unsafe extern "C" fn mac_reopen_app_trampoline<F>(user_data: *mut c_void)
 where
-    F: Fn() + Send + 'static,
+    F: Fn() + 'static,
 {
     if user_data.is_null() {
         return;

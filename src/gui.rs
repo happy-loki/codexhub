@@ -182,28 +182,82 @@ use self::widgets::{
 
 #[derive(Clone)]
 struct GuiTimers {
-    stores: Rc<RefCell<Vec<FrameTimerStore>>>,
+    timers: Rc<RefCell<Vec<TrackedGuiTimer>>>,
+}
+
+struct TrackedGuiTimer {
+    store: FrameTimerStore,
+    pause_when_hidden: bool,
+    resume_after_show: bool,
 }
 
 impl GuiTimers {
     fn new() -> Self {
         Self {
-            stores: Rc::new(RefCell::new(Vec::new())),
+            timers: Rc::new(RefCell::new(Vec::new())),
         }
     }
 
     fn track(&self, store: &FrameTimerStore) {
-        self.stores.borrow_mut().push(store.clone());
+        self.track_timer(store, false);
+    }
+
+    fn track_while_visible(&self, store: &FrameTimerStore) {
+        self.track_timer(store, true);
+    }
+
+    fn track_timer(&self, store: &FrameTimerStore, pause_when_hidden: bool) {
+        self.timers.borrow_mut().push(TrackedGuiTimer {
+            store: store.clone(),
+            pause_when_hidden,
+            resume_after_show: false,
+        });
+    }
+
+    fn pause_while_hidden(&self) {
+        for tracked in self.timers.borrow_mut().iter_mut() {
+            if !tracked.pause_when_hidden {
+                continue;
+            }
+            let was_running = {
+                let store = tracked.store.borrow();
+                if let Some(timer) = store.as_ref()
+                    && timer.is_running()
+                {
+                    timer.stop();
+                    true
+                } else {
+                    false
+                }
+            };
+            tracked.resume_after_show = was_running;
+        }
+    }
+
+    fn resume_after_show(&self) {
+        for tracked in self.timers.borrow_mut().iter_mut() {
+            if !tracked.resume_after_show {
+                continue;
+            }
+            let store = tracked.store.borrow();
+            if let Some(timer) = store.as_ref() {
+                let interval = timer.get_interval();
+                if interval > 0 {
+                    timer.start(interval, false);
+                }
+            }
+            tracked.resume_after_show = false;
+        }
     }
 
     fn stop_all(&self) {
-        let stores = self.stores.borrow().clone();
-        for store in stores {
-            if let Some(timer) = store.borrow().as_ref() {
+        let mut timers = self.timers.borrow_mut();
+        for tracked in timers.iter() {
+            if let Some(timer) = tracked.store.borrow().as_ref() {
                 timer.stop();
             }
         }
-        self.stores.borrow_mut().clear();
+        timers.clear();
     }
 }
 
@@ -329,6 +383,14 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         update_check_in_flight.clone(),
         quitting.clone(),
     );
+    #[cfg(target_os = "macos")]
+    {
+        let frame = frame;
+        let gui_timers = gui_timers.clone();
+        app.on_reopen_app(move || {
+            tray::show_main_window(&frame, &gui_timers);
+        });
+    }
     frame.set_background_color(app_theme.bg_app);
     let _status_bar = StatusBar::builder(&frame)
         .with_fields_count(1)
@@ -1059,6 +1121,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     let frame_sizer = BoxSizer::builder(Orientation::Vertical).build();
     frame_sizer.add(&root, 1, SizerFlag::Expand, 0);
     frame.set_sizer(frame_sizer, true);
+    #[cfg(target_os = "windows")]
     {
         // Belt-and-suspenders for the resize ghosting: even with
         // wxFULL_REPAINT_ON_RESIZE set above, force the whole client area to
@@ -1465,7 +1528,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     request_log_cleanup_timer_store
         .borrow_mut()
         .replace(request_log_cleanup_timer);
-    gui_timers.track(&request_log_cleanup_timer_store);
+    gui_timers.track_while_visible(&request_log_cleanup_timer_store);
     {
         let api = api.clone();
         let request_log_result = request_log_result.clone();
@@ -1615,11 +1678,10 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
             }
         });
     }
-    request_log_timer.start(REQUEST_LOG_REFRESH_INTERVAL_MS, false);
     request_log_timer_store
         .borrow_mut()
         .replace(request_log_timer);
-    gui_timers.track(&request_log_timer_store);
+    gui_timers.track_while_visible(&request_log_timer_store);
     if request_logs_active.get() {
         start_request_log_timer(&request_log_timer_store);
     }
@@ -1635,7 +1697,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
     }
     timer.start(DASHBOARD_REFRESH_INTERVAL_MS, false);
     timer_store.borrow_mut().replace(timer);
-    gui_timers.track(&timer_store);
+    gui_timers.track_while_visible(&timer_store);
 
     // Event-driven message pump: replaces the old 100ms polling timers. Drains
     // the channel of results posted by background threads and processes any
@@ -1796,7 +1858,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                 {
                     raw_event.veto();
                 }
-                tray::hide_main_window(&frame, handles.text);
+                tray::hide_main_window(&frame, handles.text, &gui_timers);
                 return;
             }
             dashboard_refresh.closing.store(true, Ordering::SeqCst);
@@ -1805,6 +1867,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
             stop_pending_startup_daemon(&dashboard_refresh);
             stop_daemon_on_exit(&api, &daemon_child);
             frame.destroy();
+            widgets::clear_icon_cache();
             app.exit_main_loop();
         });
     }
@@ -1832,10 +1895,14 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
 /// client area is repainted on resize instead of only the newly exposed strip.
 /// Without it, wxMSW leaves stale pixels behind that smear into vertical
 /// "ghost" streaks while the window is being resized.
+#[cfg(target_os = "windows")]
 fn enable_full_repaint_on_resize<W: WxWidget>(window: &W) {
     const WXD_FULL_REPAINT_ON_RESIZE: i64 = 0x0001_0000;
     window.set_style_raw(window.get_style_raw() | WXD_FULL_REPAINT_ON_RESIZE);
 }
+
+#[cfg(not(target_os = "windows"))]
+fn enable_full_repaint_on_resize<W: WxWidget>(_window: &W) {}
 
 /// Preferred first-launch window size on a roomy display.
 const PREFERRED_FRAME_WIDTH: i32 = 1180;
@@ -2244,7 +2311,7 @@ fn install_system_menu(
     let frame = *frame;
     let gui_timers = gui_timers.clone();
     frame.on_menu_selected(move |event| match event.get_id() {
-        ID_MENU_CLOSE_WINDOW => tray::hide_main_window(&frame, text),
+        ID_MENU_CLOSE_WINDOW => tray::hide_main_window(&frame, text, &gui_timers),
         ID_MENU_QUIT | ID_EXIT => tray::request_app_quit(&frame, &quitting),
         ID_MENU_MINIMIZE => frame.iconize(true),
         ID_MENU_CHECK_UPDATE => {

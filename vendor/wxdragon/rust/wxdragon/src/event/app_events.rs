@@ -147,7 +147,7 @@ pub trait AppEvents {
     /// ```
     fn on_reopen_app<F>(&self, callback: F)
     where
-        F: Fn() + Send + 'static;
+        F: Fn() + 'static;
 
     /// Binds a handler for when files should be printed
     ///

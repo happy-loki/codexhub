@@ -134,7 +134,8 @@ pub(super) fn show(parent: &Frame, text: GuiText, detail: &RequestLogDetail) {
     dialog_sizer.add(&panel, 1, SizerFlag::Expand, 0);
     dialog.set_sizer(dialog_sizer, true);
     dialog.center();
-    dialog.show_modal();
+    let _ = dialog.show_modal();
+    dialog.destroy();
 }
 
 fn request_detail_json(headers: Option<&str>, body: Option<&str>) -> Option<String> {

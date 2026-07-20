@@ -19,6 +19,7 @@ use sha2::{Digest, Sha256};
 use url::Url;
 use wxdragon::{prelude::*, timer::Timer};
 
+#[cfg(target_os = "windows")]
 use super::daemon::hide_command_window;
 use super::text::GuiText;
 use super::{

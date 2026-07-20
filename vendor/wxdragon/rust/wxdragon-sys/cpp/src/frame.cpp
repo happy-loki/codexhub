@@ -8,6 +8,14 @@
 #include <wx/menu.h>
 #include <wx/statusbr.h>
 
+#ifdef __WXOSX_COCOA__
+extern "C" bool
+wxd_Frame_HandleMacShow(wxd_Frame_t* frame, bool show);
+
+extern "C" void
+wxd_Frame_CancelPendingMacHide(wxd_Frame_t* frame);
+#endif
+
 // --- Frame Functions Implementation ---
 
 wxd_Frame_t*
@@ -36,6 +44,9 @@ wxd_Frame_Destroy(wxd_Frame_t* frame)
     // happens later in the event loop after the wxEVT_DESTROY event.
     if (!frame)
         return;
+#ifdef __WXOSX_COCOA__
+    wxd_Frame_CancelPendingMacHide(frame);
+#endif
     wxFrame* wx_frame = reinterpret_cast<wxFrame*>(frame);
     wx_frame->Destroy();
 }
@@ -45,6 +56,10 @@ wxd_Frame_Show(wxd_Frame_t* frame, bool show)
 {
     if (!frame)
         return;
+#ifdef __WXOSX_COCOA__
+    if (wxd_Frame_HandleMacShow(frame, show))
+        return;
+#endif
     wxFrame* wx_frame = reinterpret_cast<wxFrame*>(frame);
     wx_frame->Show(show);
 }

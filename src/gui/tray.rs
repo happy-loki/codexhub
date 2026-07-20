@@ -9,8 +9,10 @@ use std::{
 
 use wxdragon::prelude::*;
 
+#[cfg(not(target_os = "macos"))]
+use super::show_info;
+use super::text::GuiText;
 use super::{GuiTimers, ID_MENU_CHECK_UPDATE, ID_MENU_QUIT, update, widgets::app_icon_bitmap};
-use super::{show_info, text::GuiText};
 
 const ID_TRAY_SHOW_WINDOW: i32 = 11_001;
 
@@ -53,11 +55,12 @@ pub(super) fn install(
     ));
     taskbar.set_popup_menu(&mut menu.borrow_mut());
 
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     {
         let frame = *frame;
-        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        let gui_timers = gui_timers.clone();
         taskbar.on_left_double_click(move |_| {
-            show_main_window(&frame);
+            show_main_window(&frame, &gui_timers);
         });
     }
 
@@ -67,9 +70,9 @@ pub(super) fn install(
         let update_check_in_flight = update_check_in_flight.clone();
         let quitting = quitting.clone();
         taskbar.on_menu(move |event: Event| match event.get_id() {
-            ID_TRAY_SHOW_WINDOW => show_main_window(&frame),
+            ID_TRAY_SHOW_WINDOW => show_main_window(&frame, &gui_timers),
             ID_MENU_CHECK_UPDATE => {
-                show_main_window(&frame);
+                show_main_window(&frame, &gui_timers);
                 update::check_for_updates_async(
                     &frame,
                     &gui_timers,
@@ -89,16 +92,21 @@ pub(super) fn install(
     }
 }
 
-pub(super) fn show_main_window(frame: &Frame) {
+pub(super) fn show_main_window(frame: &Frame, gui_timers: &GuiTimers) {
     frame.iconize(false);
     frame.show(true);
     frame.raise();
     frame.set_focus();
+    gui_timers.resume_after_show();
 }
 
-pub(super) fn hide_main_window(frame: &Frame, text: GuiText) {
+pub(super) fn hide_main_window(frame: &Frame, text: GuiText, gui_timers: &GuiTimers) {
+    gui_timers.pause_while_hidden();
     frame.show(false);
+    #[cfg(not(target_os = "macos"))]
     show_info(frame, text.tray_still_running_message());
+    #[cfg(target_os = "macos")]
+    let _ = text;
 }
 
 pub(super) fn request_app_quit(frame: &Frame, quitting: &Rc<AtomicBool>) {

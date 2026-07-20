@@ -1,3 +1,5 @@
+use std::{cell::RefCell, collections::HashMap};
+
 use image::imageops::FilterType;
 use image::{Rgba, RgbaImage};
 use wxdragon::prelude::*;
@@ -37,14 +39,14 @@ pub(super) struct ImChannelRow {
     pub(super) kind: ImChannelKind,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum ImChannelKind {
     Feishu,
     Telegram,
     Wechat,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum StatusIconKind {
     Service,
     Codex,
@@ -52,7 +54,7 @@ pub(super) enum StatusIconKind {
     CodexCli,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum ProviderLogoKind {
     OpenAi,
     Grok,
@@ -61,11 +63,39 @@ pub(super) enum ProviderLogoKind {
     Zhipu,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum LucideIconKind {
     Router,
     MessagesSquare,
     ScrollText,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum IconCacheKey {
+    Status(StatusIconKind, usize, bool),
+    App(usize),
+    ImChannel(ImChannelKind, usize, bool),
+    Provider(ProviderLogoKind, i32),
+    Lucide(LucideIconKind, usize),
+}
+
+thread_local! {
+    static ICON_CACHE: RefCell<HashMap<IconCacheKey, Bitmap>> = RefCell::new(HashMap::new());
+}
+
+fn cached_icon(key: IconCacheKey, render: impl FnOnce() -> Bitmap) -> Bitmap {
+    ICON_CACHE.with(|cache| {
+        if let Some(bitmap) = cache.borrow().get(&key).cloned() {
+            return bitmap;
+        }
+        let bitmap = render();
+        cache.borrow_mut().insert(key, bitmap.clone());
+        bitmap
+    })
+}
+
+pub(super) fn clear_icon_cache() {
+    ICON_CACHE.with(|cache| cache.borrow_mut().clear());
 }
 
 pub(super) fn table_cell_attr(row: usize) -> Option<DataViewItemAttr> {
@@ -489,6 +519,12 @@ pub(super) fn topology_splitter_bitmap(width: usize, height: usize) -> Bitmap {
 }
 
 pub(super) fn status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
+    cached_icon(IconCacheKey::Status(kind, size, false), || {
+        render_status_icon_bitmap(kind, size)
+    })
+}
+
+fn render_status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
     match kind {
         StatusIconKind::Codex => {
             return svg_brand_bitmap(
@@ -522,6 +558,12 @@ pub(super) fn status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
 }
 
 pub(super) fn disabled_status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
+    cached_icon(IconCacheKey::Status(kind, size, true), || {
+        render_disabled_status_icon_bitmap(kind, size)
+    })
+}
+
+fn render_disabled_status_icon_bitmap(kind: StatusIconKind, size: usize) -> Bitmap {
     match kind {
         StatusIconKind::Codex => {
             return disabled_svg_brand_bitmap(
@@ -555,14 +597,22 @@ pub(super) fn disabled_status_icon_bitmap(kind: StatusIconKind, size: usize) -> 
 }
 
 pub(super) fn app_icon_bitmap(size: usize) -> Bitmap {
-    png_brand_bitmap(
-        "dolphin-rounded-256.png",
-        include_bytes!("../../packaging/icons/dolphin-rounded-256.png"),
-        size,
-    )
+    cached_icon(IconCacheKey::App(size), || {
+        png_brand_bitmap(
+            "dolphin-rounded-256.png",
+            include_bytes!("../../packaging/icons/dolphin-rounded-256.png"),
+            size,
+        )
+    })
 }
 
 pub(super) fn im_channel_icon_bitmap(kind: ImChannelKind, disabled: bool, size: usize) -> Bitmap {
+    cached_icon(IconCacheKey::ImChannel(kind, size, disabled), || {
+        render_im_channel_icon_bitmap(kind, disabled, size)
+    })
+}
+
+fn render_im_channel_icon_bitmap(kind: ImChannelKind, disabled: bool, size: usize) -> Bitmap {
     match kind {
         ImChannelKind::Feishu => {
             if disabled {
@@ -613,6 +663,12 @@ pub(super) fn im_channel_icon_bitmap(kind: ImChannelKind, disabled: bool, size: 
 }
 
 pub(super) fn provider_logo_bitmap(kind: ProviderLogoKind, size: i32) -> Bitmap {
+    cached_icon(IconCacheKey::Provider(kind, size), || {
+        render_provider_logo_bitmap(kind, size)
+    })
+}
+
+fn render_provider_logo_bitmap(kind: ProviderLogoKind, size: i32) -> Bitmap {
     let (file_name, bytes) = match kind {
         ProviderLogoKind::OpenAi => (
             "openai.svg",
@@ -646,6 +702,12 @@ pub(super) fn provider_logo_bitmap(kind: ProviderLogoKind, size: i32) -> Bitmap 
 }
 
 pub(super) fn lucide_icon_bitmap(kind: LucideIconKind, size: usize) -> Bitmap {
+    cached_icon(IconCacheKey::Lucide(kind, size), || {
+        render_lucide_icon_bitmap(kind, size)
+    })
+}
+
+fn render_lucide_icon_bitmap(kind: LucideIconKind, size: usize) -> Bitmap {
     let (file_name, bytes) = match kind {
         LucideIconKind::Router => (
             "router.svg",
@@ -896,19 +958,25 @@ pub(super) fn set_status_panel(panel: &StatusPanel, state: &str, detail: &str, t
 }
 
 pub(super) fn set_im_channel_row(row: &ImChannelRow, state: &str, detail: &str, tone: StateTone) {
-    if row.state.get_label() == state && row.detail.get_label() == detail {
-        return;
-    }
-
     let t = theme::theme();
+    let tone_colour = tone.colour();
     let muted = matches!(tone, StateTone::Muted);
     let name_colour = if muted { t.ink_muted } else { t.ink_secondary };
-    row.icon
-        .set_bitmap(&im_channel_icon_bitmap(row.kind, muted, 24));
+    if row.state.get_label() == state
+        && row.detail.get_label() == detail
+        && row.marker.get_foreground_color() == tone_colour
+        && row.state.get_foreground_color() == tone_colour
+    {
+        return;
+    }
+    if row.name.get_foreground_color() != name_colour {
+        row.icon
+            .set_bitmap(&im_channel_icon_bitmap(row.kind, muted, 24));
+    }
     row.name.set_foreground_color(name_colour);
-    row.marker.set_foreground_color(tone.colour());
+    row.marker.set_foreground_color(tone_colour);
     row.state.set_label(state);
-    row.state.set_foreground_color(tone.colour());
+    row.state.set_foreground_color(tone_colour);
     row.detail.set_label(detail);
     row.detail.set_foreground_color(t.ink_muted);
     row.detail.wrap(220);
