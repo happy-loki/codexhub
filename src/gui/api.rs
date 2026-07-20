@@ -12,7 +12,7 @@ use super::text::GuiText;
 use super::{GUI_ACTION_TIMEOUT, GUI_CONFIG_TIMEOUT, GUI_CONNECT_TIMEOUT, GUI_STATUS_TIMEOUT};
 
 const GUI_SESSION_HISTORY_TIMEOUT: Duration = Duration::from_secs(30);
-const GUI_CODEX_ENHANCED_LAUNCH_TIMEOUT: Duration = Duration::from_secs(45);
+const GUI_CODEX_ENHANCED_LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
 const GUI_REQUEST_LOG_CLEANUP_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const GUI_WECHAT_ONBOARD_POLL_TIMEOUT: Duration = Duration::from_secs(45);
 

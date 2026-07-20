@@ -1,24 +1,31 @@
-CodexHub v0.4.6
+CodexHub v0.4.7
 
-本次更新集中改善桌面 GUI 的资源占用和 macOS 窗口行为：修复全屏关闭到托盘后残留黑色全屏空间的问题，支持从 Dock 重新打开隐藏窗口，并减少窗口隐藏及日常刷新时的无效工作。
+本次更新重点提高 Codex App 增强模式对客户端升级的兼容能力。模型列表和中文能力不再只依赖固定 Statsig 数字 ID；遇到无法识别的新结构时，增强模式会停止覆盖并保留 Codex App 官方状态，避免升级后出现界面异常、中文消失或旧配置被强行写入。
 
-## macOS 窗口与托盘
+## Codex App 升级兼容
 
-- 修复原生全屏窗口关闭到托盘后，Mission Control 仍保留黑色全屏 Space 的问题。
-- 隐藏原生全屏窗口前先退出全屏，并等待 WindowServer 完成 Space 分离后再隐藏窗口。
-- 点击 Dock 中的 CodexHub 图标可以重新显示当前运行实例，无需只能通过菜单栏托盘图标恢复。
-- Dock 或托盘恢复窗口时会取消最小化、置于前台并恢复隐藏期间暂停的 GUI 刷新任务。
+- 模型配置改为根据 `available_models`、`use_hidden_models` 和 `default_model` 字段自动识别。
+- 中文配置改为根据 `enable_i18n` 和 `locale_source` 字段自动识别。
+- 旧版模型与中文数字 ID 只在官方数据中仍然存在时作为兜底，不再凭空创建过期配置。
+- 同时支持 Statsig Store、公开 API 和快速初始化三条适配路径，减少对单个 renderer 私有字段的依赖。
+- 保留完整的官方 Statsig evaluation，只增量覆盖 CodexHub 明确支持的模型、中文能力和关键 gate。
+- 如果模型或中文结构无法识别，记录兼容失败原因并停止增强，不刷新页面、不修改 ASAR、LevelDB 或官方其他功能状态。
 
-## 资源占用
+## 启动与诊断
 
-- 主窗口隐藏到托盘时暂停 Dashboard、请求日志和清理状态等可见性相关定时器，恢复窗口时只重启此前实际运行的任务。
-- 请求日志列表只在对应标签页激活时定时刷新，避免后台页面持续查询和重绘。
-- 缓存应用图标、状态图标、渠道图标和 Provider 图标，减少重复 SVG/PNG 解码、缩放及原生位图分配。
-- 请求详情等临时模态窗口关闭后立即销毁，及时释放其控件和原生窗口资源。
-- macOS 不再启用仅用于修复 Windows resize 残影的整窗重绘逻辑，降低窗口缩放时的额外绘制和内存压力。
+- 增强启动报告新增实际配置 ID、识别来源、可用适配器、官方底座状态、Store 来源、脚本尝试次数和兼容失败原因。
+- 启动超时错误会附带最后一次兼容状态，便于区分网络等待、Statsig 尚未就绪和客户端结构变化。
+- GUI 等待时间调整为 60 秒，覆盖 daemon 的 45 秒增强检查窗口，避免前端提前显示超时。
+- Codex App 自然导航或 renderer 更新后继续保持本次进程内的增强配置，不主动刷新或二次加载页面。
+
+## 维护边界
+
+- 纯布尔 feature gate 没有可供自动推断的语义，目前 6 个已确认 gate 仍使用显式清单。
+- Codex App 更新后先运行能力探测；模型、中文和适配器验证通过时无需同步修改 CodexHub。
+- 只有实际结构或 gate 语义变化导致兼容检查失败时，才需要针对新版客户端更新适配。
 
 ## 验证
 
-- 全量测试：`553 passed, 0 failed, 1 ignored`。
-- `cargo check --features gui`、`cargo fmt --check` 和 release GUI 构建通过。
-- macOS 实机验证：全屏关闭后不再残留黑色 Space；关闭到托盘后点击 Dock 可恢复同一运行实例。
+- 全量测试：`528 passed, 0 failed, 2 ignored`。
+- `cargo fmt --check`、`cargo check --release --features gui --bin codexhub` 通过。
+- 当前 Codex App 实机热注入验证通过：12 个模型和中文能力生效，三条适配路径均被识别，未报告兼容失败。

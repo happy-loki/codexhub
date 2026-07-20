@@ -329,13 +329,19 @@ CodexHub 在本地 bootstrap 和增强模式启动的增量 Statsig 注入中都
 该 gate 针对的是已经确认的超长历史启动触发路径，不能承诺消除所有 Windows 原生堆异常。若开启后
 仍在不加载该会话时崩溃，应按新的转储和时间线独立排查。
 
-## 当前必须维护的 Layer / Dynamic Config
+## 语义结构与旧版兜底 ID
 
 | ID | 类型 | value key | 建议值 | 作用 |
 | --- | --- | --- | --- | --- |
 | `107580212` | dynamic config | `codexhub_model_list_config` | `{}` | 模型列表配置，空对象走默认 |
 | `2096615506` | layer config | `codexhub_primary_runtime_config` | `{}` | primary runtime 配置，空对象走默认 |
 | `72216192` | layer config | `codexhub_i18n_layer_config` | `{ "enable_i18n": true, "locale_source": "FIRST_AVAILABLE" }` | 开启 i18n layer |
+
+增强模式不会把这两个业务配置 ID 当作永久协议。模型配置通过
+`available_models/use_hidden_models/default_model` 自动发现，语言层通过
+`enable_i18n/locale_source` 自动发现；`107580212` 和 `72216192` 只在旧 ID 本身仍存在时兜底。
+如果 schema 和兜底 ID 都不存在，本次增强启动失败关闭并保留官方状态，不会凭空创建旧配置。
+纯布尔 feature gate 没有可供安全推断的 value schema，因此 6 个必要 gate 仍是显式语义清单。
 
 注意: i18n layer 只决定语言能力是否启用和 locale 来源。用户语言的最终值属于 Codex App
 自己的应用设置。快速启动兼容层不应伪造 `localeOverride`，也不应覆盖用户明确选择的语言；
@@ -373,9 +379,11 @@ CodexHub 在本地 bootstrap 和增强模式启动的增量 Statsig 注入中都
 5. `/api/wham/environments/*` 完整云环境管理
 6. `/api/aip/connectors/*` 官方 connector 连接流程
 
-## Codex App 升级后的复查流程
+## Codex App 升级后的自动复查流程
 
-每次 Codex App 更新后，按这个流程复查。
+升级后先运行增强启动的能力探测和实机冒烟测试。模型、语言和 client 入口均按结构发现；只有报告
+`compatibilityFailure`、adapter 为空或真实功能验证失败时，才进入下面的 bundle 分析流程，不再把
+“每次升级都修改注入脚本”作为常规发布步骤。
 
 ### 1. 确认 backend base URL 选择逻辑
 
@@ -459,4 +467,4 @@ layer_configs
 2. 路由只补 CodexHub 实际需要的 contract。
 3. 不用 API key auth 规避问题，因为 API key 模式不支持 CodexHub 需要的 remote-control。
 4. 历史版本曾允许关闭快速启动并回到官方 backend；当前版本已改为默认直连 CodexHub 3847 backend API，不再提供开关。
-5. 每次 Codex App 更新后先扫描再改，不根据旧 ID 盲目迁移。
+5. Codex App 更新后先做自动能力探测；验证通过不改代码，验证失败才扫描 bundle，并且不根据旧 ID 盲目迁移。
