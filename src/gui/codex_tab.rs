@@ -474,8 +474,11 @@ fn bind_enhanced_launch_action(
                 }
             }
             Ok(_) => {}
-            Err(_) => {
-                show_error(&frame, tab.text.codex_enhanced_launch_check_failed());
+            Err(err) => {
+                show_error(
+                    &frame,
+                    &tab.text.codex_enhanced_launch_check_failed_detail(&err),
+                );
                 in_flight.store(false, Ordering::SeqCst);
                 return;
             }

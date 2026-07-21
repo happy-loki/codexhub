@@ -86,9 +86,21 @@ pub struct EnhancedLaunchPreflight {
 }
 
 pub async fn preflight() -> Result<EnhancedLaunchPreflight> {
-    let running = tokio::task::spawn_blocking(codex_app_is_running)
+    let result = tokio::task::spawn_blocking(codex_app_is_running)
         .await
-        .context("检测 Codex App 进程失败")??;
+        .context("检测 Codex App 进程任务失败")?;
+    let running = match result {
+        Ok(running) => running,
+        Err(err) => {
+            chain_log::write_line(format!(
+                "[codex_app_enhanced] event=preflight_failed error={err}"
+            ));
+            return Err(err.context("检测 Codex App 进程失败"));
+        }
+    };
+    chain_log::write_line(format!(
+        "[codex_app_enhanced] event=preflight_complete running={running}"
+    ));
     Ok(EnhancedLaunchPreflight { running })
 }
 
@@ -1732,14 +1744,83 @@ fn launch_codex_app_blocking(_port: u16) -> Result<()> {
 
 #[cfg(target_os = "windows")]
 fn codex_app_is_running() -> Result<bool> {
+    use windows_sys::Win32::{
+        Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE},
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS,
+        },
+    };
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        let error = unsafe { GetLastError() };
+        return tasklist_codex_app_is_running(&format!(
+            "CreateToolhelp32Snapshot failed with Windows error {error}"
+        ));
+    }
+
+    let result = (|| {
+        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+        if unsafe { Process32FirstW(snapshot, &mut entry) } == 0 {
+            let error = unsafe { GetLastError() };
+            bail!("Process32FirstW failed with Windows error {error}");
+        }
+        loop {
+            let end = entry
+                .szExeFile
+                .iter()
+                .position(|value| *value == 0)
+                .unwrap_or(entry.szExeFile.len());
+            let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
+            if name.eq_ignore_ascii_case("ChatGPT.exe") || name.eq_ignore_ascii_case("Codex.exe") {
+                return Ok(true);
+            }
+            if unsafe { Process32NextW(snapshot, &mut entry) } == 0 {
+                break;
+            }
+        }
+        Ok(false)
+    })();
+    unsafe { CloseHandle(snapshot) };
+
+    match result {
+        Ok(running) => Ok(running),
+        Err(err) => tasklist_codex_app_is_running(&err.to_string()),
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn tasklist_codex_app_is_running(native_error: &str) -> Result<bool> {
     use std::os::windows::process::CommandExt;
 
     const CREATE_NO_WINDOW: u32 = 0x08000000;
-    let output = Command::new("tasklist.exe")
-        .args(["/FI", "IMAGENAME eq ChatGPT.exe", "/FO", "CSV", "/NH"])
+    let tasklist = std::env::var_os("WINDIR")
+        .map(|root| {
+            std::path::PathBuf::from(root)
+                .join("System32")
+                .join("tasklist.exe")
+        })
+        .filter(|path| path.is_file())
+        .unwrap_or_else(|| std::path::PathBuf::from("tasklist.exe"));
+    let output = Command::new(&tasklist)
+        .args(["/FO", "CSV", "/NH"])
         .creation_flags(CREATE_NO_WINDOW)
-        .output()?;
-    Ok(String::from_utf8_lossy(&output.stdout).contains("ChatGPT.exe"))
+        .output()
+        .with_context(|| format!("原生进程枚举失败（{native_error}），无法启动 {tasklist:?}"))?;
+    if !output.status.success() {
+        bail!(
+            "原生进程枚举失败（{native_error}），tasklist 退出码 {}",
+            output.status.code().unwrap_or(-1)
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.to_ascii_lowercase().contains("chatgpt.exe"))
+        || String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .any(|line| line.to_ascii_lowercase().contains("codex.exe")))
 }
 
 #[cfg(target_os = "macos")]

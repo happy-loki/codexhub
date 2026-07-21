@@ -63,6 +63,7 @@ const REQUEST_LOG_TAB_INDEX: i32 = 3;
 const DIALOG_RESULT_POLL_MS: i32 = 150;
 const GUI_CONNECT_TIMEOUT: Duration = Duration::from_millis(250);
 const GUI_STATUS_TIMEOUT: Duration = Duration::from_millis(650);
+const GUI_CODEX_ENHANCED_PREFLIGHT_TIMEOUT: Duration = Duration::from_secs(3);
 const GUI_ACTION_TIMEOUT: Duration = Duration::from_secs(2);
 const GUI_CONFIG_TIMEOUT: Duration = Duration::from_secs(15);
 const GUI_STARTUP_WATCHDOG_TIMEOUT: Duration = Duration::from_secs(30);

@@ -948,6 +948,17 @@ impl GuiText {
         }
     }
 
+    pub(super) fn codex_enhanced_launch_check_failed_detail(self, detail: &str) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!(
+                "暂时无法检测 Codex App 状态。请稍后重试；如果反复出现，请完全退出并重新打开 CodexHub。\n检测详情：{detail}"
+            ),
+            GuiLocale::EnUs => format!(
+                "Could not check Codex App status. Please try again. If it keeps happening, fully exit and reopen CodexHub.\nDetails: {detail}"
+            ),
+        }
+    }
+
     pub(super) fn provider_websocket(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "启用 WebSocket",

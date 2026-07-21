@@ -9,7 +9,10 @@ use crate::config::{AppConfig, LocalConnectionMode};
 use crate::daemon_process::DaemonIdentity;
 
 use super::text::GuiText;
-use super::{GUI_ACTION_TIMEOUT, GUI_CONFIG_TIMEOUT, GUI_CONNECT_TIMEOUT, GUI_STATUS_TIMEOUT};
+use super::{
+    GUI_ACTION_TIMEOUT, GUI_CODEX_ENHANCED_PREFLIGHT_TIMEOUT, GUI_CONFIG_TIMEOUT,
+    GUI_CONNECT_TIMEOUT, GUI_STATUS_TIMEOUT,
+};
 
 const GUI_SESSION_HISTORY_TIMEOUT: Duration = Duration::from_secs(30);
 const GUI_CODEX_ENHANCED_LAUNCH_TIMEOUT: Duration = Duration::from_secs(60);
@@ -255,7 +258,7 @@ impl ApiClient {
     ) -> Result<CodexAppEnhancedPreflightResponse, String> {
         self.get_with_timeout(
             "/api/codex-app/enhanced-launch/preflight",
-            GUI_STATUS_TIMEOUT,
+            GUI_CODEX_ENHANCED_PREFLIGHT_TIMEOUT,
         )
     }
 
