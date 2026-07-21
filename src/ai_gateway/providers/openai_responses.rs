@@ -24,8 +24,10 @@ use crate::ai_gateway::tool_names::ToolNameMap;
 
 use super::{
     apply_total_request_timeout, ensure_success_response, execute_stream_start,
-    execute_upstream_request,
+    execute_upstream_request, upstream_transport_retry_delay,
 };
+
+const UPSTREAM_REQUEST_BODY_READ_MAX_RETRIES: usize = 2;
 
 #[derive(Clone, Copy)]
 enum ResponsesEndpoint {
@@ -203,6 +205,7 @@ async fn passthrough_to_endpoint(
         endpoint.path()
     );
     let mut invalid_encrypted_content_retry = false;
+    let mut request_body_read_retry_count = 0usize;
     let upstream_resp = loop {
         // 3. 构建上游请求。密文恢复重试会使用清理后的 body 重建请求。
         let req_builder = client
@@ -249,6 +252,7 @@ async fn passthrough_to_endpoint(
             url = %url,
             stream = is_stream,
             encrypted_content_retry = invalid_encrypted_content_retry,
+            request_body_read_retry_count,
             "proxying to openai responses endpoint"
         );
 
@@ -270,9 +274,28 @@ async fn passthrough_to_endpoint(
             .await?
         };
 
-        if upstream_resp.status() == StatusCode::BAD_REQUEST && !invalid_encrypted_content_retry {
+        if upstream_resp.status() == StatusCode::BAD_REQUEST {
             let body_text = upstream_resp.text().await.unwrap_or_default();
-            if is_invalid_encrypted_content_error(StatusCode::BAD_REQUEST, &body_text) {
+            if is_failed_to_read_request_body_error(StatusCode::BAD_REQUEST, &body_text)
+                && request_body_read_retry_count < UPSTREAM_REQUEST_BODY_READ_MAX_RETRIES
+            {
+                request_body_read_retry_count += 1;
+                warn!(
+                    provider = %provider.name,
+                    request_body_bytes = request_log::json_body_size_bytes(&raw_body),
+                    retry_count = request_body_read_retry_count,
+                    max_retries = UPSTREAM_REQUEST_BODY_READ_MAX_RETRIES,
+                    "upstream could not finish reading request body; retrying safely"
+                );
+                tokio::time::sleep(upstream_transport_retry_delay(
+                    request_body_read_retry_count,
+                ))
+                .await;
+                continue;
+            }
+            if !invalid_encrypted_content_retry
+                && is_invalid_encrypted_content_error(StatusCode::BAD_REQUEST, &body_text)
+            {
                 let cleanup = remove_all_responses_encrypted_content(&mut raw_body);
                 if cleanup.filtered > 0 {
                     invalid_encrypted_content_retry = true;
@@ -409,6 +432,25 @@ fn is_invalid_encrypted_content_error(status: StatusCode, body: &str) -> bool {
             && (normalized.contains("could not be verified")
                 || normalized.contains("could not be decrypted")
                 || normalized.contains("could not be parsed")))
+}
+
+fn is_failed_to_read_request_body_error(status: StatusCode, body: &str) -> bool {
+    if status != StatusCode::BAD_REQUEST {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    value
+        .get("error")
+        .unwrap_or(&value)
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|message| {
+            message
+                .trim()
+                .eq_ignore_ascii_case("Failed to read request body")
+        })
 }
 
 fn normalize_grok_reasoning_replay(raw_body: &mut serde_json::Value, provider: &ProviderConfig) {
@@ -653,9 +695,9 @@ mod tests {
     use crate::ai_gateway::tool_names::ToolNameMap;
 
     use super::{
-        is_invalid_encrypted_content_error, normalize_grok_model_input,
-        normalize_grok_model_input_with_tool_names, normalize_grok_reasoning_replay, passthrough,
-        passthrough_compact,
+        is_failed_to_read_request_body_error, is_invalid_encrypted_content_error,
+        normalize_grok_model_input, normalize_grok_model_input_with_tool_names,
+        normalize_grok_reasoning_replay, passthrough, passthrough_compact,
     };
 
     struct RetryServerState {
@@ -720,6 +762,60 @@ mod tests {
             axum::serve(listener, app)
                 .await
                 .expect("serve retry endpoint");
+        });
+        (format!("http://{address}/v1"), receiver, task)
+    }
+
+    async fn failed_request_body_then_success(
+        State(state): State<Arc<RetryServerState>>,
+        Json(body): Json<serde_json::Value>,
+    ) -> Response {
+        state
+            .requests
+            .send(body)
+            .expect("request capture receiver should stay open");
+        if state.attempts.fetch_add(1, Ordering::SeqCst) < 2 {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": {
+                        "message": "Failed to read request body",
+                        "type": "invalid_request_error"
+                    }
+                })),
+            )
+                .into_response();
+        }
+        Json(json!({
+            "id": "resp_upload_recovered",
+            "object": "response",
+            "status": "completed",
+            "output": []
+        }))
+        .into_response()
+    }
+
+    async fn request_body_retry_server() -> (
+        String,
+        mpsc::UnboundedReceiver<serde_json::Value>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let state = Arc::new(RetryServerState {
+            attempts: AtomicUsize::new(0),
+            requests: sender,
+        });
+        let app = Router::new()
+            .route("/v1/responses", post(failed_request_body_then_success))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind request body retry server");
+        let address = listener.local_addr().expect("request body retry address");
+        let task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve request body retry endpoint");
         });
         (format!("http://{address}/v1"), receiver, task)
     }
@@ -1244,6 +1340,76 @@ mod tests {
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
             r#"{"error":{"code":"invalid_encrypted_content"}}"#,
         ));
+    }
+
+    #[test]
+    fn recognizes_only_explicit_failed_request_body_errors() {
+        assert!(is_failed_to_read_request_body_error(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"Failed to read request body","type":"invalid_request_error"}}"#,
+        ));
+        assert!(is_failed_to_read_request_body_error(
+            StatusCode::BAD_REQUEST,
+            r#"{"message":"failed to read request body"}"#,
+        ));
+        assert!(!is_failed_to_read_request_body_error(
+            StatusCode::BAD_REQUEST,
+            r#"{"error":{"message":"Failed to parse request body"}}"#,
+        ));
+        assert!(!is_failed_to_read_request_body_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            r#"{"error":{"message":"Failed to read request body"}}"#,
+        ));
+    }
+
+    #[tokio::test]
+    async fn retries_failed_request_body_response_without_changing_payload() {
+        let (base_url, mut requests, server) = request_body_retry_server().await;
+        let provider = ProviderConfig {
+            name: "sub2api".to_string(),
+            provider_type: ProviderType::OpenAiResponses,
+            base_url,
+            api_key: "secret".to_string(),
+            timeout_secs: 10,
+            ..ProviderConfig::default()
+        };
+        let client = reqwest::Client::new();
+        let context = GatewayContext::extract(&HeaderMap::new(), Some("upload-retry-session"));
+        let request = json!({
+            "model": "gpt-5.6-sol",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "continue"}]
+            }]
+        });
+
+        let response = passthrough(
+            &client,
+            &context,
+            request.clone(),
+            "gpt-5.6-sol",
+            &provider,
+            None,
+        )
+        .await
+        .expect("request body retry should recover");
+
+        let first = requests.recv().await.expect("first request");
+        let second = requests.recv().await.expect("second request");
+        let third = requests.recv().await.expect("third request");
+        assert_eq!(first, second);
+        assert_eq!(second, third);
+        assert_eq!(third["input"], request["input"]);
+
+        let body = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read recovered response");
+        let body: serde_json::Value = serde_json::from_slice(&body).expect("response JSON");
+        assert_eq!(body["id"], "resp_upload_recovered");
+
+        server.abort();
     }
 
     #[tokio::test]
