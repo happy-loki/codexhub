@@ -1,31 +1,36 @@
-CodexHub v0.4.9
+CodexHub v0.4.10
 
-本次版本重点修复 Codex App 增强模式下插件市场无法显示的问题，并改进增强启动的早期注入稳定性。
+本次版本重点提高 Codex App 增强模式在无 VPN、官方 Statsig 请求缓慢或本地没有完整官方缓存时的启动成功率。
 
-## 插件市场
+## 本地 Statsig 初始化
 
-- 兼容新版 Codex App 的 `plugin/list` MCP 消息协议。
-- 修复插件桥接已安装但 `pluginCatalogResponsesAdapted=0`、本地 curated 插件被前端隐藏的问题。
-- 增强模式下，本地 `openai-curated` 会在 renderer 中显示为 `Codex official`，内部插件 ID、安装状态、绝对路径和配置身份保持不变。
-- 本地 curated 目录可正常展示约 25 个插件；`openai-curated-remote` 仍保持隐藏，避免出现无法安装的远程插件条目。
-- 保留旧版 `vscode://codex/list-plugins` 协议兼容，降低 Codex App 版本变化带来的影响。
+- 新增 CodexHub 本地 Statsig `initialize` 端点，Codex App 可直接通过 `127.0.0.1:3847` 完成初始化，不需要远程中继。
+- 响应使用 Statsig `init-v2` 原生结构，修正 dynamic config 的 `v -> values[key]` 引用方式。
+- 本地响应提供 CodexHub 模型列表、中文界面配置和已确认的关键功能门控。
+- 增加 `no-store`、CORS 和 Private Network 响应头，兼容 Electron renderer 的本地请求。
 
-## 增强模式启动
+## 增强模式兼容
 
-- 通过 browser CDP 的 `Target.setAutoAttach` 在 renderer 释放前注入脚本，减少启动阶段错过首个消息的情况。
-- 增加 browser/page CDP 会话生命周期管理和早期注入诊断日志。
-- 增强脚本升级到 v14；插件桥接状态和实际适配次数会写入启动诊断。
-- 不修改全局 `authMethod`，不改变普通启动、Codex CLI 或 VS Code 插件行为。
+- 增强脚本升级到 v15，在 Statsig SDK 初始化前临时设置本地 initialize URL。
+- 有完整官方缓存时继续优先使用官方配置，并恢复官方刷新地址，避免本地精简配置覆盖官方运行时数据。
+- 没有官方配置时允许本地响应作为有效初始化基底，避免旧版本长期停留在 `NoValues` 并最终超时。
+- 原始 SDK URL 使用 `WeakMap` 保存，不向 Statsig 私有对象写入额外标记。
+- 不修改 Codex App 的 `app.asar`、LevelDB、账号状态或系统代理。
 
-## 请求可靠性
+## 诊断能力
 
-- 上游请求体传输被网络中断后，可以重试上传，而不是直接结束本次请求。
-- 重试复用原始请求体，不改变请求语义。
+- 启动日志新增本地 initialize 安装状态、当前地址、错误信息和本地基底状态。
+- 增强模式成功条件同时支持完整官方基底和合法的 CodexHub 本地基底。
+- 本地端点提供三条兼容路由，降低 CodexHub API 前缀变化带来的影响。
 
 ## 验证
 
-- 默认测试：535 passed，0 failed，2 ignored。
-- GUI 测试：562 passed，0 failed，2 ignored。
-- `cargo fmt --all -- --check` 通过。
-- `cargo build --features gui --bin codexhub` 通过。
-- 实机 CDP 热回放确认本地 curated 目录响应成功适配，并加载 25 个插件图标。
+- 使用 Codex App 内置 Statsig JavaScript SDK 3.32.6 验证初始化成功。
+- 验证 12 个 CodexHub 模型、中文界面和关键功能门控成功载入。
+- 默认测试：536 passed，0 failed，2 ignored。
+- `cargo fmt --check`、GUI 编译检查和 `git diff --check` 通过。
+
+## 当前边界
+
+- 本地端点响应约 1 ms，但 Codex App renderer 和 Statsig 客户端的创建仍可能需要十几秒；本版解决的是无官方数据时的启动失败，不承诺所有环境都能秒开。
+- 仅使用本地精简 Statsig 配置时，依赖其他官方配置的插件市场内容可能不完整，后续版本会继续收敛。

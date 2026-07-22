@@ -237,9 +237,9 @@ window.__STATSIG__.firstInstance._network._netConfig.networkOverrideFunc
 
 包装器成功捕获到带 SDK 参数的真实 `/v1/initialize` URL，也能把该调用改投 `127.0.0.1:3847`。所以 CDP 模式下可以修改这条链路，阻点不在网络拦截能力。
 
-现有 `/backend-api/wham/statsig/bootstrap` 不能直接作为 `/v1/initialize` 响应：前者返回 ChatGPT bootstrap envelope，内部 `statsigPayload` 使用 `v/i/r/s` 等压缩字段；后者要求 Statsig JavaScript SDK 的 initialize 线协议，并且要与请求中的当前用户、ID type、hash mode 和增量字段一致。直接复用会让 dynamic config 和 feature gate 变成未识别状态。实验后已用官方传输冷刷新，恢复正常配置。
+现有 `/backend-api/wham/statsig/bootstrap` 不能原样作为 `/v1/initialize` 响应：前者外面还有 `statsigPayload` envelope。CodexHub 现在另提供 `POST /codex-app/statsig/v1/initialize`，直接返回 Statsig `init-v2` JSON。`dynamic_configs[*].v` 和 `layer_configs[*].v` 必须是指向顶层 `values` 的字符串键；把配置对象直接塞进 `v` 会导致 SDK 初始化成功，但对应 dynamic config 仍然是未识别状态。
 
-最终产品实现没有伪造完整 initialize 响应。官方 store 中包含体积很大的 primary runtime、插件和其他动态配置；替换完整响应会扩大影响面。CodexHub 改为在 renderer 第一帧修补 Statsig evaluation 缓存，并通过 SDK 自己的 `_store.setValues()` / `_finalizeUpdate()` 增量合并模型配置和已确认的关键 gate，官方其他配置原样保留。
+增强模式在 Statsig client 调用 `initializeAsync()` 前，将 `_network._initializeUrlConfig.customUrl` 改到上述本地端点。官方完整 evaluation 缓存存在时仍优先用缓存同步初始化，随后恢复官方刷新地址，避免定时刷新用本地精简响应覆盖 primary runtime、插件和其他动态配置；没有完整缓存时才持续使用本地端点返回模型目录、i18n layer 和已确认的关键 gate。当前本地端点总是返回完整的 `has_updates=true` 响应，不实现增量 delta。SDK 3.32.6 隔离探针已验证本地 POST、12 个模型、中文层和关键 gate 均可解析。
 
 ## 启动期 33 至 36 秒阻塞的根因
 
@@ -268,15 +268,15 @@ pre-login 分支，直接调用 Statsig React SDK 的 `useClientAsyncInit()`。S
 33.2 秒。阻塞位于 renderer 的 Statsig Provider，不在 CodexHub 启动器、app-server、插件同步或
 会话历史读取。
 
-增强模式现在从 renderer 第一行代码前监听 `codex-message-from-view`。当 Codex App 进入 post-login Statsig 路径时：
+增强模式仍从 renderer 第一行代码前监听 `codex-message-from-view`。当 Codex App 进入 post-login Statsig 路径时：
 
 1. 只匹配 `POST /wham/statsig/bootstrap`，其他请求继续走 Codex App 原路径；
 2. 优先读取最新的 pre-login 官方 Statsig evaluation 缓存，其次读取 CodexHub 本地用户缓存；
 3. 保留完整官方 payload，只覆盖 CodexHub 模型目录和已确认的关键 gate；
-4. 没有完整官方缓存时保留官方初始化路径，不构造最小本地 payload；
+4. 没有完整官方缓存时不伪造官方大配置；pre-login SDK 改走 CodexHub 本地 initialize 端点；
 5. 同步发送对应的 `fetch-response`，原主进程请求随后返回的错误因 request ID 已完成而被忽略。
 
-运行时探针通过 Codex App 自己的 `safePost` 验证了这条消息链路，bootstrap 响应在 1ms 内完成。该方案没有伪造 Statsig `/v1/initialize`，也没有恢复 8000 端口。
+运行时探针通过 Codex App 自己的 `safePost` 验证了 bootstrap 消息链路，响应在 1ms 内完成；独立 Statsig client 探针验证了本地 initialize 线协议。两条路径都由 3847 主服务承载，没有恢复 8000 端口。
 
 Codex App 也可能直接进入 pre-login Statsig 路径，此时不会发出 `/wham/statsig/bootstrap`。因此 `bootstrapIntercepted` 只用于诊断，不能作为增强启动的完成条件；完成条件是 renderer 已发出 `ready`，且模型目录和关键 gate 已生效。
 
@@ -288,8 +288,8 @@ Codex App 也可能直接进入 pre-login Statsig 路径，此时不会发出 `/
 2. 把 evaluation 的 user 替换为该 client 当前的真实 Statsig user；
 3. 有缓存时调用 SDK 自己的 `dataAdapter.setData()`；
 4. 有缓存时调用 `initializeSync({ disableBackgroundCacheRefresh: true })`，直接结束首屏 loading；
-5. 没有完整缓存或本地初始化异常时，原样调用原生 `initializeAsync()`，完成后再做局部 overlay，
-   不用 CodexHub 自己的极简 payload 冒充官方配置。
+5. 没有完整缓存时，原生 `initializeAsync()` 请求被定向到 CodexHub 本地端点；完成后再做局部 overlay；
+6. 本地 URL 配置不可写或本地响应异常时记录明确诊断，不把“已安装 URL 改写”误报成“配置已生效”。
 
 模型 dynamic config 和 i18n layer 也不再把数字 ID 当作唯一入口。脚本先按
 `available_models/use_hidden_models/default_model` 与 `enable_i18n/locale_source` 字段自动发现配置；

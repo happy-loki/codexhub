@@ -23,7 +23,7 @@ const ENHANCED_INJECTION_TIMEOUT: Duration = Duration::from_secs(45);
 // after that window so a cold renderer does not accumulate retry timers.
 const ENHANCED_SCRIPT_RETRY_INTERVAL: Duration = Duration::from_secs(26);
 const ENHANCED_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const ENHANCED_SCRIPT_VERSION: u64 = 14;
+const ENHANCED_SCRIPT_VERSION: u64 = 15;
 type CdpSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 #[derive(Default)]
@@ -74,6 +74,11 @@ pub struct EnhancedLaunchReport {
     pub i18n_enabled: bool,
     pub fast_initialize_applied: bool,
     pub fast_initialize_source: Option<String>,
+    pub local_initialize_installed: bool,
+    pub local_initialize_active: bool,
+    pub local_initialize_url: Option<String>,
+    pub local_initialize_error: Option<String>,
+    pub local_base_available: bool,
     pub bootstrap_intercepted: bool,
     pub bootstrap_source: Option<String>,
     pub model_config_id: Option<String>,
@@ -180,7 +185,7 @@ pub async fn launch_and_inject(
         .no_proxy()
         .timeout(Duration::from_secs(2))
         .build()?;
-    let source = enhanced_statsig_script(&models)?;
+    let source = enhanced_statsig_script(&models, backend_url)?;
     let mut launched = false;
     let mut early_attach = EarlyAttachDiagnostics::default();
     let app_running = tokio::task::spawn_blocking(codex_app_is_running)
@@ -257,7 +262,7 @@ pub async fn launch_and_inject(
     ));
     let startup_elapsed_ms = started.elapsed().as_millis() as u64;
     chain_log::write_line(format!(
-        "[codex_app_enhanced] event=config_ready elapsed_ms={startup_elapsed_ms} early_attach_applied={} early_attach_target_id={} early_attach_elapsed_ms={} early_attach_fallback={} i18n_enabled={} fast_initialize_applied={} fast_initialize_source={} routes_mounted={} renderer_ready_ms={} plugin_catalog_bridge_installed={} plugin_catalog_responses_adapted={} bootstrap_intercepted={} bootstrap_source={} model_config_id={} model_config_source={} model_config_supported={} i18n_layer_id={} i18n_layer_source={} i18n_layer_supported={} official_base_available={} compatibility_adapters={} compatibility_failure={} store_source={} script_attempts={}",
+        "[codex_app_enhanced] event=config_ready elapsed_ms={startup_elapsed_ms} early_attach_applied={} early_attach_target_id={} early_attach_elapsed_ms={} early_attach_fallback={} i18n_enabled={} fast_initialize_applied={} fast_initialize_source={} local_initialize_installed={} local_initialize_active={} local_initialize_url={} local_initialize_error={} local_base_available={} routes_mounted={} renderer_ready_ms={} plugin_catalog_bridge_installed={} plugin_catalog_responses_adapted={} bootstrap_intercepted={} bootstrap_source={} model_config_id={} model_config_source={} model_config_supported={} i18n_layer_id={} i18n_layer_source={} i18n_layer_supported={} official_base_available={} compatibility_adapters={} compatibility_failure={} store_source={} script_attempts={}",
         early_attach.applied,
         early_attach.target_id.as_deref().unwrap_or("none"),
         early_attach
@@ -268,6 +273,11 @@ pub async fn launch_and_inject(
         status.i18n_enabled,
         status.fast_initialize_applied,
         status.fast_initialize_source.as_deref().unwrap_or("none"),
+        status.local_initialize_installed,
+        status.local_initialize_active,
+        status.local_initialize_url.as_deref().unwrap_or("none"),
+        status.local_initialize_error.as_deref().unwrap_or("none"),
+        status.local_base_available,
         status.routes_mounted,
         status
             .renderer_ready_ms
@@ -304,6 +314,11 @@ pub async fn launch_and_inject(
         i18n_enabled: status.i18n_enabled,
         fast_initialize_applied: status.fast_initialize_applied,
         fast_initialize_source: status.fast_initialize_source,
+        local_initialize_installed: status.local_initialize_installed,
+        local_initialize_active: status.local_initialize_active,
+        local_initialize_url: status.local_initialize_url,
+        local_initialize_error: status.local_initialize_error,
+        local_base_available: status.local_base_available,
         bootstrap_intercepted: status.bootstrap_intercepted,
         bootstrap_source: status.bootstrap_source,
         model_config_id: status.model_config_id,
@@ -799,6 +814,11 @@ struct InjectedStatus {
     i18n_enabled: bool,
     fast_initialize_applied: bool,
     fast_initialize_source: Option<String>,
+    local_initialize_installed: bool,
+    local_initialize_active: bool,
+    local_initialize_url: Option<String>,
+    local_initialize_error: Option<String>,
+    local_base_available: bool,
     bootstrap_intercepted: bool,
     bootstrap_source: Option<String>,
     model_config_id: Option<String>,
@@ -921,7 +941,8 @@ fn injected_status_is_ready(status: &InjectedStatus, expected_models: &[String])
         && !status.use_hidden_models
         && status.key_gates_enabled == SUPPORTED_FEATURE_GATES.len()
         && status.i18n_enabled
-        && status.official_base_available
+        && status.local_initialize_installed
+        && (status.official_base_available || status.local_base_available)
         && status.model_config_supported
         && status.i18n_layer_supported
         && status.plugin_catalog_bridge_installed
@@ -930,7 +951,7 @@ fn injected_status_is_ready(status: &InjectedStatus, expected_models: &[String])
 
 fn injected_status_detail(status: &InjectedStatus) -> String {
     format!(
-        "script={} attempts={} store={} official_base={} model={}:{} i18n={}:{} gates={}/{} plugin_bridge={} plugin_responses={} adapters={} failure={}",
+        "script={} attempts={} store={} official_base={} local_base={} local_initialize={}:{} local_initialize_error={} model={}:{} i18n={}:{} gates={}/{} plugin_bridge={} plugin_responses={} adapters={} failure={}",
         status
             .script_version
             .map(|value| value.to_string())
@@ -938,6 +959,10 @@ fn injected_status_detail(status: &InjectedStatus) -> String {
         status.script_attempts,
         status.store_source.as_deref().unwrap_or("none"),
         status.official_base_available,
+        status.local_base_available,
+        status.local_initialize_installed,
+        status.local_initialize_active,
+        status.local_initialize_error.as_deref().unwrap_or("none"),
         status.model_config_id.as_deref().unwrap_or("none"),
         status.model_config_supported,
         status.i18n_layer_id.as_deref().unwrap_or("none"),
@@ -979,6 +1004,11 @@ async fn inspect_injected_status_on_socket(active: &mut ActiveInjection) -> Resu
             i18nEnabled: i18n?.get?.("enable_i18n", false) === true,
             fastInitializeApplied: Boolean(window.__CODEXHUB_ENHANCED_MODE__?.fastInitializeApplied),
             fastInitializeSource: window.__CODEXHUB_ENHANCED_MODE__?.fastInitializeSource ?? null,
+            localInitializeInstalled: Boolean(enhanced?.localInitializeInstalled),
+            localInitializeActive: Boolean(enhanced?.localInitializeActive),
+            localInitializeUrl: enhanced?.localInitializeUrl ?? null,
+            localInitializeError: enhanced?.localInitializeError ?? null,
+            localBaseAvailable: Boolean(enhanced?.localBaseAvailable),
             bootstrapIntercepted: Boolean(window.__CODEXHUB_ENHANCED_MODE__?.bootstrapIntercepted),
             bootstrapSource: window.__CODEXHUB_ENHANCED_MODE__?.bootstrapSource ?? null,
             modelConfigId: enhanced?.modelConfigId ?? null,
@@ -1017,10 +1047,16 @@ async fn inspect_injected_status_on_socket(active: &mut ActiveInjection) -> Resu
     Ok(serde_json::from_value(value)?)
 }
 
-fn enhanced_statsig_script(models: &[String]) -> Result<String> {
+fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<String> {
     let models = serde_json::to_string(models)?;
     let gates = serde_json::to_string(SUPPORTED_FEATURE_GATES)?;
     let legacy_gates = serde_json::to_string(LEGACY_CODEXHUB_FEATURE_GATES)?;
+    let mut local_initialize_url =
+        Url::parse(backend_url).context("解析 CodexHub 本地后端地址失败")?;
+    local_initialize_url.set_path("/codex-app/statsig/v1/initialize");
+    local_initialize_url.set_query(None);
+    local_initialize_url.set_fragment(None);
+    let local_initialize_url = serde_json::to_string(local_initialize_url.as_str())?;
     let script_version = ENHANCED_SCRIPT_VERSION;
     Ok(format!(
         r#"(() => {{
@@ -1029,6 +1065,7 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
   const MODELS = {models};
   const SUPPORTED_GATES = {gates};
   const LEGACY_CODEXHUB_GATES = {legacy_gates};
+  const LOCAL_STATSIG_INITIALIZE_URL = {local_initialize_url};
   const existing = window[MARKER];
   if (existing?.installed && existing.version === SCRIPT_VERSION) {{
       existing.update?.(MODELS);
@@ -1053,6 +1090,11 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     fastInitializeAppliedAtMs: null,
     fastInitializeSource: null,
     fastInitializeError: null,
+    localInitializeInstalled: false,
+    localInitializeActive: false,
+    localInitializeUrl: null,
+    localInitializeError: null,
+    localBaseAvailable: false,
     modelConfigId: DEFAULT_MODEL_CONFIG_ID,
     modelConfigSource: "fallback",
     modelConfigSupported: false,
@@ -1122,7 +1164,7 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
       state.i18nLayerSupported = true;
     }}
   }};
-  const compatibilityReady = () => state.officialBaseAvailable
+  const compatibilityReady = () => (state.officialBaseAvailable || state.localBaseAvailable)
     && state.modelConfigSupported
     && state.i18nLayerSupported;
   const recordAdapter = (name) => {{
@@ -1296,6 +1338,27 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     return hasRuntimeConfig || hasEvaluationMetadata || valueCount > 0 || sectionCount >= 4;
   }};
 
+  const isCompleteCodexHubValues = (values) => {{
+    if (!isObject(values)
+      || !isObject(values.feature_gates)
+      || !isObject(values.dynamic_configs)
+      || !isObject(values.layer_configs)) return false;
+    const modelEntry = values.dynamic_configs[DEFAULT_MODEL_CONFIG_ID];
+    const i18nEntry = values.layer_configs[DEFAULT_I18N_LAYER_ID];
+    return isCodexHubLocalEntry(modelEntry)
+      && isModelConfigValue(statsigEntryValue(values, modelEntry))
+      && isCodexHubLocalEntry(i18nEntry)
+      && isI18nLayerValue(statsigEntryValue(values, i18nEntry));
+  }};
+
+  const isUsableBaseValues = (values) => isCompleteOfficialValues(values)
+    || isCompleteCodexHubValues(values);
+
+  const markBaseAvailability = (values) => {{
+    if (isCompleteOfficialValues(values)) state.officialBaseAvailable = true;
+    if (isCompleteCodexHubValues(values)) state.localBaseAvailable = true;
+  }};
+
   const STORE_PATCH_MARKER = "__CODEXHUB_ENHANCED_SET_VALUES_PATCH__";
   const installStorePatch = (client) => {{
     const store = client?._store;
@@ -1314,8 +1377,8 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
       if (!packet || typeof packet.data !== "string") return control.original(packet, user);
       try {{
         const values = JSON.parse(packet.data);
-        if (isCompleteOfficialValues(values)) {{
-          state.officialBaseAvailable = true;
+        if (isUsableBaseValues(values)) {{
+          markBaseAvailability(values);
           discoverConfigIds(values);
           packet = {{ ...packet, data: JSON.stringify(control.patch(values)) }};
         }}
@@ -1325,6 +1388,51 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     store[STORE_PATCH_MARKER] = control;
     recordAdapter("statsig-store");
     return true;
+  }};
+
+  const originalInitializeUrls = new WeakMap();
+  const installLocalInitializePatch = (client) => {{
+    const urlConfig = client?._network?._initializeUrlConfig;
+    if (!urlConfig || typeof urlConfig !== "object") {{
+      state.localInitializeInstalled = false;
+      state.localInitializeError = "Statsig initialize URL config is unavailable";
+      return false;
+    }}
+    try {{
+      if (!originalInitializeUrls.has(urlConfig)) {{
+        originalInitializeUrls.set(urlConfig, urlConfig.customUrl ?? null);
+      }}
+      urlConfig.customUrl = LOCAL_STATSIG_INITIALIZE_URL;
+      if (urlConfig.customUrl !== LOCAL_STATSIG_INITIALIZE_URL) {{
+        throw new Error("Statsig initialize URL config rejected the local URL");
+      }}
+      state.localInitializeInstalled = true;
+      state.localInitializeActive = true;
+      state.localInitializeUrl = LOCAL_STATSIG_INITIALIZE_URL;
+      state.localInitializeError = null;
+      recordAdapter("local-statsig-initialize");
+      return true;
+    }} catch (error) {{
+      state.localInitializeInstalled = false;
+      state.localInitializeActive = false;
+      state.localInitializeError = String(error?.stack ?? error);
+      return false;
+    }}
+  }};
+
+  const restoreOfficialInitializeUrl = (client) => {{
+    const urlConfig = client?._network?._initializeUrlConfig;
+    if (!urlConfig || !originalInitializeUrls.has(urlConfig)) return false;
+    try {{
+      urlConfig.customUrl = originalInitializeUrls.get(urlConfig);
+      state.localInitializeActive = false;
+      state.localInitializeError = null;
+      recordAdapter("official-statsig-refresh");
+      return true;
+    }} catch (error) {{
+      state.localInitializeError = String(error?.stack ?? error);
+      return false;
+    }}
   }};
 
   const FAST_INITIALIZE_PATCH_MARKER = "__CODEXHUB_ENHANCED_FAST_INITIALIZE_PATCH__";
@@ -1346,7 +1454,10 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
       try {{
         const bootstrapPayload = buildBootstrapPayload();
         if (!bootstrapPayload) {{
-          state.fastInitializeSource = "official-network";
+          state.fastInitializeSource = state.localInitializeInstalled
+            ? "local-network"
+            : "official-network";
+          state.bootstrapSource = state.fastInitializeSource;
           try {{
             const details = control.original(options);
             control.promise = Promise.resolve(details).then((result) => {{
@@ -1374,6 +1485,7 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
         state.fastInitializeApplied = true;
         state.fastInitializeAppliedAtMs = Math.round(performance.now());
         state.fastInitializeSource = state.bootstrapSource ?? "statsig-cache-official";
+        restoreOfficialInitializeUrl(client);
         control.promise = Promise.resolve(details);
       }} catch (error) {{
         state.fastInitializeError = String(error?.stack ?? error);
@@ -1387,6 +1499,7 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
   }};
 
   const installClientPatches = (client) => {{
+    installLocalInitializePatch(client);
     installPublicApiOverlay(client);
     installStorePatch(client);
     installFastInitializePatch(client);
@@ -1605,11 +1718,11 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     return isCompleteOfficialValues(recovered) ? recovered : values;
   }};
 
-  const officialBaseForClient = (client) => {{
-    if (state.officialBaseAvailable) return true;
+  const usableBaseForClient = (client) => {{
+    if (state.officialBaseAvailable || state.localBaseAvailable) return true;
     const stored = client?._store?.getValues?.();
-    if (isCompleteOfficialValues(stored)) {{
-      state.officialBaseAvailable = true;
+    if (isUsableBaseValues(stored)) {{
+      markBaseAvailability(stored);
       discoverConfigIds(stored);
       return true;
     }}
@@ -1808,7 +1921,7 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     if (!client || typeof client !== "object") return false;
     const previous = client[PUBLIC_API_PATCH_MARKER];
     if (previous?.version === 1) {{
-      previous.shouldApply = () => officialBaseForClient(client);
+      previous.shouldApply = () => usableBaseForClient(client);
       previous.patchModel = patchPublicModelConfig;
       previous.patchI18n = patchPublicI18nLayer;
       previous.forceGate = (name) => compatibilityReady()
@@ -1818,7 +1931,7 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     }}
     const control = {{
       version: 1,
-      shouldApply: () => officialBaseForClient(client),
+      shouldApply: () => usableBaseForClient(client),
       patchModel: patchPublicModelConfig,
       patchI18n: patchPublicI18nLayer,
       forceGate: (name) => compatibilityReady() && SUPPORTED_GATES.includes(String(name)),
@@ -1922,7 +2035,8 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     if (!client || typeof client !== "object") return false;
     installClientPatches(client);
     if (!client?._store?.setValues || typeof client._finalizeUpdate !== "function") {{
-      if (!officialBaseForClient(client)) return false;
+      if (!usableBaseForClient(client)) return false;
+      if (state.officialBaseAvailable) restoreOfficialInitializeUrl(client);
       const i18n = client.getLayer?.(state.i18nLayerId);
       const i18nValue = {{ enable_i18n: true, locale_source: "FIRST_AVAILABLE" }};
       patchCachedI18nLayer(i18n, i18nValue);
@@ -1930,11 +2044,12 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
       return resolveClientState(client);
     }}
     let current = client._store.getValues?.();
-    if (!isCompleteOfficialValues(current)) {{
+    if (!isUsableBaseValues(current)) {{
       current = recoverOfficialValuesFromCache(client);
     }}
-    if (!isCompleteOfficialValues(current)) return false;
-    state.officialBaseAvailable = true;
+    if (!isUsableBaseValues(current)) return false;
+    markBaseAvailability(current);
+    if (isCompleteOfficialValues(current)) restoreOfficialInitializeUrl(client);
     discoverConfigIds(current);
     current.feature_gates ??= {{}};
     current.dynamic_configs ??= {{}};
@@ -2295,8 +2410,11 @@ mod tests {
 
     #[test]
     fn enhanced_script_embeds_models_and_only_patches_selected_statsig_sections() {
-        let script =
-            enhanced_statsig_script(&["gpt-5.6-sol".into(), "grok-4.5".into()]).expect("script");
+        let script = enhanced_statsig_script(
+            &["gpt-5.6-sol".into(), "grok-4.5".into()],
+            "http://127.0.0.1:3847/api",
+        )
+        .expect("script");
         assert!(script.contains("gpt-5.6-sol"));
         assert!(script.contains("grok-4.5"));
         assert!(script.contains("107580212"));
@@ -2307,7 +2425,17 @@ mod tests {
         assert!(script.contains("const modelIsV2"));
         assert!(script.contains("installStorePatch"));
         assert!(script.contains("patchCachedI18nLayer"));
-        assert!(script.contains("SCRIPT_VERSION = 14"));
+        assert!(script.contains("SCRIPT_VERSION = 15"));
+        assert!(script.contains("http://127.0.0.1:3847/codex-app/statsig/v1/initialize"));
+        assert!(script.contains("installLocalInitializePatch"));
+        assert!(script.contains("_initializeUrlConfig"));
+        assert!(script.contains("urlConfig.customUrl = LOCAL_STATSIG_INITIALIZE_URL"));
+        assert!(script.contains("local-statsig-initialize"));
+        assert!(script.contains("originalInitializeUrls = new WeakMap()"));
+        assert!(script.contains("restoreOfficialInitializeUrl"));
+        assert!(script.contains("official-statsig-refresh"));
+        assert!(script.contains("isCompleteCodexHubValues"));
+        assert!(script.contains("isUsableBaseValues"));
         assert!(script.contains("DEFAULT_MODEL_CONFIG_ID = \"107580212\""));
         assert!(script.contains("DEFAULT_I18N_LAYER_ID = \"72216192\""));
         assert!(script.contains("discoverConfigIds"));
@@ -2324,21 +2452,22 @@ mod tests {
         assert!(script.contains("statsig-cache-late-local"));
         assert!(script.contains("statsig-cache-late-other"));
         assert!(script.contains("current = recoverOfficialValuesFromCache(client)"));
-        assert!(script.contains("state.fastInitializeSource = \"official-network\""));
+        assert!(script.contains("? \"local-network\""));
+        assert!(script.contains(": \"official-network\""));
         assert!(script.contains("installFastInitializePatch"));
         assert!(script.contains("client.initializeSync({ disableBackgroundCacheRefresh: true })"));
         assert!(script.contains("fastInitializeAppliedAtMs"));
-        assert!(script.contains("if (!isCompleteOfficialValues(current))"));
+        assert!(script.contains("if (!isUsableBaseValues(current))"));
         assert!(script.contains("return isCompleteOfficialValues(recovered) ? recovered : values"));
         assert!(!script.contains("JSON.parse(buildBootstrapPayload())"));
         assert!(!script.contains("codexhub-minimal-store"));
         assert!(script.contains("installPublicApiOverlay"));
         assert!(script.contains("statsig-public-api"));
-        assert!(script.contains("officialBaseForClient"));
-        assert!(script.contains("if (!officialBaseForClient(client)) return false"));
+        assert!(script.contains("usableBaseForClient"));
+        assert!(script.contains("if (!usableBaseForClient(client)) return false"));
         assert!(script.contains("if (!state.modelConfigSupported || !state.i18nLayerSupported)"));
         assert!(script.contains("state.compatibilityFailure = `unsupported Statsig schema"));
-        assert!(script.contains("if (isCompleteOfficialValues(values))"));
+        assert!(script.contains("if (isUsableBaseValues(values))"));
         assert!(script.contains("if (!compatibilityReady())"));
         assert!(script.contains("findStatsigClients"));
         assert!(script.contains("typeof statsig.instance === \"function\""));
@@ -2553,6 +2682,13 @@ mod tests {
             i18n_enabled: true,
             fast_initialize_applied: false,
             fast_initialize_source: None,
+            local_initialize_installed: true,
+            local_initialize_active: false,
+            local_initialize_url: Some(
+                "http://127.0.0.1:3847/codex-app/statsig/v1/initialize".into(),
+            ),
+            local_initialize_error: None,
+            local_base_available: false,
             bootstrap_intercepted: false,
             bootstrap_source: None,
             model_config_id: Some("107580212".into()),
@@ -2578,6 +2714,12 @@ mod tests {
         assert!(detail.contains("model=107580212:true"));
         assert!(detail.contains("i18n=72216192:true"));
         assert!(detail.contains("adapters=statsig-store"));
+        status.official_base_available = false;
+        status.local_base_available = true;
+        assert!(injected_status_is_ready(&status, &expected_models));
+        status.local_base_available = false;
+        assert!(!injected_status_is_ready(&status, &expected_models));
+        status.official_base_available = true;
         status.i18n_enabled = false;
         assert!(!injected_status_is_ready(&status, &expected_models));
         status.i18n_enabled = true;
@@ -2601,6 +2743,11 @@ mod tests {
             i18n_enabled: false,
             fast_initialize_applied: false,
             fast_initialize_source: None,
+            local_initialize_installed: false,
+            local_initialize_active: false,
+            local_initialize_url: None,
+            local_initialize_error: Some("Statsig initialize URL config is unavailable".into()),
+            local_base_available: false,
             bootstrap_intercepted: false,
             bootstrap_source: None,
             model_config_id: None,

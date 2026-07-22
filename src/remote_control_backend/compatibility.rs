@@ -1,6 +1,17 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use axum::{Json, extract::State, http::StatusCode};
+use axum::{
+    Json,
+    body::Bytes,
+    extract::State,
+    http::{
+        HeaderMap, HeaderName, HeaderValue, StatusCode,
+        header::{
+            ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
+            ACCESS_CONTROL_ALLOW_ORIGIN, CACHE_CONTROL,
+        },
+    },
+};
 use serde_json::{Map, Value, json};
 
 use crate::{ai_gateway::catalog::configured_models_response_with_etag, app_state::SharedState};
@@ -28,25 +39,60 @@ pub(super) async fn accounts_check() -> Json<Value> {
 }
 
 pub(super) async fn statsig_bootstrap(State(state): State<SharedState>) -> Json<Value> {
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis() as u64)
-        .unwrap_or(0);
-    let model_slugs = {
-        let config = state.config.lock().await;
-        let (models, _) = configured_models_response_with_etag(&config.ai_gateway);
-        models["models"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|model| model.get("slug").and_then(Value::as_str))
-            .map(str::to_string)
-            .collect::<Vec<_>>()
-    };
+    let now_ms = current_time_ms();
+    let model_slugs = configured_model_slugs(&state).await;
     let payload = statsig_bootstrap_payload(now_ms, &model_slugs);
     Json(json!({
         "statsigPayload": payload.to_string(),
     }))
+}
+
+pub(super) async fn statsig_initialize(
+    State(state): State<SharedState>,
+    _body: Bytes,
+) -> (HeaderMap, Json<Value>) {
+    let model_slugs = configured_model_slugs(&state).await;
+    let payload = statsig_bootstrap_payload(current_time_ms(), &model_slugs);
+    (statsig_response_headers(), Json(payload))
+}
+
+pub(super) async fn statsig_initialize_options() -> (StatusCode, HeaderMap) {
+    (StatusCode::NO_CONTENT, statsig_response_headers())
+}
+
+fn current_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+async fn configured_model_slugs(state: &SharedState) -> Vec<String> {
+    let config = state.config.lock().await;
+    let (models, _) = configured_models_response_with_etag(&config.ai_gateway);
+    models["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|model| model.get("slug").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect()
+}
+
+fn statsig_response_headers() -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(ACCESS_CONTROL_ALLOW_ORIGIN, HeaderValue::from_static("*"));
+    headers.insert(
+        ACCESS_CONTROL_ALLOW_METHODS,
+        HeaderValue::from_static("POST, OPTIONS"),
+    );
+    headers.insert(ACCESS_CONTROL_ALLOW_HEADERS, HeaderValue::from_static("*"));
+    headers.insert(
+        HeaderName::from_static("access-control-allow-private-network"),
+        HeaderValue::from_static("true"),
+    );
+    headers
 }
 
 fn statsig_bootstrap_payload(now_ms: u64, model_slugs: &[String]) -> Value {
@@ -81,7 +127,7 @@ fn statsig_bootstrap_payload(now_ms: u64, model_slugs: &[String]) -> Value {
         "feature_gates": feature_gates,
         "dynamic_configs": {
             "107580212": {
-                "v": model_list_config.clone(),
+                "v": "codexhub_model_list_config",
                 "r": "codexhub-local",
                 "s": [],
                 "i": "userID",
@@ -263,16 +309,16 @@ mod tests {
         }
         assert!(response["dynamic_configs"]["107580212"].is_object());
         assert_eq!(
-            response["dynamic_configs"]["107580212"]["v"]["available_models"],
+            response["values"]["codexhub_model_list_config"]["available_models"],
             json!(["gpt-5.6-sol", "grok-4.5", "Opus-4.8"])
         );
         assert_eq!(
-            response["dynamic_configs"]["107580212"]["v"]["default_model"],
+            response["values"]["codexhub_model_list_config"]["default_model"],
             "gpt-5.6-sol"
         );
         assert_eq!(
-            response["values"]["codexhub_model_list_config"],
-            response["dynamic_configs"]["107580212"]["v"]
+            response["dynamic_configs"]["107580212"]["v"],
+            "codexhub_model_list_config"
         );
         assert!(response["layer_configs"]["2096615506"].is_object());
         assert!(response["layer_configs"]["72216192"].is_object());
@@ -283,6 +329,20 @@ mod tests {
         assert_eq!(
             response["values"]["codexhub_i18n_layer_config"]["locale_source"],
             "FIRST_AVAILABLE"
+        );
+        assert!(response.get("statsigPayload").is_none());
+    }
+
+    #[test]
+    fn statsig_initialize_headers_allow_local_renderer_requests_without_caching() {
+        let headers = statsig_response_headers();
+        assert_eq!(headers[CACHE_CONTROL], "no-store");
+        assert_eq!(headers[ACCESS_CONTROL_ALLOW_ORIGIN], "*");
+        assert_eq!(headers[ACCESS_CONTROL_ALLOW_METHODS], "POST, OPTIONS");
+        assert_eq!(headers[ACCESS_CONTROL_ALLOW_HEADERS], "*");
+        assert_eq!(
+            headers[HeaderName::from_static("access-control-allow-private-network")],
+            "true"
         );
     }
 }

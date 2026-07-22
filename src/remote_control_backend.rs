@@ -118,12 +118,22 @@ pub(crate) enum OutboundWsMessage {
 pub fn router() -> Router<SharedState> {
     Router::new()
         .route(
+            "/codex-app/statsig/v1/initialize",
+            post(compatibility::statsig_initialize)
+                .options(compatibility::statsig_initialize_options),
+        )
+        .route(
             "/api/wham/accounts/check",
             get(compatibility::accounts_check),
         )
         .route(
             "/api/wham/statsig/bootstrap",
             post(compatibility::statsig_bootstrap),
+        )
+        .route(
+            "/api/codex-app/statsig/v1/initialize",
+            post(compatibility::statsig_initialize)
+                .options(compatibility::statsig_initialize_options),
         )
         .route("/api/accounts/check", get(compatibility::accounts_check))
         .route("/api/wham/usage", get(compatibility::usage))
@@ -275,6 +285,11 @@ pub fn router() -> Router<SharedState> {
         .route(
             "/backend-api/wham/statsig/bootstrap",
             post(compatibility::statsig_bootstrap),
+        )
+        .route(
+            "/backend-api/codex-app/statsig/v1/initialize",
+            post(compatibility::statsig_initialize)
+                .options(compatibility::statsig_initialize_options),
         )
         .route(
             "/backend-api/accounts/check",
