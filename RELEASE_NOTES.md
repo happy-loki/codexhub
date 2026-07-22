@@ -1,21 +1,31 @@
-CodexHub v0.4.8
+CodexHub v0.4.9
 
-本次更新修复部分 Windows 用户点击“增强模式启动 Codex”时，频繁出现“暂时无法检测 Codex App 状态”的问题。
+本次版本重点修复 Codex App 增强模式下插件市场无法显示的问题，并改进增强启动的早期注入稳定性。
+
+## 插件市场
+
+- 兼容新版 Codex App 的 `plugin/list` MCP 消息协议。
+- 修复插件桥接已安装但 `pluginCatalogResponsesAdapted=0`、本地 curated 插件被前端隐藏的问题。
+- 增强模式下，本地 `openai-curated` 会在 renderer 中显示为 `Codex official`，内部插件 ID、安装状态、绝对路径和配置身份保持不变。
+- 本地 curated 目录可正常展示约 25 个插件；`openai-curated-remote` 仍保持隐藏，避免出现无法安装的远程插件条目。
+- 保留旧版 `vscode://codex/list-plugins` 协议兼容，降低 Codex App 版本变化带来的影响。
 
 ## 增强模式启动
 
-- Windows 改用系统原生接口检测 Codex App，避免每次检测都启动额外的系统命令，速度更快，也更不容易被系统负载或安全软件拖慢。
-- 同时识别新版 `Codex.exe` 和旧版 `ChatGPT.exe` 进程名称。
-- 检测等待时间由 650 毫秒调整为 3 秒，减少低配机器和繁忙环境下的误报。
-- 原生检测不可用时仍保留兼容检测，确保特殊 Windows 环境可以继续使用。
+- 通过 browser CDP 的 `Target.setAutoAttach` 在 renderer 释放前注入脚本，减少启动阶段错过首个消息的情况。
+- 增加 browser/page CDP 会话生命周期管理和早期注入诊断日志。
+- 增强脚本升级到 v14；插件桥接状态和实际适配次数会写入启动诊断。
+- 不修改全局 `authMethod`，不改变普通启动、Codex CLI 或 VS Code 插件行为。
 
-## 错误提示与诊断
+## 请求可靠性
 
-- 检测失败时不再只显示笼统提示，而是附带具体原因和可操作的处理建议。
-- daemon 日志新增检测成功与失败记录，便于远程定位用户环境问题。
-- 本次修改不会关闭、重启或修改正在运行的 Codex App。
+- 上游请求体传输被网络中断后，可以重试上传，而不是直接结束本次请求。
+- 重试复用原始请求体，不改变请求语义。
 
 ## 验证
 
-- 全量测试：`528 passed, 0 failed, 2 ignored`。
-- `cargo fmt --check`、`cargo check --release --features gui --bin codexhub` 通过。
+- 默认测试：535 passed，0 failed，2 ignored。
+- GUI 测试：562 passed，0 failed，2 ignored。
+- `cargo fmt --all -- --check` 通过。
+- `cargo build --features gui --bin codexhub` 通过。
+- 实机 CDP 热回放确认本地 curated 目录响应成功适配，并加载 25 个插件图标。

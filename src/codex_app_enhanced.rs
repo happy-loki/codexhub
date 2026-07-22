@@ -16,14 +16,23 @@ use crate::chain_log;
 
 const DEFAULT_CDP_PORT: u16 = 9335;
 const CODEX_APP_READY_TIMEOUT: Duration = Duration::from_secs(30);
+const EARLY_ATTACH_TIMEOUT: Duration = Duration::from_secs(8);
+const EARLY_ATTACH_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const ENHANCED_INJECTION_TIMEOUT: Duration = Duration::from_secs(45);
 // The injected script retries internally for about 24 seconds. Re-run it only
 // after that window so a cold renderer does not accumulate retry timers.
 const ENHANCED_SCRIPT_RETRY_INTERVAL: Duration = Duration::from_secs(26);
 const ENHANCED_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const ENHANCED_SCRIPT_VERSION: u64 = 12;
+const ENHANCED_SCRIPT_VERSION: u64 = 14;
 type CdpSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
-static ENHANCED_CDP_SESSION: OnceLock<Mutex<Option<tokio::task::JoinHandle<()>>>> = OnceLock::new();
+
+#[derive(Default)]
+struct RetainedCdpSessions {
+    browser: Option<tokio::task::JoinHandle<()>>,
+    page: Option<tokio::task::JoinHandle<()>>,
+}
+
+static ENHANCED_CDP_SESSIONS: OnceLock<Mutex<RetainedCdpSessions>> = OnceLock::new();
 const SUPPORTED_FEATURE_GATES: &[&str] = &[
     "1042620455",
     "4114442250",
@@ -55,6 +64,10 @@ pub struct EnhancedLaunchReport {
     pub port: u16,
     pub launched: bool,
     pub target_id: String,
+    pub early_attach_applied: bool,
+    pub early_attach_target_id: Option<String>,
+    pub early_attach_elapsed_ms: Option<u64>,
+    pub early_attach_fallback: Option<String>,
     pub available_models: Vec<String>,
     pub use_hidden_models: bool,
     pub key_gates_enabled: usize,
@@ -76,6 +89,8 @@ pub struct EnhancedLaunchReport {
     pub script_attempts: u64,
     pub routes_mounted: bool,
     pub renderer_ready_ms: Option<u64>,
+    pub plugin_catalog_bridge_installed: bool,
+    pub plugin_catalog_responses_adapted: u64,
     pub startup_elapsed_ms: u64,
 }
 
@@ -114,6 +129,37 @@ struct CdpTarget {
     web_socket_debugger_url: Option<String>,
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CdpBrowserVersion {
+    web_socket_debugger_url: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AttachedTarget {
+    session_id: String,
+    target_id: String,
+    target_type: String,
+    url: String,
+    waiting_for_debugger: bool,
+}
+
+struct EarlyBrowserSession {
+    socket: CdpSocket,
+    command_id: u64,
+    target_id: String,
+    applied: bool,
+    elapsed_ms: u64,
+}
+
+#[derive(Default)]
+struct EarlyAttachDiagnostics {
+    applied: bool,
+    target_id: Option<String>,
+    elapsed_ms: Option<u64>,
+    fallback: Option<String>,
+}
+
 pub async fn launch_and_inject(
     models: Vec<String>,
     backend_url: &str,
@@ -134,7 +180,9 @@ pub async fn launch_and_inject(
         .no_proxy()
         .timeout(Duration::from_secs(2))
         .build()?;
+    let source = enhanced_statsig_script(&models)?;
     let mut launched = false;
+    let mut early_attach = EarlyAttachDiagnostics::default();
     let app_running = tokio::task::spawn_blocking(codex_app_is_running)
         .await
         .context("检测 Codex App 进程失败")??;
@@ -150,18 +198,58 @@ pub async fn launch_and_inject(
     } else {
         crate::codex_app_config::configure_gui_direct_api_base(backend_url)
             .map_err(|err| anyhow!("配置 CODEX_API_BASE_URL 失败: {err}"))?;
+        let early_attach_blocked = match find_browser_websocket_url(&client, DEFAULT_CDP_PORT).await
+        {
+            Ok(Some(_)) => Some(format!(
+                "本地端口 {DEFAULT_CDP_PORT} 在 Codex 启动前已被 CDP 服务占用"
+            )),
+            Ok(None) => None,
+            Err(err) => Some(format!("检查本地 CDP 端口失败: {err}")),
+        };
         launch_codex_app(DEFAULT_CDP_PORT).await?;
         launched = true;
+        if let Some(fallback) = early_attach_blocked {
+            chain_log::write_line(format!(
+                "[codex_app_enhanced] event=early_attach_fallback error={fallback}"
+            ));
+            early_attach.fallback = Some(fallback);
+        } else {
+            match attach_to_initial_renderer(&client, DEFAULT_CDP_PORT, &source).await {
+                Ok(session) => {
+                    early_attach.applied = session.applied;
+                    early_attach.target_id = Some(session.target_id.clone());
+                    early_attach.elapsed_ms = Some(session.elapsed_ms);
+                    if !session.applied {
+                        early_attach.fallback =
+                            Some("renderer 在 browser CDP 挂载前已经开始运行".to_string());
+                    }
+                    chain_log::write_line(format!(
+                        "[codex_app_enhanced] event=early_attach_ready applied={} elapsed_ms={} target_id={}",
+                        session.applied, session.elapsed_ms, session.target_id
+                    ));
+                    retain_browser_cdp_session(session, source.clone());
+                }
+                Err(err) => {
+                    let fallback = err.to_string();
+                    chain_log::write_line(format!(
+                        "[codex_app_enhanced] event=early_attach_fallback error={fallback}"
+                    ));
+                    early_attach.fallback = Some(fallback);
+                }
+            }
+        }
         wait_for_app_target(&client, DEFAULT_CDP_PORT).await?
     };
     chain_log::write_line(format!(
-        "[codex_app_enhanced] event=target_ready elapsed_ms={} launched={} target_id={}",
+        "[codex_app_enhanced] event=target_ready elapsed_ms={} launched={} target_id={} early_attach_applied={}",
         started.elapsed().as_millis(),
         launched,
-        target.id
+        target.id,
+        early_attach.applied
     ));
 
-    let (target, status) = inject_until_ready(&client, DEFAULT_CDP_PORT, target, &models).await?;
+    let (target, status) =
+        inject_until_ready(&client, DEFAULT_CDP_PORT, target, &models, &source).await?;
     chain_log::write_line(format!(
         "[codex_app_enhanced] event=injection_applied elapsed_ms={} target_id={}",
         started.elapsed().as_millis(),
@@ -169,7 +257,14 @@ pub async fn launch_and_inject(
     ));
     let startup_elapsed_ms = started.elapsed().as_millis() as u64;
     chain_log::write_line(format!(
-        "[codex_app_enhanced] event=config_ready elapsed_ms={startup_elapsed_ms} i18n_enabled={} fast_initialize_applied={} fast_initialize_source={} routes_mounted={} renderer_ready_ms={} bootstrap_intercepted={} bootstrap_source={} model_config_id={} model_config_source={} model_config_supported={} i18n_layer_id={} i18n_layer_source={} i18n_layer_supported={} official_base_available={} compatibility_adapters={} compatibility_failure={} store_source={} script_attempts={}",
+        "[codex_app_enhanced] event=config_ready elapsed_ms={startup_elapsed_ms} early_attach_applied={} early_attach_target_id={} early_attach_elapsed_ms={} early_attach_fallback={} i18n_enabled={} fast_initialize_applied={} fast_initialize_source={} routes_mounted={} renderer_ready_ms={} plugin_catalog_bridge_installed={} plugin_catalog_responses_adapted={} bootstrap_intercepted={} bootstrap_source={} model_config_id={} model_config_source={} model_config_supported={} i18n_layer_id={} i18n_layer_source={} i18n_layer_supported={} official_base_available={} compatibility_adapters={} compatibility_failure={} store_source={} script_attempts={}",
+        early_attach.applied,
+        early_attach.target_id.as_deref().unwrap_or("none"),
+        early_attach
+            .elapsed_ms
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        early_attach.fallback.as_deref().unwrap_or("none"),
         status.i18n_enabled,
         status.fast_initialize_applied,
         status.fast_initialize_source.as_deref().unwrap_or("none"),
@@ -178,6 +273,8 @@ pub async fn launch_and_inject(
             .renderer_ready_ms
             .map(|value| value.to_string())
             .unwrap_or_else(|| "none".to_string()),
+        status.plugin_catalog_bridge_installed,
+        status.plugin_catalog_responses_adapted,
         status.bootstrap_intercepted,
         status.bootstrap_source.as_deref().unwrap_or("none"),
         status.model_config_id.as_deref().unwrap_or("none"),
@@ -197,6 +294,10 @@ pub async fn launch_and_inject(
         port: DEFAULT_CDP_PORT,
         launched,
         target_id: target.id,
+        early_attach_applied: early_attach.applied,
+        early_attach_target_id: early_attach.target_id,
+        early_attach_elapsed_ms: early_attach.elapsed_ms,
+        early_attach_fallback: early_attach.fallback,
         available_models: status.available_models,
         use_hidden_models: status.use_hidden_models,
         key_gates_enabled: status.key_gates_enabled,
@@ -218,6 +319,8 @@ pub async fn launch_and_inject(
         script_attempts: status.script_attempts,
         routes_mounted: status.routes_mounted,
         renderer_ready_ms: status.renderer_ready_ms,
+        plugin_catalog_bridge_installed: status.plugin_catalog_bridge_installed,
+        plugin_catalog_responses_adapted: status.plugin_catalog_responses_adapted,
         startup_elapsed_ms,
     })
 }
@@ -261,17 +364,231 @@ async fn wait_for_app_target(client: &reqwest::Client, port: u16) -> Result<CdpT
     }
 }
 
+async fn find_browser_websocket_url(client: &reqwest::Client, port: u16) -> Result<Option<String>> {
+    let response = match client
+        .get(format!("http://127.0.0.1:{port}/json/version"))
+        .send()
+        .await
+    {
+        Ok(response) if response.status().is_success() => response,
+        Ok(_) | Err(_) => return Ok(None),
+    };
+    let version = response.json::<CdpBrowserVersion>().await?;
+    let Some(raw) = version.web_socket_debugger_url.as_deref() else {
+        return Ok(None);
+    };
+    Ok(Some(validated_loopback_websocket_url(
+        raw,
+        port,
+        "Codex browser",
+    )?))
+}
+
+async fn attach_to_initial_renderer(
+    client: &reqwest::Client,
+    port: u16,
+    source: &str,
+) -> Result<EarlyBrowserSession> {
+    let started = Instant::now();
+    let deadline = tokio::time::Instant::now() + EARLY_ATTACH_TIMEOUT;
+    let websocket_url = loop {
+        if let Some(url) = find_browser_websocket_url(client, port).await? {
+            break url;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            bail!("Codex browser CDP 未在早期挂载时限内开放");
+        }
+        tokio::time::sleep(EARLY_ATTACH_POLL_INTERVAL).await;
+    };
+    let (mut socket, _) = connect_async(websocket_url)
+        .await
+        .context("连接 Codex browser CDP 失败")?;
+    let mut command_id = 1_u64;
+    let enable_id = send_cdp_request(
+        &mut socket,
+        &mut command_id,
+        None,
+        "Target.setAutoAttach",
+        json!({
+            "autoAttach": true,
+            "waitForDebuggerOnStart": true,
+            "flatten": true,
+        }),
+    )
+    .await?;
+    let mut auto_attach_enabled = false;
+    let mut renderer = None::<AttachedTarget>;
+
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            bail!("Codex browser CDP 已连接，但未及时捕获 renderer");
+        }
+        let remaining = deadline.saturating_duration_since(now);
+        let message = tokio::time::timeout(remaining, socket.next())
+            .await
+            .context("等待 Codex renderer 超时")?
+            .context("Codex browser CDP 在 renderer 出现前关闭")??;
+        match message {
+            Message::Ping(payload) => socket.send(Message::Pong(payload)).await?,
+            Message::Text(text) => {
+                let message: Value = serde_json::from_str(&text)?;
+                if message.get("id").and_then(Value::as_u64) == Some(enable_id) {
+                    if let Some(error) = message.get("error") {
+                        bail!("CDP Target.setAutoAttach 失败: {error}");
+                    }
+                    auto_attach_enabled = true;
+                }
+                if let Some(target) = attached_target_from_event(&message) {
+                    let is_renderer = is_codex_renderer_target(&target);
+                    install_on_attached_target(&mut socket, &mut command_id, &target, source)
+                        .await?;
+                    if is_renderer && renderer.is_none() {
+                        renderer = Some(target);
+                    }
+                }
+                if let Some(error) = cdp_response_error(&message) {
+                    chain_log::write_line(format!(
+                        "[codex_app_enhanced] event=browser_cdp_command_error error={error}"
+                    ));
+                }
+            }
+            Message::Close(_) => bail!("Codex browser CDP 在 renderer 出现前关闭"),
+            _ => {}
+        }
+        if auto_attach_enabled && let Some(target) = renderer.take() {
+            return Ok(EarlyBrowserSession {
+                socket,
+                command_id,
+                target_id: target.target_id,
+                applied: target.waiting_for_debugger,
+                elapsed_ms: started.elapsed().as_millis() as u64,
+            });
+        }
+    }
+}
+
+fn attached_target_from_event(message: &Value) -> Option<AttachedTarget> {
+    if message.get("method").and_then(Value::as_str) != Some("Target.attachedToTarget") {
+        return None;
+    }
+    let params = message.get("params")?;
+    let target = params.get("targetInfo")?;
+    Some(AttachedTarget {
+        session_id: params.get("sessionId")?.as_str()?.to_string(),
+        target_id: target.get("targetId")?.as_str()?.to_string(),
+        target_type: target.get("type")?.as_str()?.to_string(),
+        url: target
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        waiting_for_debugger: params
+            .get("waitingForDebugger")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
+}
+
+fn is_codex_renderer_target(target: &AttachedTarget) -> bool {
+    target.target_type == "page"
+        && (target.url.starts_with("app://")
+            || target.url.is_empty()
+            || target.url == "about:blank")
+}
+
+fn attached_target_commands(target: &AttachedTarget, source: &str) -> Vec<(&'static str, Value)> {
+    if !is_codex_renderer_target(target) {
+        return target
+            .waiting_for_debugger
+            .then(|| vec![("Runtime.runIfWaitingForDebugger", json!({}))])
+            .unwrap_or_default();
+    }
+    if target.waiting_for_debugger {
+        vec![
+            (
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({ "source": source }),
+            ),
+            ("Runtime.runIfWaitingForDebugger", json!({})),
+        ]
+    } else {
+        vec![
+            (
+                "Runtime.evaluate",
+                json!({ "expression": source, "returnByValue": true }),
+            ),
+            (
+                "Page.addScriptToEvaluateOnNewDocument",
+                json!({ "source": source }),
+            ),
+        ]
+    }
+}
+
+async fn install_on_attached_target(
+    socket: &mut CdpSocket,
+    command_id: &mut u64,
+    target: &AttachedTarget,
+    source: &str,
+) -> Result<()> {
+    for (method, params) in attached_target_commands(target, source) {
+        send_cdp_request(socket, command_id, Some(&target.session_id), method, params).await?;
+    }
+    if is_codex_renderer_target(target) {
+        chain_log::write_line(format!(
+            "[codex_app_enhanced] event=browser_target_injected target_id={} url={} waiting_for_debugger={}",
+            target.target_id, target.url, target.waiting_for_debugger
+        ));
+    }
+    Ok(())
+}
+
+async fn send_cdp_request(
+    socket: &mut CdpSocket,
+    command_id: &mut u64,
+    session_id: Option<&str>,
+    method: &str,
+    params: Value,
+) -> Result<u64> {
+    let id = *command_id;
+    *command_id += 1;
+    let request = cdp_request_value(id, session_id, method, params);
+    socket
+        .send(Message::Text(request.to_string().into()))
+        .await?;
+    Ok(id)
+}
+
+fn cdp_request_value(id: u64, session_id: Option<&str>, method: &str, params: Value) -> Value {
+    let mut request = json!({ "id": id, "method": method, "params": params });
+    if let Some(session_id) = session_id {
+        request["sessionId"] = Value::String(session_id.to_string());
+    }
+    request
+}
+
+fn cdp_response_error(message: &Value) -> Option<String> {
+    let id = message.get("id")?.as_u64()?;
+    let error = message.get("error")?;
+    Some(format!("id={id} {error}"))
+}
+
+fn validated_loopback_websocket_url(raw: &str, expected_port: u16, label: &str) -> Result<String> {
+    let url = Url::parse(raw)?;
+    let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1"));
+    if url.scheme() != "ws" || !loopback || url.port() != Some(expected_port) {
+        bail!("拒绝连接非本机 {label} CDP 地址: {raw}");
+    }
+    Ok(raw.to_string())
+}
+
 fn validated_websocket_url(target: &CdpTarget, expected_port: u16) -> Result<String> {
     let raw = target
         .web_socket_debugger_url
         .as_deref()
         .context("Codex CDP target 缺少 WebSocket 地址")?;
-    let url = Url::parse(raw)?;
-    let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1"));
-    if url.scheme() != "ws" || !loopback || url.port() != Some(expected_port) {
-        bail!("拒绝连接非本机 Codex CDP 地址: {raw}");
-    }
-    Ok(raw.to_string())
+    validated_loopback_websocket_url(raw, expected_port, "Codex page")
 }
 
 fn same_cdp_target(left: &CdpTarget, right: &CdpTarget) -> bool {
@@ -361,7 +678,7 @@ fn ensure_runtime_evaluation_succeeded(result: &Value) -> Result<()> {
     bail!("Codex App 增强脚本执行失败: {message}")
 }
 
-fn retain_cdp_session(mut socket: CdpSocket) {
+fn retain_page_cdp_session(mut socket: CdpSocket) {
     let handle = tokio::spawn(async move {
         while let Some(message) = socket.next().await {
             match message {
@@ -375,11 +692,61 @@ fn retain_cdp_session(mut socket: CdpSocket) {
             }
         }
     });
-    let sessions = ENHANCED_CDP_SESSION.get_or_init(|| Mutex::new(None));
-    let mut current = sessions
+    let sessions = ENHANCED_CDP_SESSIONS.get_or_init(|| Mutex::new(RetainedCdpSessions::default()));
+    let mut retained = sessions
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(previous) = current.replace(handle) {
+    if let Some(previous) = retained.page.replace(handle) {
+        previous.abort();
+    }
+}
+
+fn retain_browser_cdp_session(session: EarlyBrowserSession, source: String) {
+    let handle = tokio::spawn(async move {
+        let mut socket = session.socket;
+        let mut command_id = session.command_id;
+        while let Some(message) = socket.next().await {
+            match message {
+                Ok(Message::Ping(payload)) => {
+                    if socket.send(Message::Pong(payload)).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(Message::Text(text)) => {
+                    let Ok(message) = serde_json::from_str::<Value>(&text) else {
+                        continue;
+                    };
+                    if let Some(target) = attached_target_from_event(&message)
+                        && let Err(err) = install_on_attached_target(
+                            &mut socket,
+                            &mut command_id,
+                            &target,
+                            &source,
+                        )
+                        .await
+                    {
+                        chain_log::write_line(format!(
+                            "[codex_app_enhanced] event=browser_target_injection_failed target_id={} error={err}",
+                            target.target_id
+                        ));
+                        break;
+                    }
+                    if let Some(error) = cdp_response_error(&message) {
+                        chain_log::write_line(format!(
+                            "[codex_app_enhanced] event=browser_cdp_command_error error={error}"
+                        ));
+                    }
+                }
+                Ok(Message::Close(_)) | Err(_) => break,
+                _ => {}
+            }
+        }
+    });
+    let sessions = ENHANCED_CDP_SESSIONS.get_or_init(|| Mutex::new(RetainedCdpSessions::default()));
+    let mut retained = sessions
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(previous) = retained.browser.replace(handle) {
         previous.abort();
     }
 }
@@ -447,6 +814,8 @@ struct InjectedStatus {
     script_attempts: u64,
     routes_mounted: bool,
     renderer_ready_ms: Option<u64>,
+    plugin_catalog_bridge_installed: bool,
+    plugin_catalog_responses_adapted: u64,
 }
 
 async fn inject_until_ready(
@@ -454,8 +823,8 @@ async fn inject_until_ready(
     port: u16,
     initial_target: CdpTarget,
     expected_models: &[String],
+    source: &str,
 ) -> Result<(CdpTarget, InjectedStatus)> {
-    let source = enhanced_statsig_script(expected_models)?;
     let deadline = tokio::time::Instant::now() + ENHANCED_INJECTION_TIMEOUT;
     let mut initial_target = Some(initial_target);
     let mut active: Option<ActiveInjection> = None;
@@ -485,7 +854,7 @@ async fn inject_until_ready(
                     ));
                 }
                 active = None;
-                match connect_and_install(&target, port, &source).await {
+                match connect_and_install(&target, port, source).await {
                     Ok(connection) => active = Some(connection),
                     Err(err) => last_error = Some(err.to_string()),
                 }
@@ -502,11 +871,11 @@ async fn inject_until_ready(
                             let connection = active
                                 .take()
                                 .expect("active injection exists after status check");
-                            retain_cdp_session(connection.socket);
+                            retain_page_cdp_session(connection.socket);
                             return Ok((connection.target, status));
                         }
                         if should_reapply {
-                            if let Err(err) = reapply_script(connection, &source).await {
+                            if let Err(err) = reapply_script(connection, source).await {
                                 last_error = Some(err.to_string());
                                 active = None;
                             }
@@ -555,12 +924,13 @@ fn injected_status_is_ready(status: &InjectedStatus, expected_models: &[String])
         && status.official_base_available
         && status.model_config_supported
         && status.i18n_layer_supported
+        && status.plugin_catalog_bridge_installed
         && !status.compatibility_adapters.is_empty()
 }
 
 fn injected_status_detail(status: &InjectedStatus) -> String {
     format!(
-        "script={} attempts={} store={} official_base={} model={}:{} i18n={}:{} gates={}/{} adapters={} failure={}",
+        "script={} attempts={} store={} official_base={} model={}:{} i18n={}:{} gates={}/{} plugin_bridge={} plugin_responses={} adapters={} failure={}",
         status
             .script_version
             .map(|value| value.to_string())
@@ -574,6 +944,8 @@ fn injected_status_detail(status: &InjectedStatus) -> String {
         status.i18n_layer_supported,
         status.key_gates_enabled,
         SUPPORTED_FEATURE_GATES.len(),
+        status.plugin_catalog_bridge_installed,
+        status.plugin_catalog_responses_adapted,
         status.compatibility_adapters.join(","),
         status.compatibility_failure.as_deref().unwrap_or("none")
     )
@@ -622,6 +994,12 @@ async fn inspect_injected_status_on_socket(active: &mut ActiveInjection) -> Resu
             scriptAttempts: Number(enhanced?.attempts ?? 0),
             routesMounted: Boolean(window.__CODEXHUB_ENHANCED_MODE__?.routesMounted),
             rendererReadyMs: window.__CODEXHUB_ENHANCED_MODE__?.routesMountedAtMs ?? null,
+            pluginCatalogBridgeInstalled: Boolean(
+              window.__CODEXHUB_ENHANCED_MODE__?.pluginCatalogBridgeInstalled
+            ),
+            pluginCatalogResponsesAdapted: Number(
+              window.__CODEXHUB_ENHANCED_MODE__?.pluginCatalogResponsesAdapted ?? 0
+            ),
           }};
         }})()"#
     );
@@ -659,6 +1037,8 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
   if (existing?.installed) existing.applying = true;
   const DEFAULT_MODEL_CONFIG_ID = "107580212";
   const DEFAULT_I18N_LAYER_ID = "72216192";
+  const LOCAL_CURATED_MARKETPLACE = "openai-curated";
+  const LOCAL_CURATED_RENDERER_ALIAS = "codex-official";
   const state = {{
     installed: true,
     version: SCRIPT_VERSION,
@@ -686,6 +1066,10 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     i18nReactCacheInvalidated: 0,
     routesMounted: false,
     routesMountedAtMs: null,
+    pluginCatalogBridgeInstalled: false,
+    pluginCatalogResponsesAdapted: 0,
+    pluginCatalogRequestIds: new Set(),
+    pluginCatalogError: null,
   }};
   window[MARKER] = state;
 
@@ -1254,12 +1638,78 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
     }}));
   }};
 
+  const adaptLocalCuratedPluginCatalog = (body) => {{
+    if (!body || typeof body !== "object") return 0;
+    const containers = [body, body.data, body.result, body.result?.data];
+    const visited = new Set();
+    let adapted = 0;
+    for (const container of containers) {{
+      if (!container || typeof container !== "object" || visited.has(container)) continue;
+      visited.add(container);
+      if (!Array.isArray(container.marketplaces)) continue;
+      for (const marketplace of container.marketplaces) {{
+        if (!marketplace || typeof marketplace !== "object") continue;
+        if (marketplace.name !== LOCAL_CURATED_MARKETPLACE) continue;
+        // The renderer uses the marketplace name only for presentation here. Local
+        // install/read requests continue to use the untouched absolute path.
+        marketplace.name = LOCAL_CURATED_RENDERER_ALIAS;
+        adapted += 1;
+      }}
+    }}
+    if (adapted > 0) {{
+      state.pluginCatalogResponsesAdapted += 1;
+      state.pluginCatalogError = null;
+    }}
+    return adapted;
+  }};
+
+  window.addEventListener("message", (event) => {{
+    const message = event?.data;
+    if (message?.type === "mcp-response") {{
+      const requestId = message.message?.id == null ? "" : String(message.message.id);
+      if (!state.pluginCatalogRequestIds.has(requestId)) return;
+      state.pluginCatalogRequestIds.delete(requestId);
+      try {{
+        adaptLocalCuratedPluginCatalog(message.message?.result);
+      }} catch (error) {{
+        state.pluginCatalogError = String(error?.stack ?? error);
+      }}
+      return;
+    }}
+    if (message?.type !== "fetch-response") return;
+    const requestId = message.requestId == null ? "" : String(message.requestId);
+    if (!state.pluginCatalogRequestIds.has(requestId)) return;
+    state.pluginCatalogRequestIds.delete(requestId);
+    if (message.responseType !== "success"
+      || typeof message.bodyJsonString !== "string"
+      || !message.bodyJsonString.trim()) return;
+    try {{
+      const body = JSON.parse(message.bodyJsonString);
+      if (adaptLocalCuratedPluginCatalog(body) > 0) {{
+        message.bodyJsonString = JSON.stringify(body);
+      }}
+    }} catch (error) {{
+      state.pluginCatalogError = String(error?.stack ?? error);
+    }}
+  }}, true);
+
   window.addEventListener("codex-message-from-view", (event) => {{
     const message = event?.detail;
     if (message?.type === "ready") {{
       state.routesMounted = true;
       state.routesMountedAtMs = Math.round(performance.now());
       return;
+    }}
+    if (message?.type === "mcp-request"
+      && message.request?.method === "plugin/list"
+      && message.request.id != null) {{
+      state.pluginCatalogRequestIds.add(String(message.request.id));
+    }}
+    if (message?.type === "fetch"
+      && String(message.method).toUpperCase() === "POST"
+      && message.url === "vscode://codex/list-plugins"
+      && message.requestId != null) {{
+      state.pluginCatalogRequestIds.add(String(message.requestId));
     }}
     if (message?.type !== "fetch"
       || String(message.method).toUpperCase() !== "POST"
@@ -1275,6 +1725,7 @@ fn enhanced_statsig_script(models: &[String]) -> Result<String> {
       state.bootstrapError = String(error?.stack ?? error);
     }}
   }});
+  state.pluginCatalogBridgeInstalled = true;
 
   Storage.prototype.getItem = function(key) {{
     const raw = originalGetItem.call(this, key);
@@ -1856,7 +2307,7 @@ mod tests {
         assert!(script.contains("const modelIsV2"));
         assert!(script.contains("installStorePatch"));
         assert!(script.contains("patchCachedI18nLayer"));
-        assert!(script.contains("SCRIPT_VERSION = 12"));
+        assert!(script.contains("SCRIPT_VERSION = 14"));
         assert!(script.contains("DEFAULT_MODEL_CONFIG_ID = \"107580212\""));
         assert!(script.contains("DEFAULT_I18N_LAYER_ID = \"72216192\""));
         assert!(script.contains("discoverConfigIds"));
@@ -1905,6 +2356,18 @@ mod tests {
         assert!(!script.contains("state.gates.every"));
         assert!(script.contains("/wham/statsig/bootstrap"));
         assert!(script.contains("codex-message-from-view"));
+        assert!(script.contains("LOCAL_CURATED_MARKETPLACE = \"openai-curated\""));
+        assert!(script.contains("LOCAL_CURATED_RENDERER_ALIAS = \"codex-official\""));
+        assert!(script.contains("message?.type === \"mcp-request\""));
+        assert!(script.contains("message.request?.method === \"plugin/list\""));
+        assert!(script.contains("message?.type === \"mcp-response\""));
+        assert!(script.contains("message.message?.result"));
+        assert!(script.contains("message.url === \"vscode://codex/list-plugins\""));
+        assert!(script.contains("adaptLocalCuratedPluginCatalog"));
+        assert!(script.contains("marketplace.name = LOCAL_CURATED_RENDERER_ALIAS"));
+        assert!(script.contains("state.pluginCatalogBridgeInstalled = true"));
+        assert!(script.contains("state.pluginCatalogResponsesAdapted += 1"));
+        assert!(!script.contains("LOCAL_CURATED_MARKETPLACE = \"openai-curated-remote\""));
         assert!(script.contains("routesMountedAtMs"));
         assert!(script.contains("values.layer_configs[i18nLayerId]"));
     }
@@ -1923,6 +2386,111 @@ mod tests {
         );
         assert!(!methods.contains(&"Page.reload"));
         assert_eq!(commands[0].1["expression"], "window.testEnhanced = true;");
+    }
+
+    #[test]
+    fn early_attach_installs_before_releasing_renderer() {
+        let target = AttachedTarget {
+            session_id: "session".into(),
+            target_id: "renderer".into(),
+            target_type: "page".into(),
+            url: "app://-/index.html".into(),
+            waiting_for_debugger: true,
+        };
+        let commands = attached_target_commands(&target, "window.testEnhanced = true;");
+        let methods = commands
+            .iter()
+            .map(|(method, _)| *method)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            methods,
+            vec![
+                "Page.addScriptToEvaluateOnNewDocument",
+                "Runtime.runIfWaitingForDebugger"
+            ]
+        );
+        assert_eq!(commands[0].1["source"], "window.testEnhanced = true;");
+        assert!(!methods.contains(&"Runtime.evaluate"));
+        assert!(!methods.contains(&"Page.reload"));
+    }
+
+    #[test]
+    fn early_attach_releases_non_renderer_targets_without_injecting() {
+        let target = AttachedTarget {
+            session_id: "worker-session".into(),
+            target_id: "worker".into(),
+            target_type: "worker".into(),
+            url: "blob:worker".into(),
+            waiting_for_debugger: true,
+        };
+        let commands = attached_target_commands(&target, "window.testEnhanced = true;");
+
+        assert_eq!(commands.len(), 1);
+        assert_eq!(commands[0].0, "Runtime.runIfWaitingForDebugger");
+    }
+
+    #[test]
+    fn late_browser_attach_keeps_the_existing_in_place_fallback() {
+        let target = AttachedTarget {
+            session_id: "session".into(),
+            target_id: "renderer".into(),
+            target_type: "page".into(),
+            url: "app://-/index.html".into(),
+            waiting_for_debugger: false,
+        };
+        let methods = attached_target_commands(&target, "window.testEnhanced = true;")
+            .into_iter()
+            .map(|(method, _)| method)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            methods,
+            vec!["Runtime.evaluate", "Page.addScriptToEvaluateOnNewDocument"]
+        );
+        assert!(!methods.contains(&"Page.reload"));
+    }
+
+    #[test]
+    fn attached_target_event_is_parsed_for_flattened_sessions() {
+        let event = json!({
+            "method": "Target.attachedToTarget",
+            "params": {
+                "sessionId": "session-1",
+                "waitingForDebugger": true,
+                "targetInfo": {
+                    "targetId": "target-1",
+                    "type": "page",
+                    "url": "app://-/index.html"
+                }
+            }
+        });
+
+        assert_eq!(
+            attached_target_from_event(&event),
+            Some(AttachedTarget {
+                session_id: "session-1".into(),
+                target_id: "target-1".into(),
+                target_type: "page".into(),
+                url: "app://-/index.html".into(),
+                waiting_for_debugger: true,
+            })
+        );
+    }
+
+    #[test]
+    fn flattened_cdp_request_places_session_id_at_the_top_level() {
+        let request = cdp_request_value(
+            7,
+            Some("session-1"),
+            "Runtime.runIfWaitingForDebugger",
+            json!({}),
+        );
+
+        assert_eq!(request["id"], 7);
+        assert_eq!(request["sessionId"], "session-1");
+        assert_eq!(request["method"], "Runtime.runIfWaitingForDebugger");
+        assert!(request["params"].get("sessionId").is_none());
     }
 
     #[test]
@@ -2000,6 +2568,8 @@ mod tests {
             script_attempts: 1,
             routes_mounted: false,
             renderer_ready_ms: None,
+            plugin_catalog_bridge_installed: true,
+            plugin_catalog_responses_adapted: 0,
         };
 
         assert!(injected_status_is_ready(&status, &expected_models));
@@ -2011,6 +2581,9 @@ mod tests {
         status.i18n_enabled = false;
         assert!(!injected_status_is_ready(&status, &expected_models));
         status.i18n_enabled = true;
+        status.plugin_catalog_bridge_installed = false;
+        assert!(!injected_status_is_ready(&status, &expected_models));
+        status.plugin_catalog_bridge_installed = true;
         status.compatibility_adapters.clear();
         assert!(!injected_status_is_ready(&status, &expected_models));
     }
@@ -2043,6 +2616,8 @@ mod tests {
             script_attempts: 300,
             routes_mounted: false,
             renderer_ready_ms: None,
+            plugin_catalog_bridge_installed: false,
+            plugin_catalog_responses_adapted: 0,
         };
 
         assert!(!should_reapply_script(&status, Duration::from_secs(2)));
@@ -2101,6 +2676,7 @@ mod tests {
         assert!(report.official_base_available);
         assert!(report.model_config_supported);
         assert!(report.i18n_layer_supported);
+        assert!(report.plugin_catalog_bridge_installed);
         assert!(!report.compatibility_adapters.is_empty());
         assert!(report.compatibility_failure.is_none());
         assert_eq!(report.model_config_id.as_deref(), Some("107580212"));
@@ -2115,5 +2691,6 @@ mod tests {
         assert_eq!(repeated.key_gates_enabled, SUPPORTED_FEATURE_GATES.len());
         assert!(repeated.i18n_enabled);
         assert!(repeated.official_base_available);
+        assert!(repeated.plugin_catalog_bridge_installed);
     }
 }

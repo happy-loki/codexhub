@@ -821,4 +821,34 @@ openai-curated-remote
 
 `features.apps=false` 是另一项独立策略。它只关闭需要官方 ChatGPT `codex_apps` MCP 后端的 Apps/Connectors；Computer Use、Chrome、primary runtime plugin 和普通 skill 不依赖这个开关。CodexHub 未实现官方 Apps streamable HTTP 后端前，不应仅为恢复图标而开启它。
 
-后续修复候选是把已确认可本地运行的过滤目录迁移为 `codexhub-curated`，避免 renderer 针对 OpenAI marketplace 名称的账号态过滤。实现前必须一并设计旧 `<plugin>@openai-curated` 状态迁移、featured id、安装/卸载和更新重建流程。当前只记录方案，不修改目录身份。
+## 2026-07-21 增强模式本地 curated 显示修复
+
+最终没有迁移磁盘目录或配置身份，也没有伪造全局 `authMethod`。Codex App `26.715.8383` 的 renderer 一方面会在 `authMethod=null` 时过滤 `openai-curated`，另一方面明确把 `codex-official` 识别为内置市场。增强模式利用这一点做窄范围响应适配：
+
+1. 跟踪新版 `mcp-request(request.method=plugin/list)` 及对应 `mcp-response`，同时保留旧版 `vscode://codex/list-plugins` / `fetch-response` 兼容；
+2. 只把返回中的顶层本地市场名 `openai-curated` 临时改为 `codex-official`；
+3. 不改 `marketplacePath`、`<plugin>@openai-curated` ID、插件名、安装/启用状态或 `config.toml`；
+4. 不处理 `openai-curated-remote`，继续保持远端 curated 市场不可见；
+5. 安装和详情仍通过本地绝对路径进入 app-server，因此展示别名不会污染持久状态。
+
+真实 renderer 消息回放确认：本地市场通过过滤，路径和插件身份保持不变，远端 curated 与 bundled 市场均未修改。完整目录可以显示；featured 推荐位仍可能被 renderer 按原始 `@openai-curated` 后缀过滤，这是刻意保留的限制，不能为推荐位改写插件 ID。
+
+该修复只在“增强模式启动 Codex”中生效。普通启动、Codex CLI 和 VS Code 插件不经过 CDP 注入，不受影响。
+
+### 2026-07-22 插件消息协议变更
+
+新版 Codex App 已把插件目录从 renderer `fetch` 桥接迁移到 app-server MCP 消息：
+
+```text
+codex-message-from-view:
+  type=mcp-request
+  request.method=plugin/list
+  request.id=<id>
+
+window message:
+  type=mcp-response
+  message.id=<id>
+  message.result.marketplaces=[...]
+```
+
+旧实现只匹配 `fetch + vscode://codex/list-plugins`，因此桥接虽然已安装，`pluginCatalogResponsesAdapted` 始终为 `0`。修复后用请求 ID 关联 `plugin/list` 响应，只改 `message.result.marketplaces[].name`。实机 CDP 热回放共命中 3 个目录响应，React Query 中本地 curated 市场显示为 `codex-official`、`pluginCount=25`，并正常进入插件图标加载流程。

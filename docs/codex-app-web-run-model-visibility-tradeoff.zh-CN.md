@@ -129,7 +129,7 @@ openai-curated-remote
 4. 本地 `openai-curated` manifest 仍有 25 个经过 CodexHub 过滤、理论上可本地使用的插件，但查询键被标记为 `openai-curated-marketplaces-hidden`，renderer 不渲染它们；
 5. `/backend-api/ps/plugins/list` 仍被请求，因此问题不是 CodexHub 路由中断，也不是增强模式漏补 Statsig gate。
 
-增强模式目前只修补模型 dynamic config 和已经确认的功能 gate，不修改 React Auth Context。它解决模型显示，但不会把 `authMethod=null` 伪造成 ChatGPT 登录态。
+增强模式不修改 React Auth Context，也不会把 `authMethod=null` 伪造成 ChatGPT 登录态。2026-07-21 起，它除模型、语言和已确认的功能 gate 外，还会对本地 curated 插件目录做窄范围展示适配，详见 2.6 节。
 
 ### 2.5 Apps/Connectors 是另一条链路
 
@@ -142,16 +142,21 @@ apps = false
 
 该开关关闭的是 `codex_apps` MCP 以及依赖 ChatGPT 官方后端的 Apps/Connectors，例如 Gmail、Google Drive 等；它不关闭本地 plugin、skill、Computer Use 或 Chrome。CodexHub 尚未实现官方 `.../backend-api/wham/apps` streamable HTTP 后端，因此不能为了恢复入口而直接改成 `apps=true`，否则只会展示无法工作的功能并产生 MCP 启动错误。
 
-### 2.6 后续可选修复
+### 2.6 本地 curated 插件展示适配
 
-若要在方案 1 下恢复本地可用的 curated 插件，优先评估以下窄范围方案：
+Codex App `26.715.8383` 的 renderer 仍按 2.4 节所述过滤市场，同时把 `codex-official` 识别为内置市场。增强模式因此在 renderer 第一帧安装了一个仅面向插件目录的响应适配器：
 
-1. 将 CodexHub 已过滤过的本地目录改用 `codexhub-curated` marketplace 身份；
-2. 同步迁移 `<plugin>@openai-curated` 的安装/启用状态和 featured plugin id；
-3. 保持官方 Apps/Connectors 关闭，不把远端依赖伪装成本地可用；
-4. 验证插件安装、详情、卸载和 Codex 更新后 marketplace 重建流程。
+1. 监听 `codex-message-from-view`，只记录 `vscode://codex/list-plugins` 的 request id；
+2. 捕获对应的 `fetch-response`，只把顶层本地市场名 `openai-curated` 临时映射为 renderer 已接受的 `codex-official`；
+3. 保持 `marketplace.path`、插件 ID（如 `game-studio@openai-curated`）、插件名、安装/启用状态和配置身份原样不变；
+4. 完全不修改 `openai-curated-remote`、`openai-bundled`、`openai-primary-runtime` 或其他用户市场；
+5. 本地插件的安装、读取和详情继续使用绝对 `marketplacePath`，不会把展示别名写回 app-server 或 `config.toml`。
 
-不采用 CDP 修改全局 `authMethod`。该值还控制账号区域、套餐、共享市场和其他 ChatGPT 行为，伪造后影响面远大于插件列表。也不把 `requires_openai_auth` 改回 `true` 作为局部修复，因为这会重新关闭 Actor Authorization 路径下的原生 `web.run`。
+实机 renderer 消息回放验证了上述约束：本地路径、原始插件 ID、禁用状态和 featured ID 均保持不变，只有本地市场的展示名发生变化。启动诊断新增 `pluginCatalogBridgeInstalled` 和 `pluginCatalogResponsesAdapted`，前者也纳入增强模式成功条件。
+
+当前限制是 renderer 仍会按原始 `@openai-curated` 后缀过滤 featured 推荐位，因此完整插件目录可以显示，但 curated 插件不一定进入首页推荐区。这里不改写插件 ID，避免为了推荐位破坏安装、卸载和历史配置身份。
+
+不采用 CDP 修改全局 `authMethod`。该值还控制账号区域、套餐、共享市场和其他 ChatGPT 行为，伪造后影响面远大于插件列表。也不把 `requires_openai_auth` 改回 `true` 作为局部修复，因为这会重新关闭 Actor Authorization 路径下的原生 `web.run`。普通启动、CLI 和 VS Code 插件不经过该适配。
 
 ## 3. 方案 2：保留 OpenAI 账号要求
 
