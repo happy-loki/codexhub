@@ -852,3 +852,21 @@ window message:
 ```
 
 旧实现只匹配 `fetch + vscode://codex/list-plugins`，因此桥接虽然已安装，`pluginCatalogResponsesAdapted` 始终为 `0`。修复后用请求 ID 关联 `plugin/list` 响应，只改 `message.result.marketplaces[].name`。实机 CDP 热回放共命中 3 个目录响应，React Query 中本地 curated 市场显示为 `codex-official`、`pluginCount=25`，并正常进入插件图标加载流程。
+
+### 2026-07-22 VPN 启动竞态
+
+出现过一个看似与 VPN 相反的现象：不开 VPN 时 curated 插件可见，开启 VPN 后反而消失。后端 `plugin/list` 在两种网络状态下都稳定返回 `openai-curated=25`，本地 manifest 和 `config.toml` 也没有变化。根因是 renderer 的启动时序：
+
+1. VPN 让官方 Statsig 和 renderer 初始化更快，首次 `plugin/list` 可能早于增强脚本安装；
+2. renderer 先按 `authMethod=null` 过滤掉 `openai-curated`；
+3. 过滤后的结果被 React Query 缓存，`staleTime` 为 6 小时；
+4. 增强脚本随后即使已能适配新响应，页面仍可能继续读取第一次形成的空缓存。
+
+脚本版本 16 将修复分为两层：
+
+1. 在 `window.dispatchEvent` 调用原有 listener 之前完成响应适配，不再依赖 listener 注册先后顺序；
+2. 对带有非空本地 `path` 的 `marketplaces[].name=openai-curated` 直接识别，即使请求发生在脚本安装前、没有记录 request id，也可以安全适配正在返回的响应；
+3. 脚本安装后查找当前 React Query client，只失效并重新拉取活跃的 `plugins` 查询，修复已经形成的空缓存；
+4. 仍只修改 renderer 内存中的市场展示名，不修改插件 ID、安装身份、磁盘路径或远端 `openai-curated-remote`。
+
+启动日志新增 `plugin_catalog_dispatch_patched`、`plugin_catalog_cache_refresh_attempted`、`plugin_catalog_cache_refreshed` 和 `plugin_catalog_cache_refresh_error`，用于区分“响应没有被适配”和“旧查询缓存没有刷新”。

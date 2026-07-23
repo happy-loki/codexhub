@@ -1,36 +1,34 @@
-CodexHub v0.4.10
+CodexHub v0.4.11
 
-本次版本重点提高 Codex App 增强模式在无 VPN、官方 Statsig 请求缓慢或本地没有完整官方缓存时的启动成功率。
+本次版本重点修复 Codex App 增强模式下本地插件目录偶发不显示的问题，并提高 Windows 与 macOS 上 CDP 回环连接的兼容性。
 
-## 本地 Statsig 初始化
+## 插件目录稳定性
 
-- 新增 CodexHub 本地 Statsig `initialize` 端点，Codex App 可直接通过 `127.0.0.1:3847` 完成初始化，不需要远程中继。
-- 响应使用 Statsig `init-v2` 原生结构，修正 dynamic config 的 `v -> values[key]` 引用方式。
-- 本地响应提供 CodexHub 模型列表、中文界面配置和已确认的关键功能门控。
-- 增加 `no-store`、CORS 和 Private Network 响应头，兼容 Electron renderer 的本地请求。
+- 修复 VPN 或高速网络环境下 renderer 初始化过快，导致本地 `openai-curated` 插件目录在增强脚本安装前被过滤的问题。
+- 在 Codex App 原有消息监听器处理响应之前完成本地插件目录适配，减少启动时序差异带来的随机结果。
+- 当首次查询已经形成空缓存时，仅失效并重新拉取当前活跃的插件查询，不再等待最长 6 小时的缓存自然过期。
+- 只调整 renderer 内存中的本地市场展示别名，不修改插件 ID、安装身份、磁盘路径或远端市场。
 
 ## 增强模式兼容
 
-- 增强脚本升级到 v15，在 Statsig SDK 初始化前临时设置本地 initialize URL。
-- 有完整官方缓存时继续优先使用官方配置，并恢复官方刷新地址，避免本地精简配置覆盖官方运行时数据。
-- 没有官方配置时允许本地响应作为有效初始化基底，避免旧版本长期停留在 `NoValues` 并最终超时。
-- 原始 SDK URL 使用 `WeakMap` 保存，不向 Statsig 私有对象写入额外标记。
-- 不修改 Codex App 的 `app.asar`、LevelDB、账号状态或系统代理。
+- 增强脚本升级到 v16，并把插件消息分发补丁纳入启动成功条件。
+- CDP HTTP 探测同时支持 IPv4 `127.0.0.1` 和 IPv6 `::1`，解决部分系统只在 IPv6 回环地址暴露调试端点时无法连接的问题。
+- WebSocket 地址校验改为解析真实 IP 并确认其属于本机回环范围，继续拒绝任何非本机 CDP 地址。
 
 ## 诊断能力
 
-- 启动日志新增本地 initialize 安装状态、当前地址、错误信息和本地基底状态。
-- 增强模式成功条件同时支持完整官方基底和合法的 CodexHub 本地基底。
-- 本地端点提供三条兼容路由，降低 CodexHub API 前缀变化带来的影响。
+- 启动日志新增插件消息分发、缓存刷新尝试、刷新结果和失败原因。
+- 可区分“插件响应未适配”和“旧查询缓存未刷新”两类问题，方便后续 Codex App 升级后的兼容排查。
 
 ## 验证
 
-- 使用 Codex App 内置 Statsig JavaScript SDK 3.32.6 验证初始化成功。
-- 验证 12 个 CodexHub 模型、中文界面和关键功能门控成功载入。
-- 默认测试：536 passed，0 failed，2 ignored。
-- `cargo fmt --check`、GUI 编译检查和 `git diff --check` 通过。
+- `cargo fmt --check` 通过。
+- `cargo check --features gui --bin codexhub` 通过。
+- 全部测试：539 passed，0 failed，2 ignored。
+- `git diff --check` 通过。
 
 ## 当前边界
 
-- 本地端点响应约 1 ms，但 Codex App renderer 和 Statsig 客户端的创建仍可能需要十几秒；本版解决的是无官方数据时的启动失败，不承诺所有环境都能秒开。
-- 仅使用本地精简 Statsig 配置时，依赖其他官方配置的插件市场内容可能不完整，后续版本会继续收敛。
+- 增强模式仍只修改当前 Codex App renderer 的内存状态，不修改 `app.asar`、LevelDB、账号状态或系统代理。
+- Clash 异常退出后遗留的 Windows 系统代理、TUN 虚拟网卡或默认路由属于系统网络状态，本版不会自动关闭或重置这些设置。
+- 普通方式启动 Codex App 不经过增强脚本；需要同步自定义模型和本地 curated 插件目录时，请从 CodexHub 使用“增强模式启动 Codex”。

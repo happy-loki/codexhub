@@ -7,10 +7,10 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{SinkExt, StreamExt};
-use serde::Serialize;
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
-use url::Url;
+use url::{Host, Url};
 
 use crate::chain_log;
 
@@ -23,7 +23,7 @@ const ENHANCED_INJECTION_TIMEOUT: Duration = Duration::from_secs(45);
 // after that window so a cold renderer does not accumulate retry timers.
 const ENHANCED_SCRIPT_RETRY_INTERVAL: Duration = Duration::from_secs(26);
 const ENHANCED_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const ENHANCED_SCRIPT_VERSION: u64 = 15;
+const ENHANCED_SCRIPT_VERSION: u64 = 16;
 type CdpSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 #[derive(Default)]
@@ -95,7 +95,11 @@ pub struct EnhancedLaunchReport {
     pub routes_mounted: bool,
     pub renderer_ready_ms: Option<u64>,
     pub plugin_catalog_bridge_installed: bool,
+    pub plugin_catalog_dispatch_patched: bool,
     pub plugin_catalog_responses_adapted: u64,
+    pub plugin_catalog_cache_refresh_attempted: bool,
+    pub plugin_catalog_cache_refreshed: bool,
+    pub plugin_catalog_cache_refresh_error: Option<String>,
     pub startup_elapsed_ms: u64,
 }
 
@@ -262,7 +266,7 @@ pub async fn launch_and_inject(
     ));
     let startup_elapsed_ms = started.elapsed().as_millis() as u64;
     chain_log::write_line(format!(
-        "[codex_app_enhanced] event=config_ready elapsed_ms={startup_elapsed_ms} early_attach_applied={} early_attach_target_id={} early_attach_elapsed_ms={} early_attach_fallback={} i18n_enabled={} fast_initialize_applied={} fast_initialize_source={} local_initialize_installed={} local_initialize_active={} local_initialize_url={} local_initialize_error={} local_base_available={} routes_mounted={} renderer_ready_ms={} plugin_catalog_bridge_installed={} plugin_catalog_responses_adapted={} bootstrap_intercepted={} bootstrap_source={} model_config_id={} model_config_source={} model_config_supported={} i18n_layer_id={} i18n_layer_source={} i18n_layer_supported={} official_base_available={} compatibility_adapters={} compatibility_failure={} store_source={} script_attempts={}",
+        "[codex_app_enhanced] event=config_ready elapsed_ms={startup_elapsed_ms} early_attach_applied={} early_attach_target_id={} early_attach_elapsed_ms={} early_attach_fallback={} i18n_enabled={} fast_initialize_applied={} fast_initialize_source={} local_initialize_installed={} local_initialize_active={} local_initialize_url={} local_initialize_error={} local_base_available={} routes_mounted={} renderer_ready_ms={} plugin_catalog_bridge_installed={} plugin_catalog_dispatch_patched={} plugin_catalog_responses_adapted={} plugin_catalog_cache_refresh_attempted={} plugin_catalog_cache_refreshed={} plugin_catalog_cache_refresh_error={} bootstrap_intercepted={} bootstrap_source={} model_config_id={} model_config_source={} model_config_supported={} i18n_layer_id={} i18n_layer_source={} i18n_layer_supported={} official_base_available={} compatibility_adapters={} compatibility_failure={} store_source={} script_attempts={}",
         early_attach.applied,
         early_attach.target_id.as_deref().unwrap_or("none"),
         early_attach
@@ -284,7 +288,14 @@ pub async fn launch_and_inject(
             .map(|value| value.to_string())
             .unwrap_or_else(|| "none".to_string()),
         status.plugin_catalog_bridge_installed,
+        status.plugin_catalog_dispatch_patched,
         status.plugin_catalog_responses_adapted,
+        status.plugin_catalog_cache_refresh_attempted,
+        status.plugin_catalog_cache_refreshed,
+        status
+            .plugin_catalog_cache_refresh_error
+            .as_deref()
+            .unwrap_or("none"),
         status.bootstrap_intercepted,
         status.bootstrap_source.as_deref().unwrap_or("none"),
         status.model_config_id.as_deref().unwrap_or("none"),
@@ -335,7 +346,11 @@ pub async fn launch_and_inject(
         routes_mounted: status.routes_mounted,
         renderer_ready_ms: status.renderer_ready_ms,
         plugin_catalog_bridge_installed: status.plugin_catalog_bridge_installed,
+        plugin_catalog_dispatch_patched: status.plugin_catalog_dispatch_patched,
         plugin_catalog_responses_adapted: status.plugin_catalog_responses_adapted,
+        plugin_catalog_cache_refresh_attempted: status.plugin_catalog_cache_refresh_attempted,
+        plugin_catalog_cache_refreshed: status.plugin_catalog_cache_refreshed,
+        plugin_catalog_cache_refresh_error: status.plugin_catalog_cache_refresh_error,
         startup_elapsed_ms,
     })
 }
@@ -350,15 +365,9 @@ fn normalized_models(models: Vec<String>) -> Vec<String> {
 }
 
 async fn find_app_target(client: &reqwest::Client, port: u16) -> Result<Option<CdpTarget>> {
-    let response = match client
-        .get(format!("http://127.0.0.1:{port}/json/list"))
-        .send()
-        .await
-    {
-        Ok(response) if response.status().is_success() => response,
-        Ok(_) | Err(_) => return Ok(None),
+    let Some(targets) = fetch_cdp_json::<Vec<CdpTarget>>(client, port, "/json/list").await? else {
+        return Ok(None);
     };
-    let targets = response.json::<Vec<CdpTarget>>().await?;
     Ok(targets.into_iter().find(|target| {
         target.target_type == "page"
             && target.url.starts_with("app://")
@@ -380,15 +389,10 @@ async fn wait_for_app_target(client: &reqwest::Client, port: u16) -> Result<CdpT
 }
 
 async fn find_browser_websocket_url(client: &reqwest::Client, port: u16) -> Result<Option<String>> {
-    let response = match client
-        .get(format!("http://127.0.0.1:{port}/json/version"))
-        .send()
-        .await
-    {
-        Ok(response) if response.status().is_success() => response,
-        Ok(_) | Err(_) => return Ok(None),
+    let Some(version) = fetch_cdp_json::<CdpBrowserVersion>(client, port, "/json/version").await?
+    else {
+        return Ok(None);
     };
-    let version = response.json::<CdpBrowserVersion>().await?;
     let Some(raw) = version.web_socket_debugger_url.as_deref() else {
         return Ok(None);
     };
@@ -397,6 +401,37 @@ async fn find_browser_websocket_url(client: &reqwest::Client, port: u16) -> Resu
         port,
         "Codex browser",
     )?))
+}
+
+fn cdp_http_urls(port: u16, path: &str) -> [String; 2] {
+    let path = path.trim_start_matches('/');
+    [
+        format!("http://127.0.0.1:{port}/{path}"),
+        format!("http://[::1]:{port}/{path}"),
+    ]
+}
+
+async fn fetch_cdp_json<T: DeserializeOwned>(
+    client: &reqwest::Client,
+    port: u16,
+    path: &str,
+) -> Result<Option<T>> {
+    let mut parse_error = None;
+    for url in cdp_http_urls(port, path) {
+        let response = match client.get(&url).send().await {
+            Ok(response) if response.status().is_success() => response,
+            Ok(_) | Err(_) => continue,
+        };
+        match response.json::<T>().await {
+            Ok(value) => return Ok(Some(value)),
+            Err(error) => parse_error = Some((url, error)),
+        }
+    }
+
+    if let Some((url, error)) = parse_error {
+        return Err(error).with_context(|| format!("解析 Codex CDP 响应失败: {url}"));
+    }
+    Ok(None)
 }
 
 async fn attach_to_initial_renderer(
@@ -591,7 +626,12 @@ fn cdp_response_error(message: &Value) -> Option<String> {
 
 fn validated_loopback_websocket_url(raw: &str, expected_port: u16, label: &str) -> Result<String> {
     let url = Url::parse(raw)?;
-    let loopback = matches!(url.host_str(), Some("127.0.0.1" | "localhost" | "::1"));
+    let loopback = match url.host() {
+        Some(Host::Ipv4(address)) => address.is_loopback(),
+        Some(Host::Ipv6(address)) => address.is_loopback(),
+        Some(Host::Domain(domain)) => domain.eq_ignore_ascii_case("localhost"),
+        None => false,
+    };
     if url.scheme() != "ws" || !loopback || url.port() != Some(expected_port) {
         bail!("拒绝连接非本机 {label} CDP 地址: {raw}");
     }
@@ -835,7 +875,11 @@ struct InjectedStatus {
     routes_mounted: bool,
     renderer_ready_ms: Option<u64>,
     plugin_catalog_bridge_installed: bool,
+    plugin_catalog_dispatch_patched: bool,
     plugin_catalog_responses_adapted: u64,
+    plugin_catalog_cache_refresh_attempted: bool,
+    plugin_catalog_cache_refreshed: bool,
+    plugin_catalog_cache_refresh_error: Option<String>,
 }
 
 async fn inject_until_ready(
@@ -946,12 +990,13 @@ fn injected_status_is_ready(status: &InjectedStatus, expected_models: &[String])
         && status.model_config_supported
         && status.i18n_layer_supported
         && status.plugin_catalog_bridge_installed
+        && status.plugin_catalog_dispatch_patched
         && !status.compatibility_adapters.is_empty()
 }
 
 fn injected_status_detail(status: &InjectedStatus) -> String {
     format!(
-        "script={} attempts={} store={} official_base={} local_base={} local_initialize={}:{} local_initialize_error={} model={}:{} i18n={}:{} gates={}/{} plugin_bridge={} plugin_responses={} adapters={} failure={}",
+        "script={} attempts={} store={} official_base={} local_base={} local_initialize={}:{} local_initialize_error={} model={}:{} i18n={}:{} gates={}/{} plugin_bridge={} plugin_dispatch={} plugin_responses={} plugin_cache={}:{} plugin_cache_error={} adapters={} failure={}",
         status
             .script_version
             .map(|value| value.to_string())
@@ -970,7 +1015,14 @@ fn injected_status_detail(status: &InjectedStatus) -> String {
         status.key_gates_enabled,
         SUPPORTED_FEATURE_GATES.len(),
         status.plugin_catalog_bridge_installed,
+        status.plugin_catalog_dispatch_patched,
         status.plugin_catalog_responses_adapted,
+        status.plugin_catalog_cache_refresh_attempted,
+        status.plugin_catalog_cache_refreshed,
+        status
+            .plugin_catalog_cache_refresh_error
+            .as_deref()
+            .unwrap_or("none"),
         status.compatibility_adapters.join(","),
         status.compatibility_failure.as_deref().unwrap_or("none")
     )
@@ -1027,9 +1079,20 @@ async fn inspect_injected_status_on_socket(active: &mut ActiveInjection) -> Resu
             pluginCatalogBridgeInstalled: Boolean(
               window.__CODEXHUB_ENHANCED_MODE__?.pluginCatalogBridgeInstalled
             ),
+            pluginCatalogDispatchPatched: Boolean(
+              window.__CODEXHUB_ENHANCED_MODE__?.pluginCatalogDispatchPatched
+            ),
             pluginCatalogResponsesAdapted: Number(
               window.__CODEXHUB_ENHANCED_MODE__?.pluginCatalogResponsesAdapted ?? 0
             ),
+            pluginCatalogCacheRefreshAttempted: Boolean(
+              window.__CODEXHUB_ENHANCED_MODE__?.pluginCatalogCacheRefreshAttempted
+            ),
+            pluginCatalogCacheRefreshed: Boolean(
+              window.__CODEXHUB_ENHANCED_MODE__?.pluginCatalogCacheRefreshed
+            ),
+            pluginCatalogCacheRefreshError:
+              window.__CODEXHUB_ENHANCED_MODE__?.pluginCatalogCacheRefreshError ?? null,
           }};
         }})()"#
     );
@@ -1069,6 +1132,8 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
   const existing = window[MARKER];
   if (existing?.installed && existing.version === SCRIPT_VERSION) {{
       existing.update?.(MODELS);
+      existing.installPluginCatalogDispatchPatch?.();
+      existing.refreshPluginCatalogCache?.();
       return;
   }}
   if (existing?.installed) existing.applying = true;
@@ -1109,9 +1174,15 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     routesMounted: false,
     routesMountedAtMs: null,
     pluginCatalogBridgeInstalled: false,
+    pluginCatalogDispatchPatched: false,
     pluginCatalogResponsesAdapted: 0,
     pluginCatalogRequestIds: new Set(),
     pluginCatalogError: null,
+    pluginCatalogCacheRefreshAttempts: 0,
+    pluginCatalogCacheRefreshAttempted: false,
+    pluginCatalogCacheRefreshInFlight: false,
+    pluginCatalogCacheRefreshed: false,
+    pluginCatalogCacheRefreshError: null,
   }};
   window[MARKER] = state;
 
@@ -1763,6 +1834,7 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
       for (const marketplace of container.marketplaces) {{
         if (!marketplace || typeof marketplace !== "object") continue;
         if (marketplace.name !== LOCAL_CURATED_MARKETPLACE) continue;
+        if (typeof marketplace.path !== "string" || !marketplace.path.trim()) continue;
         // The renderer uses the marketplace name only for presentation here. Local
         // install/read requests continue to use the untouched absolute path.
         marketplace.name = LOCAL_CURATED_RENDERER_ALIAS;
@@ -1776,31 +1848,124 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     return adapted;
   }};
 
-  window.addEventListener("message", (event) => {{
-    const message = event?.data;
+  const trackPluginCatalogRequest = (message) => {{
+    if (message?.type === "mcp-request"
+      && message.request?.method === "plugin/list"
+      && message.request.id != null) {{
+      state.pluginCatalogRequestIds.add(String(message.request.id));
+      return;
+    }}
+    if (message?.type === "fetch"
+      && String(message.method).toUpperCase() === "POST"
+      && message.url === "vscode://codex/list-plugins"
+      && message.requestId != null) {{
+      state.pluginCatalogRequestIds.add(String(message.requestId));
+    }}
+  }};
+
+  const adaptPluginCatalogResponseData = (message) => {{
     if (message?.type === "mcp-response") {{
-      const requestId = message.message?.id == null ? "" : String(message.message.id);
-      if (!state.pluginCatalogRequestIds.has(requestId)) return;
-      state.pluginCatalogRequestIds.delete(requestId);
-      try {{
-        adaptLocalCuratedPluginCatalog(message.message?.result);
-      }} catch (error) {{
-        state.pluginCatalogError = String(error?.stack ?? error);
+      const response = message.message ?? message.response;
+      const requestId = response?.id == null ? "" : String(response.id);
+      if (requestId) state.pluginCatalogRequestIds.delete(requestId);
+      return adaptLocalCuratedPluginCatalog(response?.result);
+    }}
+    if (message?.type !== "fetch-response"
+      || message.responseType !== "success"
+      || typeof message.bodyJsonString !== "string"
+      || !message.bodyJsonString.trim()) return 0;
+    const requestId = message.requestId == null ? "" : String(message.requestId);
+    if (requestId) state.pluginCatalogRequestIds.delete(requestId);
+    const body = JSON.parse(message.bodyJsonString);
+    const adapted = adaptLocalCuratedPluginCatalog(body);
+    if (adapted > 0) message.bodyJsonString = JSON.stringify(body);
+    return adapted;
+  }};
+
+  const installPluginCatalogDispatchPatch = () => {{
+    const originalKey = "__CODEXHUB_PLUGIN_ORIGINAL_DISPATCH_EVENT__";
+    try {{
+      if (typeof window[originalKey] !== "function") {{
+        window[originalKey] = window.dispatchEvent;
+      }}
+      const originalDispatchEvent = window[originalKey];
+      window.dispatchEvent = function codexHubPluginDispatchEvent(event) {{
+        try {{
+          if (event?.type === "codex-message-from-view") {{
+            trackPluginCatalogRequest(event.detail);
+          }} else if (event?.type === "message") {{
+            adaptPluginCatalogResponseData(event.data);
+          }}
+        }} catch (error) {{
+          state.pluginCatalogError = String(error?.stack ?? error);
+        }}
+        return originalDispatchEvent.call(this, event);
+      }};
+      window.__CODEXHUB_PLUGIN_DISPATCH_VERSION__ = SCRIPT_VERSION;
+      state.pluginCatalogDispatchPatched = true;
+    }} catch (error) {{
+      state.pluginCatalogDispatchPatched = false;
+      state.pluginCatalogError = String(error?.stack ?? error);
+    }}
+  }};
+
+  const findReactQueryClient = () => {{
+    const elements = [document.body, ...document.querySelectorAll("button,[role='main'],main")];
+    for (const element of elements) {{
+      if (!element) continue;
+      const reactKey = Object.getOwnPropertyNames(element).find((name) =>
+        name.startsWith("__reactFiber$") || name.startsWith("__reactInternalInstance$"));
+      if (!reactKey) continue;
+      let fiber = element[reactKey];
+      for (let level = 0; fiber && level < 200; level += 1, fiber = fiber.return) {{
+        const candidate = fiber.memoizedProps?.client;
+        if (candidate
+          && typeof candidate.invalidateQueries === "function"
+          && typeof candidate.getQueryCache === "function") return candidate;
+      }}
+    }}
+    return null;
+  }};
+
+  const refreshPluginCatalogCache = () => {{
+    if (state.pluginCatalogCacheRefreshed || state.pluginCatalogCacheRefreshInFlight) return;
+    const queryClient = findReactQueryClient();
+    if (!queryClient) {{
+      state.pluginCatalogCacheRefreshAttempts += 1;
+      if (state.pluginCatalogCacheRefreshAttempts < 120) {{
+        setTimeout(refreshPluginCatalogCache,
+          state.pluginCatalogCacheRefreshAttempts < 80 ? 25 : 100);
+      }} else {{
+        state.pluginCatalogCacheRefreshError = "React Query client unavailable";
       }}
       return;
     }}
-    if (message?.type !== "fetch-response") return;
-    const requestId = message.requestId == null ? "" : String(message.requestId);
-    if (!state.pluginCatalogRequestIds.has(requestId)) return;
-    state.pluginCatalogRequestIds.delete(requestId);
-    if (message.responseType !== "success"
-      || typeof message.bodyJsonString !== "string"
-      || !message.bodyJsonString.trim()) return;
+    state.pluginCatalogCacheRefreshAttempted = true;
+    state.pluginCatalogCacheRefreshInFlight = true;
+    state.pluginCatalogCacheRefreshError = null;
     try {{
-      const body = JSON.parse(message.bodyJsonString);
-      if (adaptLocalCuratedPluginCatalog(body) > 0) {{
-        message.bodyJsonString = JSON.stringify(body);
-      }}
+      Promise.resolve(queryClient.invalidateQueries({{
+        queryKey: ["plugins"],
+        refetchType: "active",
+      }})).then(() => {{
+        state.pluginCatalogCacheRefreshed = true;
+      }}).catch((error) => {{
+        state.pluginCatalogCacheRefreshError = String(error?.stack ?? error);
+      }}).finally(() => {{
+        state.pluginCatalogCacheRefreshInFlight = false;
+      }});
+    }} catch (error) {{
+      state.pluginCatalogCacheRefreshInFlight = false;
+      state.pluginCatalogCacheRefreshError = String(error?.stack ?? error);
+    }}
+  }};
+
+  installPluginCatalogDispatchPatch();
+  state.installPluginCatalogDispatchPatch = installPluginCatalogDispatchPatch;
+
+  window.addEventListener("message", (event) => {{
+    try {{
+      adaptPluginCatalogResponseData(event?.data);
     }} catch (error) {{
       state.pluginCatalogError = String(error?.stack ?? error);
     }}
@@ -1808,21 +1973,11 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
 
   window.addEventListener("codex-message-from-view", (event) => {{
     const message = event?.detail;
+    trackPluginCatalogRequest(message);
     if (message?.type === "ready") {{
       state.routesMounted = true;
       state.routesMountedAtMs = Math.round(performance.now());
       return;
-    }}
-    if (message?.type === "mcp-request"
-      && message.request?.method === "plugin/list"
-      && message.request.id != null) {{
-      state.pluginCatalogRequestIds.add(String(message.request.id));
-    }}
-    if (message?.type === "fetch"
-      && String(message.method).toUpperCase() === "POST"
-      && message.url === "vscode://codex/list-plugins"
-      && message.requestId != null) {{
-      state.pluginCatalogRequestIds.add(String(message.requestId));
     }}
     if (message?.type !== "fetch"
       || String(message.method).toUpperCase() !== "POST"
@@ -1839,6 +1994,8 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     }}
   }});
   state.pluginCatalogBridgeInstalled = true;
+  state.refreshPluginCatalogCache = refreshPluginCatalogCache;
+  queueMicrotask(refreshPluginCatalogCache);
 
   Storage.prototype.getItem = function(key) {{
     const raw = originalGetItem.call(this, key);
@@ -2425,7 +2582,7 @@ mod tests {
         assert!(script.contains("const modelIsV2"));
         assert!(script.contains("installStorePatch"));
         assert!(script.contains("patchCachedI18nLayer"));
-        assert!(script.contains("SCRIPT_VERSION = 15"));
+        assert!(script.contains("SCRIPT_VERSION = 16"));
         assert!(script.contains("http://127.0.0.1:3847/codex-app/statsig/v1/initialize"));
         assert!(script.contains("installLocalInitializePatch"));
         assert!(script.contains("_initializeUrlConfig"));
@@ -2490,11 +2647,26 @@ mod tests {
         assert!(script.contains("message?.type === \"mcp-request\""));
         assert!(script.contains("message.request?.method === \"plugin/list\""));
         assert!(script.contains("message?.type === \"mcp-response\""));
-        assert!(script.contains("message.message?.result"));
+        assert!(script.contains("message.message ?? message.response"));
+        assert!(script.contains("response?.result"));
         assert!(script.contains("message.url === \"vscode://codex/list-plugins\""));
         assert!(script.contains("adaptLocalCuratedPluginCatalog"));
+        assert!(script.contains("typeof marketplace.path !== \"string\""));
         assert!(script.contains("marketplace.name = LOCAL_CURATED_RENDERER_ALIAS"));
+        assert!(script.contains("installPluginCatalogDispatchPatch"));
+        assert!(script.contains("existing.installPluginCatalogDispatchPatch?.()"));
+        assert!(script.contains("codexHubPluginDispatchEvent"));
+        assert!(script.contains("adaptPluginCatalogResponseData(event.data)"));
+        assert!(script.contains("findReactQueryClient"));
+        assert!(script.contains("queryClient.invalidateQueries"));
+        assert!(script.contains("queryKey: [\"plugins\"]"));
+        assert!(script.contains("refetchType: \"active\""));
+        assert!(script.contains("state.refreshPluginCatalogCache = refreshPluginCatalogCache"));
+        assert!(script.contains(
+            "state.installPluginCatalogDispatchPatch = installPluginCatalogDispatchPatch"
+        ));
         assert!(script.contains("state.pluginCatalogBridgeInstalled = true"));
+        assert!(script.contains("state.pluginCatalogDispatchPatched = true"));
         assert!(script.contains("state.pluginCatalogResponsesAdapted += 1"));
         assert!(!script.contains("LOCAL_CURATED_MARKETPLACE = \"openai-curated-remote\""));
         assert!(script.contains("routesMountedAtMs"));
@@ -2643,6 +2815,38 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cdp_list_urls_try_ipv4_before_ipv6() {
+        assert_eq!(
+            cdp_http_urls(9335, "/json/list"),
+            [
+                "http://127.0.0.1:9335/json/list".to_string(),
+                "http://[::1]:9335/json/list".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn cdp_version_urls_format_ipv6_with_brackets() {
+        assert_eq!(
+            cdp_http_urls(9335, "json/version"),
+            [
+                "http://127.0.0.1:9335/json/version".to_string(),
+                "http://[::1]:9335/json/version".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn ipv6_loopback_browser_websocket_is_accepted() {
+        let raw = "ws://[::1]:9335/devtools/browser/test";
+
+        assert_eq!(
+            validated_loopback_websocket_url(raw, 9335, "Codex browser").unwrap(),
+            raw
+        );
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn windows_launcher_builds_native_activation_inputs() {
@@ -2705,7 +2909,11 @@ mod tests {
             routes_mounted: false,
             renderer_ready_ms: None,
             plugin_catalog_bridge_installed: true,
+            plugin_catalog_dispatch_patched: true,
             plugin_catalog_responses_adapted: 0,
+            plugin_catalog_cache_refresh_attempted: true,
+            plugin_catalog_cache_refreshed: true,
+            plugin_catalog_cache_refresh_error: None,
         };
 
         assert!(injected_status_is_ready(&status, &expected_models));
@@ -2726,6 +2934,9 @@ mod tests {
         status.plugin_catalog_bridge_installed = false;
         assert!(!injected_status_is_ready(&status, &expected_models));
         status.plugin_catalog_bridge_installed = true;
+        status.plugin_catalog_dispatch_patched = false;
+        assert!(!injected_status_is_ready(&status, &expected_models));
+        status.plugin_catalog_dispatch_patched = true;
         status.compatibility_adapters.clear();
         assert!(!injected_status_is_ready(&status, &expected_models));
     }
@@ -2764,7 +2975,11 @@ mod tests {
             routes_mounted: false,
             renderer_ready_ms: None,
             plugin_catalog_bridge_installed: false,
+            plugin_catalog_dispatch_patched: false,
             plugin_catalog_responses_adapted: 0,
+            plugin_catalog_cache_refresh_attempted: false,
+            plugin_catalog_cache_refreshed: false,
+            plugin_catalog_cache_refresh_error: None,
         };
 
         assert!(!should_reapply_script(&status, Duration::from_secs(2)));
@@ -2820,10 +3035,11 @@ mod tests {
         assert!(!report.use_hidden_models);
         assert_eq!(report.key_gates_enabled, SUPPORTED_FEATURE_GATES.len());
         assert!(report.i18n_enabled);
-        assert!(report.official_base_available);
+        assert!(report.official_base_available || report.local_base_available);
         assert!(report.model_config_supported);
         assert!(report.i18n_layer_supported);
         assert!(report.plugin_catalog_bridge_installed);
+        assert!(report.plugin_catalog_dispatch_patched);
         assert!(!report.compatibility_adapters.is_empty());
         assert!(report.compatibility_failure.is_none());
         assert_eq!(report.model_config_id.as_deref(), Some("107580212"));
@@ -2837,7 +3053,8 @@ mod tests {
         assert_eq!(repeated.available_models, report.available_models);
         assert_eq!(repeated.key_gates_enabled, SUPPORTED_FEATURE_GATES.len());
         assert!(repeated.i18n_enabled);
-        assert!(repeated.official_base_available);
+        assert!(repeated.official_base_available || repeated.local_base_available);
         assert!(repeated.plugin_catalog_bridge_installed);
+        assert!(repeated.plugin_catalog_dispatch_patched);
     }
 }
