@@ -3,8 +3,8 @@ use axum::{
     body::Body,
     extract::State,
     http::{
-        Request, StatusCode,
-        header::{CACHE_CONTROL, EXPIRES, HeaderValue, PRAGMA},
+        HeaderValue, Method, Request, StatusCode,
+        header::{CACHE_CONTROL, EXPIRES, PRAGMA},
     },
     middleware::{self, Next},
     response::IntoResponse,
@@ -12,6 +12,10 @@ use axum::{
 };
 use serde::Serialize;
 use serde_json::json;
+use tower_http::{
+    cors::{AllowOrigin, Any, CorsLayer},
+    services::{ServeDir, ServeFile},
+};
 
 use crate::{
     app_state::{FeishuWsState, ImAccountRuntimeState, SharedState, TelegramState, WechatState},
@@ -31,11 +35,14 @@ pub async fn start_bridge_if_ready(state: &SharedState, event_message: &'static 
 }
 
 pub fn router(state: SharedState) -> Router {
+    let electron_dist = electron_dist_dir();
     Router::new()
         .route("/oauth/authorize", get(oauth::oauth_authorize))
         .route("/oauth/token", post(oauth::oauth_token))
         .route("/api/status", get(status))
         .route("/api/gui/dashboard", get(gui_dashboard))
+        .route("/api/logging/status", get(logging_status))
+        .route("/api/logging/clear", post(clear_logging))
         .route("/api/shutdown", post(shutdown))
         .route("/api/config", get(get_config).post(save_config))
         .route(
@@ -118,12 +125,53 @@ pub fn router(state: SharedState) -> Router {
             post(onboarding::wechat_onboard_poll),
         )
         .route("/api/wechat/bot", get(im_api::wechat_bot_status))
+        .route(
+            "/api/wecom/onboard/start",
+            post(onboarding::wecom_onboard_start),
+        )
+        .route(
+            "/api/wecom/onboard/poll",
+            post(onboarding::wecom_onboard_poll),
+        )
+        .route("/api/wecom/bot", get(im_api::wecom_bot_status))
         .route("/api/events", get(events))
         .merge(plugins::router())
         .merge(remote_control_backend::router())
         .nest("/ai-gateway", crate::ai_gateway::router())
+        .fallback_service(
+            ServeDir::new(&electron_dist)
+                .not_found_service(ServeFile::new(electron_dist.join("index.html"))),
+        )
+        .layer(electron_cors_layer())
         .layer(middleware::from_fn(access_log))
         .with_state(state)
+}
+
+fn electron_dist_dir() -> std::path::PathBuf {
+    std::env::var_os("CODEX_REMOTE_GATEWAY_ELECTRON_DIST")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("electron-ui")
+                .join("dist")
+        })
+}
+
+fn electron_cors_layer() -> CorsLayer {
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::predicate(
+            |origin: &HeaderValue, _parts: &axum::http::request::Parts| {
+                let Ok(origin) = origin.to_str() else {
+                    return false;
+                };
+                origin == "null"
+                    || origin.starts_with("http://127.0.0.1:")
+                    || origin.starts_with("http://localhost:")
+                    || origin.starts_with("http://[::1]:")
+            },
+        ))
+        .allow_methods([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS])
+        .allow_headers(Any)
 }
 
 async fn access_log(request: Request<Body>, next: Next) -> impl IntoResponse {
@@ -243,6 +291,76 @@ async fn gui_dashboard(State(state): State<SharedState>) -> Json<GuiDashboardRes
     })
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LoggingStatusResponse {
+    log_dir: String,
+    active_log_path: String,
+    diagnostic: bool,
+    max_mb: u64,
+    retention_days: u64,
+}
+
+async fn logging_status(State(state): State<SharedState>) -> Json<LoggingStatusResponse> {
+    let config = state.config.lock().await;
+    let active_log_path = chain_log::active_path().unwrap_or_else(|| {
+        config
+            .state_path
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+            .join("logs")
+            .join("codexhub-chain.log")
+    });
+    let log_dir = active_log_path
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    Json(LoggingStatusResponse {
+        log_dir: log_dir.to_string_lossy().to_string(),
+        active_log_path: active_log_path.to_string_lossy().to_string(),
+        diagnostic: config.logging.diagnostic,
+        max_mb: config.logging.max_mb,
+        retention_days: config.logging.retention_days,
+    })
+}
+
+async fn clear_logging(State(state): State<SharedState>) -> impl IntoResponse {
+    let chain_deleted = match chain_log::clear_logs() {
+        Ok(deleted) => deleted,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": err.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    let request_logs_deleted = match state.ai_gateway_request_logs.delete_all() {
+        Ok(deleted) => deleted,
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": err.to_string() })),
+            )
+                .into_response();
+        }
+    };
+    state
+        .push_event(
+            "info",
+            "logs_cleared",
+            format!("chain_logs={chain_deleted} request_logs={request_logs_deleted}"),
+        )
+        .await;
+    Json(json!({
+        "ok": true,
+        "chainLogsDeleted": chain_deleted,
+        "requestLogsDeleted": request_logs_deleted
+    }))
+    .into_response()
+}
+
 async fn shutdown(State(state): State<SharedState>) -> impl IntoResponse {
     state
         .push_event("warn", "shutdown_requested", "daemon shutdown requested")
@@ -307,6 +425,7 @@ struct RemoteControlBackendStatusResponse {
     feishu_configured: bool,
     telegram_configured: bool,
     wechat_configured: bool,
+    wecom_configured: bool,
     reason: Option<String>,
 }
 
@@ -318,6 +437,7 @@ async fn remote_control_backend_status(
     let feishu_configured = im_api::feishu_configured(&config);
     let telegram_configured = im_api::telegram_configured(&config);
     let wechat_configured = im_api::wechat_configured(&config);
+    let wecom_configured = im_api::wecom_configured(&config);
     let im_configured = im_api::im_bridge_configured(&config);
     let reason = if !config.bridge.enabled {
         Some("bridge disabled".to_string())
@@ -339,6 +459,7 @@ async fn remote_control_backend_status(
         feishu_configured,
         telegram_configured,
         wechat_configured,
+        wecom_configured,
         reason,
     })
 }

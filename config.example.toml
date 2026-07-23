@@ -27,6 +27,16 @@ userId = ""
 botType = "3"
 allowedUserIds = []
 
+[wecom]
+enabled = true
+accountId = "wecom"
+botId = ""
+secret = ""
+displayName = "企业微信机器人"
+websocketUrl = "wss://openws.work.weixin.qq.com"
+allowedUserIds = []
+allowedChatIds = []
+
 [bridge]
 enabled = true
 accountId = "default"

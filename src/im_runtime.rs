@@ -87,6 +87,7 @@ pub enum TurnOrigin {
     Feishu,
     Telegram,
     Wechat,
+    Wecom,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,19 +110,30 @@ pub struct RuntimeState {
     pub pending_approvals_by_conversation: HashMap<String, Vec<PendingApproval>>,
     pub pending_approval_request_keys: HashSet<String>,
     pub feishu_streaming_cards_by_item: HashMap<String, FeishuStreamingCardState>,
+    pub wecom_streams_by_thread: HashMap<String, WecomStreamState>,
     pub thread_routing_requests: HashMap<String, ThreadRoutingRequestState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WecomStreamState {
+    pub req_id: String,
+    pub stream_id: String,
+    pub content: String,
+    pub finished: bool,
 }
 
 impl RuntimeState {
     pub fn start_bridge_generation(&mut self) -> u64 {
         self.bridge_generation = self.bridge_generation.saturating_add(1);
         self.feishu_streaming_cards_by_item.clear();
+        self.wecom_streams_by_thread.clear();
         self.bridge_generation
     }
 
     pub fn invalidate_bridge_generation(&mut self) {
         self.bridge_generation = self.bridge_generation.saturating_add(1);
         self.feishu_streaming_cards_by_item.clear();
+        self.wecom_streams_by_thread.clear();
     }
 
     #[allow(dead_code)]
@@ -517,6 +529,7 @@ pub fn route_from_conversation_key(conversation_key: &str) -> Option<RouteTarget
         "feishu" => ImPlatformKind::Feishu,
         "telegram" => ImPlatformKind::Telegram,
         "wechat" => ImPlatformKind::Wechat,
+        "wecom" => ImPlatformKind::Wecom,
         _ => return None,
     };
     let account_id = parts.next()?.to_string();
@@ -676,6 +689,13 @@ mod tests {
         assert_eq!(telegram.account_id, "bot");
         assert_eq!(telegram.chat_id, "chat:123");
         assert!(telegram.remote_client_key.starts_with("im:telegram:"));
+
+        let wecom =
+            route_from_conversation_key("wecom:corp-bot:group:room-1").expect("wecom route");
+        assert_eq!(wecom.platform, ImPlatformKind::Wecom);
+        assert_eq!(wecom.account_id, "corp-bot");
+        assert_eq!(wecom.chat_id, "group:room-1");
+        assert!(wecom.remote_client_key.starts_with("im:wecom:"));
 
         assert!(route_from_conversation_key("slack:team:channel").is_none());
     }

@@ -79,6 +79,55 @@ pub fn diagnostic_enabled() -> bool {
     CHAIN_LOG.get().is_some_and(|log| log.diagnostic)
 }
 
+pub fn active_path() -> Option<PathBuf> {
+    let log = CHAIN_LOG.get()?;
+    let inner = log.inner.lock().ok()?;
+    Some(inner.path.clone())
+}
+
+pub fn clear_logs() -> anyhow::Result<usize> {
+    let Some(log) = CHAIN_LOG.get() else {
+        return Ok(0);
+    };
+    let mut inner = log
+        .inner
+        .lock()
+        .map_err(|_| anyhow::anyhow!("chain log lock is poisoned"))?;
+    if let Some(mut file) = inner.file.take() {
+        let _ = file.flush();
+    }
+    let active_path = inner.path.clone();
+    let log_dir = active_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("invalid log path {}", active_path.display()))?
+        .to_path_buf();
+    let mut deleted = 0usize;
+    if let Ok(entries) = std::fs::read_dir(&log_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() || !is_codexhub_log_path(&path) {
+                continue;
+            }
+            if std::fs::remove_file(&path).is_ok() {
+                deleted = deleted.saturating_add(1);
+            }
+        }
+    }
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&active_path)
+        .with_context(|| format!("failed to reopen chain log {}", active_path.display()))?;
+    let _ = writeln!(
+        file,
+        "\n===== codexhub log cleared ts_ms={} =====",
+        timestamp_ms()
+    );
+    inner.file = Some(file);
+    inner.written_bytes = 0;
+    Ok(deleted)
+}
+
 fn write_line_inner(line: &str, flush: bool) {
     let Some(log) = CHAIN_LOG.get() else {
         return;

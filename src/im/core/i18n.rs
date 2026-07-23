@@ -621,6 +621,14 @@ impl ImText {
         self.choose("恢复历史会话", "Restore history session")
     }
 
+    pub(crate) fn select_session_action(self) -> &'static str {
+        self.choose("选择会话", "Select session")
+    }
+
+    pub(crate) fn more_actions(self) -> &'static str {
+        self.choose("更多操作", "More actions")
+    }
+
     pub(crate) fn directory_button(self) -> &'static str {
         self.choose("目录", "Directory")
     }
@@ -654,6 +662,29 @@ impl ImText {
             "当前飞书会话还没有接入 Codex thread。请选择新建会话，或恢复历史会话或接入当前 Codex 活跃会话。",
             "This Feishu chat is not attached to a Codex thread yet. Create a new session, or restore a history session or attach to the current active Codex session.",
         )
+    }
+
+    pub(crate) fn create_choice_body_wecom(self) -> &'static str {
+        self.choose(
+            "当前企业微信会话还没有接入 Codex thread。请选择新建会话，或恢复历史会话。",
+            "This WeCom chat is not attached to a Codex thread yet. Create a new session or restore a history session.",
+        )
+    }
+
+    pub(crate) fn thread_list_body_wecom(self, provider: Option<&str>) -> String {
+        let mut body = self
+            .choose(
+                "请选择一个 Codex 会话接入后续消息。",
+                "Choose a Codex session to attach future messages.",
+            )
+            .to_string();
+        if let Some(provider) = provider {
+            body.push_str(&match self.locale {
+                ImLocale::ZhCn => format!(" 已按 provider `{provider}` 过滤。"),
+                ImLocale::EnUs => format!(" Filtered by provider `{provider}`."),
+            });
+        }
+        body
     }
 
     pub(crate) fn create_choice_tip_feishu(self) -> &'static str {

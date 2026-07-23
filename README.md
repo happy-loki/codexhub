@@ -66,6 +66,7 @@ Codex App 和 VS Code 插件通常只需要：下载程序 -> 配置 AI Gateway 
 - 飞书：点击“扫码使用新机器人”，按二维码流程完成接入。
 - Telegram：填写 BotFather 提供的 Bot Token，点击“保存并接入”。当前仅支持私聊机器人，群聊不会接入。
 - 微信：点击“扫码连接微信”，使用微信扫码确认。
+- 企业微信：点击“添加企业微信机器人”，使用企业微信扫码确认。支持私聊/群聊文本、流式与最终回复、图片文件、初始/历史会话选择卡片和审批模板卡片。
 
 接入成功后，状态概览里的“IM 通道”会显示可用。之后正常使用不需要反复扫码或重新填 token；只有更换机器人时才需要重新接入。
 
@@ -121,7 +122,7 @@ codex --remote ws://127.0.0.1:3849
 
 ### 8. 在 IM 里开始使用
 
-在飞书、Telegram 私聊或微信里给机器人发消息。
+在飞书、Telegram 私聊、微信或企业微信里给机器人发消息。
 
 如果当前 IM 会话还没有绑定 Codex thread，机器人会先让你选择新建 thread 或恢复已有 thread。选择后，后续对话就会进入对应的 Codex thread。
 
@@ -151,6 +152,12 @@ AI Gateway 解决的是“Codex 只认原生模型入口，但用户想用更多
 - 过滤生图工具：默认关闭；打开后 AI Gateway 会从请求中移除 Codex 的 `image_generation` 工具，适合不支持生图工具的渠道。
 
 这些能力都在 GUI 中操作，不需要用户手写配置文件。
+
+## 日志目录与清理
+
+Windows 正常运行时，配置文件默认在 `%LOCALAPPDATA%\CodexHub\config.toml`，链路日志默认写到 `%LOCALAPPDATA%\CodexHub\logs\codexhub-chain.log`。如果用 `--config` 指定了配置文件，默认日志目录会跟随该配置文件所在目录下的 `logs`。
+
+在 GUI 的“设置 / 日志与诊断”里可以查看当前日志目录和日志文件，也可以保存自定义日志目录。目录改动会写入 `logging.logDir`，重启本地服务后生效。这里也提供“清理日志”，会清理链路日志和 AI Gateway 请求日志。
 
 ## 交流与支持
 
@@ -206,6 +213,7 @@ codexhub 本地 backend
   | 飞书 websocket 事件 / 消息卡片 API
   | Telegram long polling / Bot API
   | 微信 iLink long polling / sendmessage
+  | 企业微信 AI Bot WebSocket / aibot_send_msg
   v
 IM 通道
 ```
@@ -235,6 +243,20 @@ cargo test
 cargo build --release --features gui --bin codexhub
 ```
 
+Electron GUI 位于 `electron-ui/`，Rust 核心仍然通过 `daemon` 命令运行。开发时可以用下面的方式启动新界面：
+
+```powershell
+cd electron-ui
+npm install
+npm run dev
+```
+
+也可以从 Rust 入口启动 Electron GUI：
+
+```powershell
+cargo run --features gui -- gui
+```
+
 daemon 运行时常用状态接口：
 
 ```text
@@ -250,7 +272,7 @@ GET http://127.0.0.1:3847/api/events
 - 本地保存的 IM token、模型 API Key 和 Codex 认证信息都是 secret，不要提交
 - 飞书附件会下载到本地状态目录旁边的 `.im/attachments/feishu/`
 - 真正使用时建议配置 `allowedOpenIds` 和 / 或 `allowedChatIds`
-- bridge 可以替 IM 用户向 Codex 提交审批决定，所以飞书 / Telegram / 微信访问权限应视为等价于本地 Codex 审批权限
+- bridge 可以替 IM 用户向 Codex 提交审批决定，所以飞书 / Telegram / 微信 / 企业微信访问权限应视为等价于本地 Codex 审批权限
 
 ## 更多文档
 

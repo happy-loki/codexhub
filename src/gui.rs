@@ -39,22 +39,22 @@ const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
 #[cfg(not(target_os = "windows"))]
 const DEFAULT_BASE_URL: &str = "http://127.0.0.1:3847";
 const CODEX_APP_GUI_UNSUPPORTED: bool = !(cfg!(target_os = "macos") || cfg!(target_os = "windows"));
-const PROJECT_HOME_URL: &str = "https://github.com/happy-loki/codexhub";
+const PROJECT_HOME_URL: &str = "https://github.com/xuweizhengo/codexhub";
 #[cfg(target_os = "windows")]
 const UPDATE_MANIFEST_URL: &str =
-    "https://github.com/happy-loki/codexhub/releases/latest/download/latest-windows.json";
+    "https://github.com/xuweizhengo/codexhub/releases/latest/download/latest-windows.json";
 const MACOS_UPDATE_MANIFEST_URL: &str =
-    "https://github.com/happy-loki/codexhub/releases/latest/download/latest-macos.json";
+    "https://github.com/xuweizhengo/codexhub/releases/latest/download/latest-macos.json";
 #[cfg(target_os = "macos")]
 const UPDATE_MANIFEST_URL: &str = MACOS_UPDATE_MANIFEST_URL;
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 const UPDATE_MANIFEST_URL: &str =
-    "https://github.com/happy-loki/codexhub/releases/latest/download/latest-linux.json";
+    "https://github.com/xuweizhengo/codexhub/releases/latest/download/latest-linux.json";
 const LEGACY_UPDATE_MANIFEST_URL: &str =
-    "https://github.com/happy-loki/codexhub/releases/latest/download/latest.json";
+    "https://github.com/xuweizhengo/codexhub/releases/latest/download/latest.json";
 const UPDATE_RELEASE_API_URL: &str =
-    "https://api.github.com/repos/happy-loki/codexhub/releases/latest";
-const UPDATE_RELEASE_PAGE_URL: &str = "https://github.com/happy-loki/codexhub/releases/latest";
+    "https://api.github.com/repos/xuweizhengo/codexhub/releases/latest";
+const UPDATE_RELEASE_PAGE_URL: &str = "https://github.com/xuweizhengo/codexhub/releases/latest";
 const DASHBOARD_REFRESH_INTERVAL_MS: i32 = 10_000;
 const REQUEST_LOG_REFRESH_INTERVAL_MS: i32 = 5_000;
 const REQUEST_LOG_TAB_INDEX: i32 = 3;
@@ -164,6 +164,7 @@ use self::im_accounts::{
 };
 use self::onboarding::{
     prompt_telegram_bot_token, show_feishu_onboard_dialog, show_wechat_onboard_dialog,
+    show_wecom_onboard_dialog,
 };
 use self::provider::strip_nul;
 use self::request_logs::{
@@ -874,9 +875,14 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         .with_label(text.add_wechat_bot())
         .build();
     connect_wechat_button.set_tooltip(text.add_wechat_bot_help());
+    let connect_wecom_button = Button::builder(&add_im_static_box)
+        .with_label(text.add_wecom_bot())
+        .build();
+    connect_wecom_button.set_tooltip(text.add_wecom_bot_help());
     add_im_actions.add(&change_bot_button, 0, SizerFlag::Right, 10);
     add_im_actions.add(&save_telegram_button, 0, SizerFlag::Right, 10);
-    add_im_actions.add(&connect_wechat_button, 0, SizerFlag::Right, 0);
+    add_im_actions.add(&connect_wechat_button, 0, SizerFlag::Right, 10);
+    add_im_actions.add(&connect_wecom_button, 0, SizerFlag::Right, 0);
     add_im_box.add_sizer(
         &add_im_actions,
         0,
@@ -1151,6 +1157,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
         delete_im_account_button,
         save_telegram_button,
         connect_wechat_button,
+        connect_wecom_button,
         change_bot_button,
         codex_tab,
         ai_gw_provider_list,
@@ -1305,6 +1312,20 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                 return;
             }
             show_wechat_onboard_dialog(&frame, handles.text, api.clone());
+            schedule_dashboard_refresh(&api, &dashboard_refresh);
+        });
+    }
+
+    {
+        let api = api.clone();
+        let dashboard_refresh = dashboard_refresh.clone();
+        let frame = frame;
+        let handles = handles.clone();
+        connect_wecom_button.on_click(move |_| {
+            if !ensure_service_ready_for_action(&api, &frame, &dashboard_refresh) {
+                return;
+            }
+            show_wecom_onboard_dialog(&frame, handles.text, api.clone());
             schedule_dashboard_refresh(&api, &dashboard_refresh);
         });
     }
@@ -4412,6 +4433,7 @@ struct UiHandles {
     delete_im_account_button: Button,
     save_telegram_button: Button,
     connect_wechat_button: Button,
+    connect_wecom_button: Button,
     change_bot_button: Button,
     codex_tab: CodexTab,
     // AI Gateway fields
@@ -4806,6 +4828,12 @@ fn show_dashboard_starting(handles: &UiHandles) {
         text.service_reads_status(),
         StateTone::Muted,
     );
+    set_im_channel_row(
+        &handles.im_status.wecom,
+        text.waiting_service(),
+        text.service_reads_status(),
+        StateTone::Muted,
+    );
     set_disabled_status_panel(
         &handles.codex_status,
         text.waiting_service(),
@@ -4855,6 +4883,12 @@ fn show_dashboard_startup_error(handles: &UiHandles, detail: &str) {
         handles.text.service_reads_status(),
         StateTone::Muted,
     );
+    set_im_channel_row(
+        &handles.im_status.wecom,
+        handles.text.waiting_service(),
+        handles.text.service_reads_status(),
+        StateTone::Muted,
+    );
     set_actions_enabled(handles, false);
 }
 
@@ -4886,6 +4920,12 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
         );
         set_im_channel_row(
             &handles.im_status.wechat,
+            text.unavailable(),
+            text.local_service_not_running(),
+            StateTone::Muted,
+        );
+        set_im_channel_row(
+            &handles.im_status.wecom,
             text.unavailable(),
             text.local_service_not_running(),
             StateTone::Muted,
@@ -5001,6 +5041,7 @@ fn refresh_service_settings_button(handles: &UiHandles, snapshot: &DashboardSnap
 fn set_actions_enabled(handles: &UiHandles, enabled: bool) {
     handles.change_bot_button.enable(enabled);
     handles.connect_wechat_button.enable(enabled);
+    handles.connect_wecom_button.enable(enabled);
     handles.save_telegram_button.enable(enabled);
     handles.delete_im_account_button.enable(enabled);
     codex_tab::set_actions_enabled(&handles.codex_tab, enabled);

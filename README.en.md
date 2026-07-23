@@ -65,6 +65,7 @@ Open the `消息接入` page and choose one channel:
 - Feishu: click `扫码使用新机器人` and complete QR onboarding.
 - Telegram: paste the BotFather token and click `保存并接入`. Telegram currently supports private bot chats only; group chats are ignored.
 - WeChat: click `扫码连接微信` and confirm in WeChat.
+- WeCom: click `添加企业微信机器人` and confirm by scanning with WeCom. Direct/group text, streaming and final replies, image/file transfer, initial/history thread selection cards, and interactive approval template cards are supported.
 
 After a channel is connected, the `IM 通道` status panel becomes available. Normal use does not require scanning or entering the token again unless you switch bots.
 
@@ -120,7 +121,7 @@ After that, you can message the bot from IM, and you can also keep using the sam
 
 ### 8. Use IM
 
-Send a message to the bot in Feishu, a Telegram private chat, or WeChat.
+Send a message to the bot in Feishu, a Telegram private chat, WeChat, or WeCom.
 
 If the IM chat is not bound to a Codex thread yet, the bot first asks you to create a new thread or resume an existing one. After selection, the chat is bridged to that Codex thread.
 
@@ -214,6 +215,7 @@ codexhub local backend
   | Telegram Bot API
   | WeChat iLink long polling
   | WeChat sendmessage API
+  | WeCom AI Bot WebSocket / aibot_send_msg
   v
 IM channel
 ```
@@ -243,6 +245,20 @@ cargo test
 cargo build --release --features gui --bin codexhub
 ```
 
+The Electron GUI lives in `electron-ui/`; the Rust core still runs through the `daemon` command. For local UI development:
+
+```powershell
+cd electron-ui
+npm install
+npm run dev
+```
+
+You can also launch the Electron GUI through the Rust entrypoint:
+
+```powershell
+cargo run --features gui -- gui
+```
+
 Useful status endpoints while the daemon is running:
 
 ```text
@@ -258,7 +274,7 @@ GET http://127.0.0.1:3847/api/events
 - Locally saved IM tokens, model API keys, and Codex auth data are secrets; do not commit them.
 - Attachments from Feishu are downloaded to a local state-adjacent `.im/attachments/feishu/` directory.
 - Restrict access with `allowedOpenIds` and/or `allowedChatIds` for real usage.
-- The bridge can send approval decisions to Codex. Treat Feishu / Telegram / WeChat access as equivalent to local Codex approval access.
+- The bridge can send approval decisions to Codex. Treat Feishu / Telegram / WeChat / WeCom access as equivalent to local Codex approval access.
 
 ## More Docs
 

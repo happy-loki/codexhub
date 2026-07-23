@@ -17,6 +17,10 @@ use crate::{
         api::WechatApi, flow as wechat_flow, polling::listen_polling as listen_wechat_polling,
         types::WechatSettings,
     },
+    im::wecom::{
+        WecomApi, WecomSettings, flow as wecom_flow,
+        ws::{listen_ws as listen_wecom_ws, set_account_ws_state as set_wecom_ws_state},
+    },
     im::{core::outbound, events},
     im_runtime::{PendingApproval, RouteTarget},
     remote_control_backend,
@@ -40,7 +44,16 @@ pub async fn start_bridge(state: SharedState) {
         .into_iter()
         .filter(|account| account.is_active())
         .collect::<Vec<_>>();
-    if feishu_accounts.is_empty() && telegram_accounts.is_empty() && wechat_accounts.is_empty() {
+    let wecom_accounts = config
+        .effective_wecom_accounts()
+        .into_iter()
+        .filter(|account| account.is_active())
+        .collect::<Vec<_>>();
+    if feishu_accounts.is_empty()
+        && telegram_accounts.is_empty()
+        && wechat_accounts.is_empty()
+        && wecom_accounts.is_empty()
+    {
         state
             .push_event(
                 "error",
@@ -80,6 +93,12 @@ pub async fn start_bridge(state: SharedState) {
         api_registry.wechat.insert(
             account.account_id.clone(),
             WechatApi::new(WechatSettings::from_app_config(account)),
+        );
+    }
+    for account in &wecom_accounts {
+        api_registry.wecom.insert(
+            account.account_id.clone(),
+            WecomApi::new(WecomSettings::from_app_config(account)),
         );
     }
     let generation = state.runtime.lock().await.start_bridge_generation();
@@ -281,15 +300,61 @@ pub async fn start_bridge(state: SharedState) {
         });
     }
 
+    for account in wecom_accounts {
+        let Some(wecom_api) = api_registry.wecom.get(&account.account_id).cloned() else {
+            continue;
+        };
+        let account_id = account.account_id.clone();
+        let wecom_state = state.clone();
+        let wecom_tx = tx.clone();
+        tasks.spawn(async move {
+            loop {
+                if !is_current_generation(&wecom_state, generation).await {
+                    break;
+                }
+                match listen_wecom_ws(
+                    wecom_state.clone(),
+                    wecom_api.clone(),
+                    account_id.clone(),
+                    wecom_tx.clone(),
+                )
+                .await
+                {
+                    Ok(()) => {}
+                    Err(err) => {
+                        let message = err.to_string();
+                        set_wecom_ws_state(
+                            &wecom_state,
+                            &account_id,
+                            false,
+                            false,
+                            Some(message.clone()),
+                        )
+                        .await;
+                        wecom_state
+                            .push_event(
+                                "error",
+                                "wecom_ws_failed",
+                                format!("account={account_id} {message}"),
+                            )
+                            .await;
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
+        });
+    }
+
     state
         .push_event(
             "info",
             "bridge_started",
             format!(
-                "bridge running feishu={} telegram={} wechat={}",
+                "bridge running feishu={} telegram={} wechat={} wecom={}",
                 api_registry.feishu.len(),
                 api_registry.telegram.len(),
-                api_registry.wechat.len()
+                api_registry.wechat.len(),
+                api_registry.wecom.len()
             ),
         )
         .await;
@@ -368,6 +433,23 @@ async fn handle_inbound(
     }
     if message.platform == ImPlatformKind::Wechat {
         return wechat_flow::handle_inbound(state, outbound_tx, message).await;
+    }
+    if message.platform == ImPlatformKind::Wecom {
+        let route = RouteTarget {
+            platform: message.platform,
+            conversation_key: message.conversation_key(),
+            account_id: message.account_id.clone(),
+            chat_id: message.chat_id.clone(),
+            remote_client_key: String::new(),
+        }
+        .with_deterministic_remote_client_key();
+        let Some(api) = api_registry.wecom_for_route(&route) else {
+            anyhow::bail!(
+                "WeCom API is not configured for account {}",
+                message.account_id
+            );
+        };
+        return wecom_flow::handle_inbound(state, api, outbound_tx, message).await;
     }
     let route = RouteTarget {
         platform: message.platform,

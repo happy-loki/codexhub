@@ -482,6 +482,11 @@ fn normalize_config_paths(config: &mut AppConfig, config_path: &Path) {
     if config.state_path.is_relative() {
         config.state_path = base.join(&config.state_path);
     }
+    if let Some(log_dir) = config.logging.log_dir.as_mut()
+        && log_dir.is_relative()
+    {
+        *log_dir = base.join(&log_dir);
+    }
 }
 
 fn init_logging(config: &AppConfig) -> anyhow::Result<PathBuf> {
@@ -509,6 +514,11 @@ fn chain_log_path(config: &AppConfig) -> PathBuf {
 }
 
 fn log_dir_from_config(config: &AppConfig) -> PathBuf {
+    if let Some(log_dir) = &config.logging.log_dir
+        && !log_dir.as_os_str().is_empty()
+    {
+        return log_dir.clone();
+    }
     config
         .state_path
         .parent()

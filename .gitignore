@@ -1,6 +1,9 @@
 /target
 /target-verify
 /outputs
+/electron-ui/dist
+/electron-ui/node_modules
+/electron-ui/.vite
 .DS_Store
 config.toml
 codexhub-state.json

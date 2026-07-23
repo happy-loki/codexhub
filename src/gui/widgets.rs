@@ -27,6 +27,7 @@ pub(super) struct ImStatusPanel {
     pub(super) feishu: ImChannelRow,
     pub(super) telegram: ImChannelRow,
     pub(super) wechat: ImChannelRow,
+    pub(super) wecom: ImChannelRow,
 }
 
 #[derive(Clone, Copy)]
@@ -44,6 +45,7 @@ pub(super) enum ImChannelKind {
     Feishu,
     Telegram,
     Wechat,
+    Wecom,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -349,7 +351,7 @@ fn build_status_panel<W: WxWidget>(
 pub(super) fn im_status_panel<W: WxWidget>(parent: &W, text: GuiText) -> ImStatusPanel {
     let panel = Panel::builder(parent).build();
     panel.set_background_color(theme::theme().bg_app);
-    panel.set_min_size(Size::new(260, 156));
+    panel.set_min_size(Size::new(260, 204));
 
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     let feishu = im_channel_row(
@@ -367,6 +369,13 @@ pub(super) fn im_status_panel<W: WxWidget>(parent: &W, text: GuiText) -> ImStatu
         text.wechat_label(),
         text,
     );
+    let wecom = im_channel_row(
+        &panel,
+        &sizer,
+        ImChannelKind::Wecom,
+        text.wecom_label(),
+        text,
+    );
 
     panel.set_sizer(sizer, true);
     ImStatusPanel {
@@ -374,6 +383,7 @@ pub(super) fn im_status_panel<W: WxWidget>(parent: &W, text: GuiText) -> ImStatu
         feishu,
         telegram,
         wechat,
+        wecom,
     }
 }
 
@@ -644,7 +654,7 @@ fn render_im_channel_icon_bitmap(kind: ImChannelKind, disabled: bool, size: usiz
                 )
             }
         }
-        ImChannelKind::Wechat => {
+        ImChannelKind::Wechat | ImChannelKind::Wecom => {
             if disabled {
                 disabled_svg_brand_bitmap(
                     "wechat-logo.svg",

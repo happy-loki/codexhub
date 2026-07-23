@@ -325,6 +325,7 @@ pub(crate) async fn handle_inbound_action(
     action: InboundAction,
 ) -> Result<()> {
     match action {
+        InboundAction::ThreadRouteOpen => Ok(()),
         InboundAction::ApprovalDecision {
             request_fingerprint,
             option_index,
@@ -1031,30 +1032,25 @@ async fn send_telegram_thread_routing_list(
     page: usize,
 ) -> Result<()> {
     let route = route_for_message(message);
-    let loaded_page = match load_thread_routing_page(
-        state,
-        &route,
-        existing_request.as_ref(),
-        cursor,
-        page,
-    )
-    .await
-    {
-        Ok(page) => page,
-        Err(err) => {
-            state
-                .push_event(
-                    "error",
-                    "telegram_thread_list_failed",
-                    format!("conversation={} err={err}", route.conversation_key),
-                )
-                .await;
-            adapter
-                .send_text(&route.chat_id, im_text_for_state(state).list_load_failed())
-                .await?;
-            return Ok(());
-        }
-    };
+    let loaded_page =
+        match load_thread_routing_page(state, &route, existing_request.as_ref(), cursor, page, 8)
+            .await
+        {
+            Ok(page) => page,
+            Err(err) => {
+                state
+                    .push_event(
+                        "error",
+                        "telegram_thread_list_failed",
+                        format!("conversation={} err={err}", route.conversation_key),
+                    )
+                    .await;
+                adapter
+                    .send_text(&route.chat_id, im_text_for_state(state).list_load_failed())
+                    .await?;
+                return Ok(());
+            }
+        };
     let telegram_entries = loaded_page
         .entries
         .iter()

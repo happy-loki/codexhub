@@ -1429,6 +1429,20 @@ impl GuiText {
         }
     }
 
+    pub(super) fn add_wecom_bot(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "添加企业微信机器人",
+            GuiLocale::EnUs => "Add WeCom Bot",
+        }
+    }
+
+    pub(super) fn add_wecom_bot_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "使用企业微信扫码快速接入机器人",
+            GuiLocale::EnUs => "Scan with WeCom to connect a bot",
+        }
+    }
+
     pub(super) fn wechat_context_token_warning(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
@@ -1800,6 +1814,13 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "微信",
             GuiLocale::EnUs => "WeChat",
+        }
+    }
+
+    pub(super) fn wecom_label(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "企业微信",
+            GuiLocale::EnUs => "WeCom",
         }
     }
 
@@ -2428,6 +2449,43 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "扫码连接微信",
             GuiLocale::EnUs => "Scan to Connect WeChat",
+        }
+    }
+
+    pub(super) fn wecom_onboard_title(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "扫码连接企业微信",
+            GuiLocale::EnUs => "Scan to Connect WeCom",
+        }
+    }
+
+    pub(super) fn scan_wecom(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请使用企业微信扫码并确认",
+            GuiLocale::EnUs => "Scan and confirm with WeCom",
+        }
+    }
+
+    pub(super) fn wecom_expire_notice(self, seconds: u64) -> String {
+        match self.locale {
+            GuiLocale::ZhCn => format!("扫码确认后会自动关闭。二维码约 {seconds} 秒后过期。"),
+            GuiLocale::EnUs => format!(
+                "This will close automatically after confirmation. The QR code expires in about {seconds} seconds."
+            ),
+        }
+    }
+
+    pub(super) fn wecom_wait(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "等待企业微信扫码。",
+            GuiLocale::EnUs => "Waiting for WeCom scan.",
+        }
+    }
+
+    pub(super) fn wecom_scanned(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "已扫码，请在企业微信中确认。",
+            GuiLocale::EnUs => "Scanned. Confirm in WeCom.",
         }
     }
 

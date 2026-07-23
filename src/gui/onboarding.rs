@@ -9,7 +9,7 @@ use std::{
 use qrcode::{Color, QrCode};
 use wxdragon::{prelude::*, timer::Timer};
 
-use super::api::{ApiClient, WechatOnboardPoll};
+use super::api::{ApiClient, WechatOnboardPoll, WecomOnboardPoll};
 use super::provider::strip_nul;
 use super::show_error;
 use super::text::GuiText;
@@ -473,6 +473,144 @@ pub(super) fn show_wechat_onboard_dialog(parent: &Frame, text: GuiText, api: Api
     poll_closed.store(true, Ordering::SeqCst);
     timer.stop();
     dialog.destroy();
+}
+
+pub(super) fn show_wecom_onboard_dialog(parent: &Frame, text: GuiText, api: ApiClient) {
+    let start = match api.start_wecom_onboard() {
+        Ok(start) => start,
+        Err(err) => {
+            show_error(parent, &err);
+            return;
+        }
+    };
+    let dialog = Dialog::builder(parent, text.wecom_onboard_title())
+        .with_style(DialogStyle::DefaultDialogStyle | DialogStyle::ResizeBorder)
+        .with_size(660, 720)
+        .build();
+    dialog.set_min_size(Size::new(560, 620));
+    dialog.set_background_color(theme::theme().bg_card);
+    let panel = Panel::builder(&dialog).build();
+    panel.set_background_color(theme::theme().bg_card);
+    let sizer = BoxSizer::builder(Orientation::Vertical).build();
+    let title = StaticText::builder(&panel)
+        .with_label(text.scan_wecom())
+        .build();
+    title.set_foreground_color(theme::theme().ink_primary);
+    title.set_font(&theme::font(theme::TextRole::Title));
+    sizer.add(&title, 0, SizerFlag::All, 18);
+    if let Some((bitmap, qr_size)) = qr_bitmap(&start.qrcode_url) {
+        let qr = StaticBitmap::builder(&panel)
+            .with_bitmap(Some(bitmap))
+            .with_scale_mode(Some(ScaleMode::AspectFit))
+            .with_size(Size::new(qr_size.max(500), qr_size.max(500)))
+            .build();
+        qr.set_min_size(Size::new(500, 500));
+        sizer.add(
+            &qr,
+            1,
+            SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+            12,
+        );
+    }
+    let info = StaticText::builder(&panel)
+        .with_label(&text.wecom_expire_notice(start.expires_in))
+        .build();
+    info.set_foreground_color(theme::theme().ink_secondary);
+    info.wrap(600);
+    sizer.add(
+        &info,
+        0,
+        SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        18,
+    );
+    let close_button = Button::builder(&panel).with_label(text.close()).build();
+    sizer.add(
+        &close_button,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        18,
+    );
+    panel.set_sizer(sizer, true);
+    let dialog_sizer = BoxSizer::builder(Orientation::Vertical).build();
+    dialog_sizer.add(&panel, 1, SizerFlag::Expand, 0);
+    dialog.set_sizer(dialog_sizer, true);
+    dialog.center();
+
+    let poll_result: Arc<Mutex<Option<Result<WecomOnboardPoll, String>>>> =
+        Arc::new(Mutex::new(None));
+    let poll_in_flight = Arc::new(AtomicBool::new(false));
+    let poll_closed = Arc::new(AtomicBool::new(false));
+    let timer = Timer::new(&dialog);
+    {
+        let api = api.clone();
+        let session_key = start.session_key.clone();
+        let dialog = dialog;
+        let poll_result = poll_result.clone();
+        let poll_in_flight = poll_in_flight.clone();
+        let poll_closed = poll_closed.clone();
+        timer.on_tick(move |_| {
+            if let Some(poll) = poll_result.lock().ok().and_then(|mut slot| slot.take()) {
+                poll_in_flight.store(false, Ordering::SeqCst);
+                match poll {
+                    Ok(result) if result.done => {
+                        poll_closed.store(true, Ordering::SeqCst);
+                        dialog.end_modal(ID_OK);
+                        return;
+                    }
+                    Ok(result) => info.set_label(&wecom_onboard_status_text(text, &result)),
+                    Err(err) if !err.to_ascii_lowercase().contains("timeout") => {
+                        info.set_label(text.onboard_failed_retry())
+                    }
+                    Err(_) => {}
+                }
+                info.wrap(600);
+            }
+            if poll_closed.load(Ordering::SeqCst) || poll_in_flight.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            let api = api.clone();
+            let session_key = session_key.clone();
+            let poll_result = poll_result.clone();
+            let poll_in_flight = poll_in_flight.clone();
+            let poll_closed = poll_closed.clone();
+            thread::spawn(move || {
+                let poll = api.poll_wecom_onboard(&session_key);
+                if poll_closed.load(Ordering::SeqCst) {
+                    poll_in_flight.store(false, Ordering::SeqCst);
+                    return;
+                }
+                if let Ok(mut slot) = poll_result.lock() {
+                    slot.replace(poll);
+                }
+            });
+        });
+    }
+    timer.start(3000, false);
+    {
+        let dialog = dialog;
+        let poll_closed = poll_closed.clone();
+        close_button.on_click(move |_| {
+            poll_closed.store(true, Ordering::SeqCst);
+            dialog.end_modal(ID_CANCEL);
+        });
+    }
+    dialog.show_modal();
+    poll_closed.store(true, Ordering::SeqCst);
+    timer.stop();
+    dialog.destroy();
+}
+
+fn wecom_onboard_status_text(text: GuiText, result: &WecomOnboardPoll) -> String {
+    if let Some(error) = result.error.as_ref().and_then(|value| value.as_str()) {
+        return text.onboard_pending_error(error);
+    }
+    match result.status.as_deref() {
+        Some("wait" | "pending") => text.wecom_wait().to_string(),
+        Some("scaned" | "scanned") => text.wecom_scanned().to_string(),
+        Some("expired") => text.wechat_qr_expired().to_string(),
+        Some(status) => text.current_status(status),
+        None => text.scan_done_auto_close().to_string(),
+    }
 }
 
 fn wechat_onboard_status_text(text: GuiText, result: &WechatOnboardPoll) -> String {

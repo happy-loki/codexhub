@@ -4,6 +4,7 @@ pub mod i18n;
 pub mod outbound;
 pub mod routing;
 pub mod session;
+pub mod text_adapter;
 pub mod text_renderer;
 pub mod thread;
 pub mod thread_list;

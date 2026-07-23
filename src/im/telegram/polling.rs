@@ -217,6 +217,8 @@ fn inbound_from_message(
         approval_request_key: None,
         action: None,
         card_message_id: None,
+        callback_req_id: None,
+        callback_kind: None,
         attachments: vec![],
     })
 }
@@ -250,6 +252,8 @@ fn inbound_from_callback(
         approval_request_key: None,
         action: Some(action),
         card_message_id: Some(message.message_id.to_string()),
+        callback_req_id: None,
+        callback_kind: None,
         attachments: vec![],
     })
 }

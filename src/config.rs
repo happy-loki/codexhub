@@ -22,9 +22,11 @@ pub struct AppConfig {
     pub feishu: FeishuConfig,
     pub telegram: TelegramConfig,
     pub wechat: WechatConfig,
+    pub wecom: WecomConfig,
     pub feishu_accounts: Vec<FeishuConfig>,
     pub telegram_accounts: Vec<TelegramConfig>,
     pub wechat_accounts: Vec<WechatConfig>,
+    pub wecom_accounts: Vec<WecomConfig>,
     pub bridge: BridgeConfig,
     pub ai_gateway: crate::ai_gateway::config::AiGatewayConfig,
 }
@@ -95,6 +97,19 @@ pub struct WechatConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
+pub struct WecomConfig {
+    pub enabled: bool,
+    pub account_id: String,
+    pub bot_id: String,
+    pub secret: String,
+    pub display_name: String,
+    pub websocket_url: String,
+    pub allowed_user_ids: Vec<String>,
+    pub allowed_chat_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
 pub struct BridgeConfig {
     pub enabled: bool,
     pub account_id: String,
@@ -107,6 +122,8 @@ pub struct LoggingConfig {
     pub diagnostic: bool,
     pub max_mb: u64,
     pub retention_days: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub log_dir: Option<PathBuf>,
 }
 
 impl Default for AppConfig {
@@ -122,9 +139,11 @@ impl Default for AppConfig {
             feishu: FeishuConfig::default(),
             telegram: TelegramConfig::default(),
             wechat: WechatConfig::default(),
+            wecom: WecomConfig::default(),
             feishu_accounts: Vec::new(),
             telegram_accounts: Vec::new(),
             wechat_accounts: Vec::new(),
+            wecom_accounts: Vec::new(),
             bridge: BridgeConfig::default(),
             ai_gateway: crate::ai_gateway::config::AiGatewayConfig::default(),
         }
@@ -174,6 +193,21 @@ impl Default for WechatConfig {
     }
 }
 
+impl Default for WecomConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            account_id: "wecom".to_string(),
+            bot_id: String::new(),
+            secret: String::new(),
+            display_name: "企业微信机器人".to_string(),
+            websocket_url: "wss://openws.work.weixin.qq.com".to_string(),
+            allowed_user_ids: Vec::new(),
+            allowed_chat_ids: Vec::new(),
+        }
+    }
+}
+
 impl Default for BridgeConfig {
     fn default() -> Self {
         Self {
@@ -190,6 +224,7 @@ impl Default for LoggingConfig {
             diagnostic: cfg!(debug_assertions),
             max_mb: 20,
             retention_days: 7,
+            log_dir: None,
         }
     }
 }
@@ -293,6 +328,14 @@ impl AppConfig {
             self.wechat_accounts.push(account);
             changed = true;
         }
+        if self.wecom_accounts.is_empty() && self.wecom.is_configured() {
+            let mut account = self.wecom.clone();
+            if account.account_id.trim().is_empty() {
+                account.account_id = "wecom".to_string();
+            }
+            self.wecom_accounts.push(account);
+            changed = true;
+        }
         changed
     }
 
@@ -357,6 +400,26 @@ impl AppConfig {
         })
     }
 
+    pub fn effective_wecom_accounts(&self) -> Vec<WecomConfig> {
+        effective_accounts(&self.wecom_accounts, &self.wecom, |account| {
+            account.is_configured()
+        })
+        .into_iter()
+        .map(|mut account| {
+            if account.account_id.trim().is_empty() {
+                account.account_id = "wecom".to_string();
+            }
+            account
+        })
+        .collect()
+    }
+
+    pub fn wecom_account(&self, account_id: &str) -> Option<WecomConfig> {
+        find_account(&self.effective_wecom_accounts(), account_id, |account| {
+            account.account_id.as_str()
+        })
+    }
+
     pub fn upsert_feishu_account(&mut self, account: FeishuConfig) {
         upsert_account(&mut self.feishu_accounts, account, |account| {
             account.account_id.as_str()
@@ -375,6 +438,12 @@ impl AppConfig {
         });
     }
 
+    pub fn upsert_wecom_account(&mut self, account: WecomConfig) {
+        upsert_account(&mut self.wecom_accounts, account, |account| {
+            account.account_id.as_str()
+        });
+    }
+
     pub fn remove_im_account(&mut self, platform: &str, account_id: &str) -> bool {
         let account_id = account_id.trim();
         if account_id.is_empty() {
@@ -388,6 +457,9 @@ impl AppConfig {
                 account.account_id.as_str()
             }),
             "wechat" => remove_account(&mut self.wechat_accounts, account_id, |account| {
+                account.account_id.as_str()
+            }),
+            "wecom" => remove_account(&mut self.wecom_accounts, account_id, |account| {
                 account.account_id.as_str()
             }),
             _ => false,
@@ -421,6 +493,13 @@ impl AppConfig {
             ),
             "wechat" => set_account_enabled(
                 &mut self.wechat_accounts,
+                account_id,
+                enabled,
+                |account| account.account_id.as_str(),
+                |account| &mut account.enabled,
+            ),
+            "wecom" => set_account_enabled(
+                &mut self.wecom_accounts,
                 account_id,
                 enabled,
                 |account| account.account_id.as_str(),
@@ -517,6 +596,16 @@ impl TelegramConfig {
 impl WechatConfig {
     pub fn is_configured(&self) -> bool {
         !self.bot_token.trim().is_empty()
+    }
+
+    pub fn is_active(&self) -> bool {
+        self.enabled && self.is_configured()
+    }
+}
+
+impl WecomConfig {
+    pub fn is_configured(&self) -> bool {
+        !self.bot_id.trim().is_empty() && !self.secret.trim().is_empty()
     }
 
     pub fn is_active(&self) -> bool {
@@ -654,5 +743,16 @@ mod tests {
             config.telegram_accounts[0].allowed_chat_ids,
             vec!["123".to_string()]
         );
+    }
+
+    #[test]
+    fn wecom_legacy_account_migrates_and_is_resolved() {
+        let mut config = AppConfig::default();
+        config.wecom.bot_id = "bot-1".to_string();
+        config.wecom.secret = "secret-1".to_string();
+        assert!(config.migrate_legacy_im_accounts());
+        let account = config.wecom_account("wecom").expect("wecom account");
+        assert_eq!(account.bot_id, "bot-1");
+        assert!(account.is_active());
     }
 }
