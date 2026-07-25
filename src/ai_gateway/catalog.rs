@@ -136,7 +136,6 @@ fn normalize_deepseek_model(model: &mut Value) {
 
     if let Some(object) = model.as_object_mut() {
         object.insert("web_search_tool_type".to_string(), json!("text"));
-        object.insert("supports_search_tool".to_string(), Value::Bool(false));
         object.insert(
             "supports_image_detail_original".to_string(),
             Value::Bool(false),
@@ -200,7 +199,7 @@ mod tests {
             "codexhub-deepseek-summary-v1"
         );
         assert_eq!(response["models"][5]["apply_patch_tool_type"], "freeform");
-        assert_eq!(response["models"][5]["supports_search_tool"], false);
+        assert_eq!(response["models"][5]["supports_search_tool"], true);
         assert_eq!(
             response["models"][5]["supports_image_detail_original"],
             false
@@ -255,7 +254,7 @@ mod tests {
         assert_eq!(model["supports_image_detail_original"], false);
         assert_eq!(model["input_modalities"], json!(["text"]));
         assert_eq!(model["web_search_tool_type"], "text");
-        assert_eq!(model["supports_search_tool"], false);
+        assert_eq!(model["supports_search_tool"], true);
     }
 
     #[test]

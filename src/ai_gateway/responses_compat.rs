@@ -426,6 +426,15 @@ fn restore_provider_tool_call(
                 .entry("input".to_string())
                 .or_insert_with(|| Value::String(String::new()));
         }
+    } else if target.kind == ToolCallKind::ToolSearch {
+        changed |= set_string_field(object, "type", "tool_search_call");
+        changed |= set_string_field(object, "execution", "client");
+        object.remove("name");
+        object.remove("namespace");
+        if let Some(arguments) = object.remove("arguments") {
+            object.insert("arguments".to_string(), tool_search_arguments(arguments));
+            changed = true;
+        }
     }
     changed
 }
@@ -445,6 +454,15 @@ fn custom_input_from_arguments(arguments: Value) -> String {
     match arguments {
         Value::String(arguments) => arguments,
         arguments => serde_json::to_string(&arguments).unwrap_or_default(),
+    }
+}
+
+fn tool_search_arguments(arguments: Value) -> Value {
+    match arguments {
+        Value::String(arguments) => {
+            serde_json::from_str::<Value>(&arguments).unwrap_or_else(|_| Value::String(arguments))
+        }
+        arguments => arguments,
     }
 }
 
@@ -696,6 +714,38 @@ mod tests {
         assert_eq!(parsed["output"][1]["namespace"], "browser");
     }
 
+    #[test]
+    fn json_body_restores_grok_tool_search_call() {
+        let mut tool_names = ToolNameMap::default();
+        let search_name = tool_names.encode_tool_search();
+        let body = Bytes::from(
+            json!({
+                "output": [{
+                    "type": "function_call",
+                    "call_id": "call_search",
+                    "name": search_name,
+                    "arguments": "{\"query\":\"repo tools\"}"
+                }]
+            })
+            .to_string(),
+        );
+
+        let (_, parsed) = normalize_json_body_with_scope_and_tool_names(
+            body,
+            Some(&grok_scope()),
+            Some(&tool_names),
+        );
+        let parsed = parsed.unwrap();
+
+        let item = &parsed["output"][0];
+        assert_eq!(item["type"], "tool_search_call");
+        assert_eq!(item["call_id"], "call_search");
+        assert_eq!(item["execution"], "client");
+        assert_eq!(item["arguments"], json!({"query": "repo tools"}));
+        assert!(item.get("name").is_none());
+        assert!(item.get("namespace").is_none());
+    }
+
     #[tokio::test]
     async fn stream_normalizes_exec_namespace_and_keeps_other_namespaces() {
         let chunks = stream::iter(vec![
@@ -768,6 +818,48 @@ mod tests {
 
         assert!(output.contains("\"encrypted_content\":\"opaque-grok\""));
         assert!(!output.contains("codexhub:enc:v1:"));
+    }
+
+    #[tokio::test]
+    async fn stream_restores_grok_tool_search_done_item() {
+        let mut tool_names = ToolNameMap::default();
+        let search_name = tool_names.encode_tool_search();
+        let chunks = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(format!(
+            "data: {}\n\n",
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_search",
+                    "call_id": "call_search",
+                    "name": search_name,
+                    "arguments": "{\"query\":\"repo tools\"}"
+                }
+            })
+        )))]);
+
+        let output = ResponsesCompatSseStream::with_compatibility(
+            Box::pin(chunks),
+            grok_scope(),
+            Some(tool_names),
+        )
+        .collect::<Vec<Result<Bytes, std::io::Error>>>()
+        .await
+        .into_iter()
+        .map(|item| String::from_utf8(item.unwrap().to_vec()).unwrap())
+        .collect::<String>();
+
+        let events = output
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str::<Value>(data).unwrap())
+            .collect::<Vec<_>>();
+
+        let item = &events[0]["item"];
+        assert_eq!(item["type"], "tool_search_call");
+        assert_eq!(item["execution"], "client");
+        assert_eq!(item["arguments"], json!({"query": "repo tools"}));
+        assert!(item.get("name").is_none());
     }
 
     #[tokio::test]

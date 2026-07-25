@@ -42,6 +42,8 @@ pub fn prepare_for_provider(
     merge_top_level_tools(raw_body, additional_tools, &mut preparation)?;
 
     if provider_type == &ProviderType::GrokResponses {
+        let loaded_tools = extract_tool_search_output_tools(raw_body);
+        merge_top_level_tools(raw_body, loaded_tools, &mut preparation)?;
         let mut tool_names = ToolNameMap::default();
         let stats = convert_grok_tools(raw_body, &mut tool_names)?;
         preparation.grok_tools_converted = stats.converted;
@@ -125,6 +127,22 @@ fn merge_top_level_tools(
     }
     object.insert("tools".to_string(), Value::Array(merged));
     Ok(())
+}
+
+fn extract_tool_search_output_tools(raw_body: &Value) -> Vec<Value> {
+    raw_body
+        .get("input")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("tool_search_output"))
+        .flat_map(|item| {
+            item.get("tools")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -257,6 +275,12 @@ fn convert_grok_tools(
                 converted.push(tool);
                 stats.hosted_normalized += usize::from(changed);
             }
+            Some("tool_search") => {
+                if let Some(tool) = grok_tool_search_tool(&tool, tool_names) {
+                    converted.push(tool);
+                    stats.converted += 1;
+                }
+            }
             _ => converted.push(tool),
         }
     }
@@ -343,6 +367,20 @@ fn grok_function_tool(
     Some(Value::Object(result))
 }
 
+fn grok_tool_search_tool(tool: &Value, tool_names: &mut ToolNameMap) -> Option<Value> {
+    let object = tool.as_object()?;
+    let mut result = serde_json::Map::new();
+    result.insert("type".to_string(), json!("function"));
+    result.insert("name".to_string(), json!(tool_names.encode_tool_search()));
+    if let Some(description) = object.get("description") {
+        result.insert("description".to_string(), description.clone());
+    }
+    if let Some(parameters) = object.get("parameters") {
+        result.insert("parameters".to_string(), parameters.clone());
+    }
+    Some(Value::Object(result))
+}
+
 fn grok_custom_tool(tool: &Value, tool_names: &mut ToolNameMap) -> Result<Option<Value>, String> {
     let Some(object) = tool.as_object() else {
         return Ok(None);
@@ -408,6 +446,12 @@ fn normalize_grok_tool_choice(raw_body: &mut Value, tool_names: &mut ToolNameMap
         .map(str::to_string);
 
     match (choice_type.as_str(), name) {
+        ("tool_search", _) => {
+            choice.insert("type".to_string(), json!("function"));
+            choice.insert("name".to_string(), json!(tool_names.encode_tool_search()));
+            choice.remove("function");
+            choice.remove("namespace");
+        }
         ("custom", Some(name)) => {
             choice.insert("type".to_string(), json!("function"));
             choice.insert("name".to_string(), json!(tool_names.encode_custom(&name)));
@@ -527,6 +571,49 @@ mod tests {
             ToolCallTarget::function(Some("browser"), "open")
         );
         assert!(body["input"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn grok_converts_tool_search_and_loaded_tools_to_functions() {
+        let mut body = json!({
+            "input": [
+                {"type":"tool_search_output","call_id":"call_search","status":"completed","execution":"client","tools":[
+                    {"type":"namespace","name":"fs","tools":[
+                        {"type":"function","name":"read_file","parameters":{"type":"object"}}
+                    ]},
+                    {"type":"tool_search","description":"Load more tools"}
+                ]},
+                {"type":"additional_tools","tools":[
+                    {"type":"tool_search","description":"Discover client tools","parameters":{"type":"object"}}
+                ]}
+            ],
+            "tool_choice": {"type":"tool_search"}
+        });
+
+        let preparation = prepare_for_provider(&mut body, &ProviderType::GrokResponses).unwrap();
+
+        assert_eq!(preparation.carriers_removed, 1);
+        assert_eq!(preparation.grok_tools_converted, 2);
+        assert_eq!(preparation.duplicates_removed, 1);
+        assert_eq!(body["input"].as_array().unwrap().len(), 1);
+
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        assert!(tools.iter().all(|tool| tool["type"] == "function"));
+
+        let map = preparation.grok_tool_names.unwrap();
+        let tool_search_name = body["tool_choice"]["name"].as_str().unwrap();
+        assert_eq!(body["tool_choice"]["type"], "function");
+        assert_eq!(map.decode(tool_search_name), ToolCallTarget::tool_search());
+
+        let fs_tool = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() != Some(tool_search_name))
+            .expect("loaded fs tool");
+        assert_eq!(
+            map.decode(fs_tool["name"].as_str().unwrap()),
+            ToolCallTarget::function(Some("fs"), "read_file")
+        );
     }
 
     #[test]

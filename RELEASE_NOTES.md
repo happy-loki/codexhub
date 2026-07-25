@@ -1,34 +1,39 @@
-CodexHub v0.4.11
+CodexHub v0.4.12
 
-本次版本重点修复 Codex App 增强模式下本地插件目录偶发不显示的问题，并提高 Windows 与 macOS 上 CDP 回环连接的兼容性。
+本次版本重点完善第三方模型对 Codex 本地工具发现 `tool_search` 的支持，修复 Grok 在工具发现后的后续轮次中可能出现协议不兼容的问题。
 
-## 插件目录稳定性
+## DeepSeek 工具发现
 
-- 修复 VPN 或高速网络环境下 renderer 初始化过快，导致本地 `openai-curated` 插件目录在增强脚本安装前被过滤的问题。
-- 在 Codex App 原有消息监听器处理响应之前完成本地插件目录适配，减少启动时序差异带来的随机结果。
-- 当首次查询已经形成空缓存时，仅失效并重新拉取当前活跃的插件查询，不再等待最长 6 小时的缓存自然过期。
-- 只调整 renderer 内存中的本地市场展示别名，不修改插件 ID、安装身份、磁盘路径或远端市场。
+- 为 `deepseek-v4-pro` 和 `deepseek-v4-flash` 开启 Codex 本地工具搜索能力。
+- 复用现有 Responses 与 Chat Completions 双向转换，支持工具声明、工具发现结果、动态 namespace 工具以及流式工具调用。
+- 保持 DeepSeek 现有 developer、thinking、JSON 输出和 reasoning 兼容策略不变。
 
-## 增强模式兼容
+## Grok 双向协议兼容
 
-- 增强脚本升级到 v16，并把插件消息分发补丁纳入启动成功条件。
-- CDP HTTP 探测同时支持 IPv4 `127.0.0.1` 和 IPv6 `::1`，解决部分系统只在 IPv6 回环地址暴露调试端点时无法连接的问题。
-- WebSocket 地址校验改为解析真实 IP 并确认其属于本机回环范围，继续拒绝任何非本机 CDP 地址。
+- 将 Codex 原生 `tool_search` 声明和 `tool_choice` 转换为 Grok 可接受的普通 function。
+- 将 `tool_search_output.tools` 合并到下一轮工具列表，并继续处理 namespace 和自定义工具名称。
+- 将历史 `tool_search_call` / `tool_search_output` 转换为 Grok Responses 可接受的 `function_call` / `function_call_output`。
+- 将 Grok 返回的 `function_call(name=tool_search)` 在 JSON 和 SSE 回程中恢复为 Codex 原生 `tool_search_call`。
+- 修复工具发现完成后第二轮请求可能因 Grok 不认识 Codex 原生 item 而失败的问题。
 
-## 诊断能力
+## 协议边界
 
-- 启动日志新增插件消息分发、缓存刷新尝试、刷新结果和失败原因。
-- 可区分“插件响应未适配”和“旧查询缓存未刷新”两类问题，方便后续 Codex App 升级后的兼容排查。
+- OpenAI Responses 和 Responses Lite 继续保持原生透传，不因第三方适配丢失新字段。
+- `tool_search` 仅表示 Codex 本地延迟工具发现，不等同于 hosted `web_search` 或客户端 `web.run`。
+- 本次版本不改变现有联网搜索和图片生成策略。
+
+## 文档
+
+- 新增第三方 Provider `tool_search` 兼容方案文档。
+- 补充 Grok Responses 工具适配和 Provider Adapter 设计说明。
 
 ## 验证
 
-- `cargo fmt --check` 通过。
-- `cargo check --features gui --bin codexhub` 通过。
-- 全部测试：539 passed，0 failed，2 ignored。
-- `git diff --check` 通过。
+- `cargo fmt` 通过。
+- AI Gateway 全部 354 个相关测试通过。
+- Grok 工具声明、历史回放、JSON 回程和 SSE 回程均已增加专项测试。
 
 ## 当前边界
 
-- 增强模式仍只修改当前 Codex App renderer 的内存状态，不修改 `app.asar`、LevelDB、账号状态或系统代理。
-- Clash 异常退出后遗留的 Windows 系统代理、TUN 虚拟网卡或默认路由属于系统网络状态，本版不会自动关闭或重置这些设置。
-- 普通方式启动 Codex App 不经过增强脚本；需要同步自定义模型和本地 curated 插件目录时，请从 CodexHub 使用“增强模式启动 Codex”。
+- 本版完成网关级协议转换和自动化测试；不同第三方上游对 function schema 的实现仍可能存在差异，建议按实际渠道进行端到端验证。
+- hosted `web_search`、`web.run` 与 `tool_search` 保持彼此独立，不进行语义混用。

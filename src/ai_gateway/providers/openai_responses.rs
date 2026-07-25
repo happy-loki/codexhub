@@ -509,6 +509,8 @@ struct GrokModelInputStats {
     structured_outputs: usize,
     removed_phase_fields: usize,
     namespaced_calls: usize,
+    tool_search_calls: usize,
+    tool_search_outputs: usize,
 }
 
 impl GrokModelInputStats {
@@ -518,6 +520,8 @@ impl GrokModelInputStats {
             || self.structured_outputs > 0
             || self.removed_phase_fields > 0
             || self.namespaced_calls > 0
+            || self.tool_search_calls > 0
+            || self.tool_search_outputs > 0
     }
 }
 
@@ -607,6 +611,22 @@ fn normalize_grok_model_input_with_tool_names(
                     stats.namespaced_calls += 1;
                 }
             }
+            "tool_search_call" => {
+                if let Some(tool_names) = tool_names.as_deref_mut() {
+                    item.insert("name".to_string(), json!(tool_names.encode_tool_search()));
+                } else {
+                    item.insert("name".to_string(), json!("tool_search"));
+                }
+                let arguments = item
+                    .remove("arguments")
+                    .map(grok_function_arguments_text)
+                    .unwrap_or_else(|| "{}".to_string());
+                item.insert("type".to_string(), json!("function_call"));
+                item.insert("arguments".to_string(), json!(arguments));
+                item.remove("execution");
+                item.remove("status");
+                stats.tool_search_calls += 1;
+            }
             "custom_tool_call_output" => {
                 item.insert("type".to_string(), json!("function_call_output"));
                 stats.custom_outputs += 1;
@@ -619,6 +639,27 @@ fn normalize_grok_model_input_with_tool_names(
                     stats.structured_outputs += 1;
                 }
             }
+            "tool_search_output" => {
+                let output = serde_json::to_string(&json!({
+                    "status": item
+                        .get("status")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("completed"),
+                    "execution": item
+                        .get("execution")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("client"),
+                    "tools": item
+                        .remove("tools")
+                        .unwrap_or_else(|| json!([])),
+                }))
+                .unwrap_or_else(|_| r#"{"tools":[]}"#.to_string());
+                item.insert("type".to_string(), json!("function_call_output"));
+                item.insert("output".to_string(), json!(output));
+                item.remove("status");
+                item.remove("execution");
+                stats.tool_search_outputs += 1;
+            }
             _ => {}
         }
     }
@@ -630,6 +671,13 @@ fn grok_custom_tool_input_text(input: serde_json::Value) -> String {
     match input {
         serde_json::Value::String(input) => input,
         other => serde_json::to_string(&other).unwrap_or_default(),
+    }
+}
+
+fn grok_function_arguments_text(arguments: serde_json::Value) -> String {
+    match arguments {
+        serde_json::Value::String(arguments) => arguments,
+        other => serde_json::to_string(&other).unwrap_or_else(|_| "{}".to_string()),
     }
 }
 
@@ -1100,6 +1148,63 @@ mod tests {
         assert_eq!(body["input"][0]["name"], "exec");
         assert_eq!(body["input"][1]["name"], browser_name);
         assert!(body["input"][1].get("namespace").is_none());
+    }
+
+    #[test]
+    fn grok_model_input_reencodes_tool_search_history() {
+        let mut body = json!({
+            "input": [
+                {
+                    "type": "tool_search_call",
+                    "call_id": "call_search",
+                    "status": "completed",
+                    "execution": "client",
+                    "arguments": {"query": "repo tools"}
+                },
+                {
+                    "type": "tool_search_output",
+                    "call_id": "call_search",
+                    "status": "completed",
+                    "execution": "client",
+                    "tools": [
+                        {"type":"namespace","name":"fs","tools":[
+                            {"type":"function","name":"read_file"}
+                        ]}
+                    ]
+                }
+            ]
+        });
+        let mut tool_names = ToolNameMap::default();
+        let tool_search_name = tool_names.encode_tool_search();
+
+        let stats = normalize_grok_model_input_with_tool_names(
+            &mut body,
+            &grok_provider(),
+            Some(&mut tool_names),
+        );
+
+        assert_eq!(stats.tool_search_calls, 1);
+        assert_eq!(stats.tool_search_outputs, 1);
+
+        let call = &body["input"][0];
+        assert_eq!(call["type"], "function_call");
+        assert_eq!(call["name"], tool_search_name);
+        assert!(call.get("execution").is_none());
+        assert!(call.get("status").is_none());
+        let arguments: serde_json::Value =
+            serde_json::from_str(call["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments, json!({"query": "repo tools"}));
+
+        let output = &body["input"][1];
+        assert_eq!(output["type"], "function_call_output");
+        assert!(output.get("execution").is_none());
+        assert!(output.get("status").is_none());
+        assert!(output.get("tools").is_none());
+        let output_payload: serde_json::Value =
+            serde_json::from_str(output["output"].as_str().unwrap()).unwrap();
+        assert_eq!(output_payload["status"], "completed");
+        assert_eq!(output_payload["execution"], "client");
+        assert_eq!(output_payload["tools"][0]["name"], "fs");
     }
 
     #[test]

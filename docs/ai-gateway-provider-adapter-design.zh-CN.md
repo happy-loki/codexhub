@@ -906,6 +906,12 @@ Responses tools include tool_search
 
 当前决策：
 
+- 2026-07-25：第三方 tool_search 采用小范围补洞，不推进完整统一 IR 重构。DeepSeek 重新开启
+  supports_search_tool，复用已完成的 ChatCompletions 双向转换；Grok 在 ProviderType::GrokResponses
+  内把 Codex 原生 tool_search 双向翻译为普通 function。OpenAI Responses 原生透传、Responses Lite
+  新字段、hosted web_search 和客户端 web.run 都不纳入本次改动。详细方案见
+  docs/ai-gateway-third-party-tool-search-plan.zh-CN.md。
+
 - Codex Responses 是入口 wire protocol，不是 Gateway 内部唯一模型。
 - Gateway IR 必须优先保真，adapter 再降级。
 - `tool_search` 是一等语义，不作为普通 function 的特殊字符串临时处理。

@@ -886,7 +886,7 @@
         "self_serve_business_usage_based",
         "team"
       ],
-      "supports_search_tool": false,
+      "supports_search_tool": true,
       "service_tiers": [
         {
           "id": "priority",
@@ -973,7 +973,7 @@
         "self_serve_business_usage_based",
         "team"
       ],
-      "supports_search_tool": false,
+      "supports_search_tool": true,
       "service_tiers": [
         {
           "id": "priority",
