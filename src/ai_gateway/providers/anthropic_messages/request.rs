@@ -101,12 +101,25 @@ fn validate_thinking_budget(body: &Map<String, Value>) -> Result<(), GatewayErro
 fn insert_prompt_cache_control(body: &mut Map<String, Value>) {
     let cache_control = anthropic_cache_control();
 
+    if let Some(Value::Array(tools)) = body.get_mut("tools") {
+        insert_tools_cache_control(tools, &cache_control);
+    }
+
     if let Some(system) = body.get_mut("system") {
         insert_system_cache_control(system, &cache_control);
     }
 
     if let Some(Value::Array(messages)) = body.get_mut("messages") {
         insert_message_cache_control(messages, &cache_control);
+    }
+}
+
+fn insert_tools_cache_control(tools: &mut [Value], cache_control: &Map<String, Value>) {
+    // One breakpoint on the final tool caches the complete tools prefix while
+    // leaving room for the system and rolling conversation breakpoints.
+    if let Some(tool) = tools.iter_mut().rev().find_map(Value::as_object_mut) {
+        tool.entry("cache_control".to_string())
+            .or_insert_with(|| Value::Object(cache_control.clone()));
     }
 }
 

@@ -464,8 +464,10 @@ Anthropic Messages 使用 block-level `cache_control` 开启 prompt caching。Ga
 [`ai-gateway-anthropic-cache-control.zh-CN.md`](ai-gateway-anthropic-cache-control.zh-CN.md)）：
 
 - Codex / Responses 入站不需要、也不应携带 Anthropic 专属 `cache_control`。
-- Anthropic provider 在出站适配层模拟 Claude Code 请求形态：`system` 段**最后一个** text block 附 `cache_control: {"type":"ephemeral"}`（只标最后一条，靠前缀回溯覆盖其余 system block，规避 4 断点上限）。
-- 多轮历史中给**最后两条 `role==user` 消息**的最后一个 block 各附一个 `cache_control`（双滚动断点，含 tool_result；倒二 user 作读取锚、末条 user 作写入点，抹平命中率锯齿）；assistant/tool_use 与 tool 定义不加。
+- Anthropic provider 在出站适配层先剥离工具自带的缓存标记，再给 `tools` 数组的**最后一个工具定义**附一个 `cache_control: {"type":"ephemeral"}`，缓存完整工具前缀。
+- `system` 段只在**最后一个** text block 附一个同类断点，靠前缀回溯覆盖其余 system block。
+- 多轮历史只给会话尾部最后一条非空 `role==user`/`assistant` 消息附一个同类断点；优先落在最后一个 text block，无 text 时落在最后一个 content block，因此 tool_result-only 与 tool_use-only 消息也能覆盖。
+- 常规请求共使用 tools、system、messages 三个断点，保持在 Anthropic 的 4 个断点上限以内。
 - 不生成顶层 `cache_control`，不生成 `ttl`，也不把 `prompt_cache_retention = "1h"` 映射为 Anthropic `ttl`。
 - request log 记录 Anthropic cache read/create token。
 

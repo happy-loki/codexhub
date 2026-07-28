@@ -93,17 +93,17 @@ system[0] 上那个断点其实是**冗余的廉价保险**：它太短（远不
 
 Claude Code 敢「system 每条都加」，前提是它的 system block 数量固定且少。而 Gateway 是 Responses → Messages 转译，**Codex 可能塞进来多条 system block**。若照搬「每条都加」，光 system 就可能吃掉 5~8 个断点，**直接撞穿 4 个上限，整个请求被拒**。
 
-因此 Gateway 的策略回归**模仿 Claude Code**：system 只在承重断点打一个，messages 段用单个断点跟着会话尾巴走。
+因此 Gateway 采用受控的三断点策略：tools 尾部固定一个，system 只在承重断点打一个，messages 段再用单个断点跟着会话尾巴走。Claude Code 抓包中的 tools 本身不带断点；Gateway 在这里有意多加一个，以便 tools 前缀可以独立复用，同时仍为 system 和会话尾部保留足够名额。
 
 | 维度 | Gateway 策略 | 理由 |
 |------|--------------|------|
-| `tools` | 不加（剥离上游携带的 `cache_control`） | 靠前缀机制自动覆盖，省名额，与 CC 一致 |
+| `tools` | 剥离入站标记后，只在**最后一个工具定义**加 1 个断点 | 缓存完整 tools 前缀；工具列表不变时可独立复用，且只占 1 个名额 |
 | `system` | **只在最后一条 text block 加 1 个断点** | 承重断点；靠自动回溯覆盖前面所有 system block；规避 4 上限 |
 | `messages` | 只在**会话尾部一条**（最后一条 `role==user`/`assistant` 消息）加 1 个断点；落点优先该消息最后一个 `text` block，无 text 则最后一个 content block（覆盖 tool_result-only / tool_use-only） | 与 CC 原生一致；单断点靠 20-block 回溯窗口即可命中。详见第 6 节 |
 | 顶层 `cache_control` | 不生成 | 非法字段 |
-| `ttl` | 默认 5m；长会话可选映射 `1h` | 与 `prompt_cache_retention` 对接（可选） |
+| `ttl` | 不生成 | 使用 Anthropic `ephemeral` 的默认时长；当前不映射 `prompt_cache_retention` |
 
-断点预算：system 末尾 1 个 + messages 尾部 1 个，共 ≤2，稳在 4 以内。
+断点预算：tools 尾部 1 个 + system 末尾 1 个 + messages 尾部 1 个，共 ≤3，稳在 4 以内。
 
 ## 6. messages 段：单断点跟会话尾巴
 
@@ -137,17 +137,19 @@ cache_read_input_tokens       → cached_tokens（本次命中缓存）
 
 已落地（`request.rs`，与本文对齐）：
 
+- `insert_tools_cache_control`：剥离入站工具标记后，只在**最后一个工具定义**统一生成断点，缓存完整 tools 前缀。
 - `insert_system_cache_control`：数组分支只在**最后一条** text block 加断点，规避多 system block 撞 4 上限。
 - `insert_message_cache_control`：`rposition` 找最后一条 `role=="user"`/`assistant` 消息（跳过 mid-conversation system）；`mark_message_breakpoint` 落在其最后一个 text block（无 text 则最后一个 content block），幂等。
-- `tools`：不加 `cache_control`（剥离上游携带的），维持现状。
 - 主请求注入 `metadata.user_id`（`insert_metadata_user_id`，与 Claude Code 一致，跟会话稳定）。
-- 测试：`builds_anthropic_text_request`、`caches_conversation_tail_only`、`caches_trailing_assistant_message`、`marks_last_text_block_of_tail_message`、`marks_last_block_when_tail_has_no_text`、`marks_exactly_one_message_breakpoint` 覆盖单断点落点。
+- 测试：`builds_anthropic_text_request`、`marks_only_the_last_tool_cache_breakpoint`、`caches_conversation_tail_only`、`caches_trailing_assistant_message`、`marks_last_text_block_of_tail_message`、`marks_last_block_when_tail_has_no_text`、`marks_exactly_one_message_breakpoint` 覆盖三个分段断点及其落点。
 
 > 注：请求 **headers / anthropic-beta / auth 保留 Claude Code 指纹**（user-agent、x-app、x-stainless-*、x-claude-code-session-id、Bearer、beta 列表含 `context-1m-2025-08-07` 等），是获取 1M 上下文等能力的前提。内部 web-search 独立请求（`internal_web_search_body`）整体仍模拟 Claude Code（含 `metadata.user_id`）。整体方向是**模仿 Claude Code**，唯一相对其表象的偏差是 messages 落点优先 text block（更贴近 CC 实际行为）。
 
 未做（本次范围外）：`prompt_cache_retention = "1h"` → `cache_control.ttl` 透传，仍固定 `{"type":"ephemeral"}`（5m）。
 
-## 9. 生产验证：偶发缓存 miss 根因分析
+## 9. 历史生产验证：偶发缓存 miss 根因分析
+
+> 本节数据采集于旧版“双滚动消息断点”实现，用于保留偶发 miss 的排查证据。当前实现已经收敛为 tools、system、messages 各一个断点，其中 messages 仅保留单个会话尾部滚动点；不要把本节的旧断点数量当作当前请求形态。
 
 ### 9.1 验证数据
 
@@ -156,10 +158,10 @@ cache_read_input_tokens       → cached_tokens（本次命中缓存）
 **正常区间（3542–3548，7 轮）**：
 - System/tools 哈希：连续 7 轮 100% 一致
 - Messages 每轮增长 3 条（assistant text → assistant tool_use → user tool_result）
-- 双滚动断点：每轮在最后两条消息上（如 msg[69-70] → msg[72-73] → msg[75-76]）
+- 当时的双滚动断点：每轮在最后两条消息上（如 msg[69-70] → msg[72-73] → msg[75-76]）
 - Cache read：稳定在 21 万+ tokens，占总输入 92-94%
 - Cache write：每轮 1-5k tokens（新增消息）
-- **结论：双滚动按预期工作，命中率稳定**
+- **当时结论：旧版双滚动策略在该区间按预期工作，命中率稳定**
 
 **异常区间（3521–3530，10 轮）**：
 - System/tools 哈希：连续 10 轮 100% 一致
@@ -176,7 +178,7 @@ cache_read_input_tokens       → cached_tokens（本次命中缓存）
 2. **`cache_control` 标记漂移**：✗ 对比发现正常区间（3542-3543）和异常区间（3524-3525）都存在历史消息 `cache_control` 被移除的情况，但前者不 miss，说明 Anthropic 服务端确实会过滤此字段后再计算哈希
 3. **TTL 过期**：✗ 3525 距 3524 仅 9 秒，3529 距 3528 仅 183 秒，远小于 5 分钟 TTL
 4. **20-block 回溯窗口溢出**：✗ 实测距离仅 4 blocks（3524 msg[19] block 37 → 3525 msg[21] block 40），远小于 20
-5. **Gateway 代码逻辑错误**：✗ 正常区间证明双滚动断点能稳定工作
+5. **Gateway 代码逻辑错误**：✗ 正常区间证明当时的请求构造能够稳定命中
 
 ### 9.3 确认的根本原因：Anthropic API 分片不一致
 
@@ -218,9 +220,9 @@ cache_read_input_tokens       → cached_tokens（本次命中缓存）
 
 **不建议的方案**：
 - ✗ 客户端侧缓存预热：无法解决服务端分片不一致问题
-- ✗ 调整断点策略：双滚动已是业界最佳实践，正常区间证明其有效性
+- ✗ 仅靠增加消息断点：历史双滚动样本同样出现过 miss，不能解决服务端分片同步延迟
 - ✗ 增加断点数量：受 4 个上限限制，且无助于解决分片同步延迟
 
 ### 9.6 结论
 
-Gateway 的双滚动断点实现正确且有效。偶发缓存 miss 是 Anthropic API 服务端分布式架构的固有特性，属于「最终一致性」在缓存系统中的体现。只要前缀保持稳定（system/tools 不变），miss 后会自动恢复，整体命中率仍可达 80-95%。
+历史样本说明，偶发缓存 miss 并非单纯增加消息断点就能消除，更可能来自 Anthropic API 服务端的分布式缓存一致性。当前 Gateway 使用 tools、system、messages 三个分段断点：tools 与 system 提供稳定前缀锚点，messages 使用一个滚动尾部断点；后续命中率应以新策略下的生产日志继续验证。

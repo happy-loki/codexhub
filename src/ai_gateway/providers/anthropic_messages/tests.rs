@@ -540,13 +540,42 @@ fn builds_anthropic_request_with_claude_code_block_level_ephemeral_cache() {
 
     assert!(body.get("cache_control").is_none());
     assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
-    // tools do not carry a breakpoint (upstream cache_control is stripped).
-    assert!(body["tools"][0].get("cache_control").is_none());
+    assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
     assert_eq!(
         body["messages"][0]["content"][0]["cache_control"]["type"],
         "ephemeral"
     );
     assert!(body["system"][0]["cache_control"].get("ttl").is_none());
+    assert!(body["tools"][0]["cache_control"].get("ttl").is_none());
+}
+
+#[test]
+fn marks_only_the_last_tool_cache_breakpoint() {
+    let mut req = request(vec![message("user", "use a tool")]);
+    req.tools = vec![
+        json!({
+            "type": "function",
+            "name": "read_file",
+            "description": "Read a file",
+            "parameters": {"type": "object"}
+        }),
+        json!({
+            "type": "function",
+            "name": "write_file",
+            "description": "Write a file",
+            "parameters": {"type": "object"}
+        }),
+    ];
+
+    let (body, _) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
+
+    assert!(body["tools"][0].get("cache_control").is_none());
+    assert_eq!(body["tools"][1]["cache_control"]["type"], "ephemeral");
+    assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+    assert_eq!(
+        body["messages"][0]["content"][0]["cache_control"]["type"],
+        "ephemeral"
+    );
 }
 
 #[test]
@@ -1202,7 +1231,8 @@ fn preserves_native_anthropic_client_tool_shape() {
 
     let (body, map) = build_anthropic_request(&req, AnthropicProviderProfile::Anthropic).unwrap();
     assert_eq!(body["tools"][0]["name"], "WebSearch");
-    assert!(body["tools"][0].get("cache_control").is_none());
+    assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
+    assert!(body["tools"][0]["cache_control"].get("ttl").is_none());
     assert_eq!(
         body["tools"][0]["input_schema"]["$schema"],
         "https://json-schema.org/draft/2020-12/schema"
