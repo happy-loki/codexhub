@@ -1,6 +1,8 @@
 //! Responses API input → Chat Completions messages 转换。
 //! 参考 AxonHub `responses/inbound.go` 的 `convertInputToMessages`。
 
+use std::collections::HashSet;
+
 use serde_json::{Map, Value, json};
 
 use crate::ai_gateway::apply_patch_tool::{
@@ -136,7 +138,7 @@ fn convert_tools_to_chat_tools(
     let mut tools = request.tools.clone();
     tools.extend(tool_search_output_tools(&request.input));
 
-    tools
+    let converted = tools
         .iter()
         .flat_map(|tool| {
             let Some(obj) = tool.as_object() else {
@@ -197,6 +199,17 @@ fn convert_tools_to_chat_tools(
                     .unwrap_or_default(),
                 _ => Vec::new(),
             }
+        })
+        .collect::<Vec<_>>();
+
+    let mut seen_names = HashSet::new();
+    converted
+        .into_iter()
+        .filter(|tool| {
+            tool.get("function")
+                .and_then(|function| function.get("name"))
+                .and_then(Value::as_str)
+                .is_none_or(|name| seen_names.insert(name.to_string()))
         })
         .collect()
 }
@@ -2451,6 +2464,53 @@ mod tests {
         let decoded = tool_name_map.decode("codex_app__codexns__read_thread_terminal");
         assert_eq!(decoded.namespace.as_deref(), Some("codex_app"));
         assert_eq!(decoded.name, "read_thread_terminal");
+    }
+
+    #[test]
+    fn test_parallel_tool_search_outputs_deduplicate_loaded_chat_tools() {
+        let namespace = || {
+            json!({
+                "type": "namespace",
+                "name": "multi_agent_v1",
+                "description": "Multi-agent tools",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "spawn_agent",
+                        "description": "Spawn an agent",
+                        "parameters": {"type": "object"}
+                    },
+                    {
+                        "type": "function",
+                        "name": "wait_agent",
+                        "description": "Wait for an agent",
+                        "parameters": {"type": "object"}
+                    }
+                ]
+            })
+        };
+        let mut first = make_item(ItemType::ToolSearchOutput);
+        first.call_id = Some("search_1".into());
+        first.tools = Some(vec![namespace()]);
+        let mut second = make_item(ItemType::ToolSearchOutput);
+        second.call_id = Some("search_2".into());
+        second.tools = Some(vec![namespace()]);
+
+        let req = make_request(vec![first, second]);
+        let body = build_chat_request(&req, true).unwrap();
+        let tools = body["tools"].as_array().unwrap();
+
+        assert_eq!(tools.len(), 2);
+        assert_eq!(
+            tools
+                .iter()
+                .map(|tool| tool["function"]["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "multi_agent_v1__codexns__spawn_agent",
+                "multi_agent_v1__codexns__wait_agent"
+            ]
+        );
     }
 
     // ═══ DeepSeek 严格约束测试 ═══════════════════════════════════

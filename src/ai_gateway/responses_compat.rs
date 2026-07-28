@@ -458,11 +458,28 @@ fn custom_input_from_arguments(arguments: Value) -> String {
 }
 
 fn tool_search_arguments(arguments: Value) -> Value {
-    match arguments {
+    let mut arguments = match arguments {
         Value::String(arguments) => {
             serde_json::from_str::<Value>(&arguments).unwrap_or_else(|_| Value::String(arguments))
         }
         arguments => arguments,
+    };
+    normalize_integral_tool_search_limit(&mut arguments);
+    arguments
+}
+
+fn normalize_integral_tool_search_limit(arguments: &mut Value) {
+    let Some(limit) = arguments
+        .as_object_mut()
+        .and_then(|object| object.get_mut("limit"))
+    else {
+        return;
+    };
+    let Some(number) = limit.as_f64() else {
+        return;
+    };
+    if number.is_finite() && number >= 0.0 && number.fract() == 0.0 && number <= usize::MAX as f64 {
+        *limit = Value::Number(serde_json::Number::from(number as u64));
     }
 }
 
@@ -724,7 +741,7 @@ mod tests {
                     "type": "function_call",
                     "call_id": "call_search",
                     "name": search_name,
-                    "arguments": "{\"query\":\"repo tools\"}"
+                    "arguments": "{\"query\":\"repo tools\",\"limit\":10.0}"
                 }]
             })
             .to_string(),
@@ -741,9 +758,28 @@ mod tests {
         assert_eq!(item["type"], "tool_search_call");
         assert_eq!(item["call_id"], "call_search");
         assert_eq!(item["execution"], "client");
-        assert_eq!(item["arguments"], json!({"query": "repo tools"}));
+        assert_eq!(
+            item["arguments"],
+            json!({"query": "repo tools", "limit": 10})
+        );
         assert!(item.get("name").is_none());
         assert!(item.get("namespace").is_none());
+    }
+
+    #[test]
+    fn tool_search_limit_normalizes_only_non_negative_integral_floats() {
+        assert_eq!(
+            tool_search_arguments(json!({"query": "agents", "limit": 10.0})),
+            json!({"query": "agents", "limit": 10})
+        );
+        assert_eq!(
+            tool_search_arguments(json!({"query": "agents", "limit": 10.5})),
+            json!({"query": "agents", "limit": 10.5})
+        );
+        assert_eq!(
+            tool_search_arguments(json!({"query": "agents", "limit": -1.0})),
+            json!({"query": "agents", "limit": -1.0})
+        );
     }
 
     #[tokio::test]
@@ -833,7 +869,7 @@ mod tests {
                     "id": "fc_search",
                     "call_id": "call_search",
                     "name": search_name,
-                    "arguments": "{\"query\":\"repo tools\"}"
+                    "arguments": "{\"query\":\"repo tools\",\"limit\":10.0}"
                 }
             })
         )))]);
@@ -858,7 +894,10 @@ mod tests {
         let item = &events[0]["item"];
         assert_eq!(item["type"], "tool_search_call");
         assert_eq!(item["execution"], "client");
-        assert_eq!(item["arguments"], json!({"query": "repo tools"}));
+        assert_eq!(
+            item["arguments"],
+            json!({"query": "repo tools", "limit": 10})
+        );
         assert!(item.get("name").is_none());
     }
 

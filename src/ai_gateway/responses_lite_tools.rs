@@ -376,9 +376,26 @@ fn grok_tool_search_tool(tool: &Value, tool_names: &mut ToolNameMap) -> Option<V
         result.insert("description".to_string(), description.clone());
     }
     if let Some(parameters) = object.get("parameters") {
-        result.insert("parameters".to_string(), parameters.clone());
+        let mut parameters = parameters.clone();
+        normalize_grok_tool_search_parameters(&mut parameters);
+        result.insert("parameters".to_string(), parameters);
     }
     Some(Value::Object(result))
+}
+
+fn normalize_grok_tool_search_parameters(parameters: &mut Value) {
+    let Some(limit) = parameters
+        .as_object_mut()
+        .and_then(|object| object.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+        .and_then(|properties| properties.get_mut("limit"))
+        .and_then(Value::as_object_mut)
+    else {
+        return;
+    };
+    if limit.get("type").and_then(Value::as_str) == Some("number") {
+        limit.insert("type".to_string(), json!("integer"));
+    }
 }
 
 fn grok_custom_tool(tool: &Value, tool_names: &mut ToolNameMap) -> Result<Option<Value>, String> {
@@ -584,7 +601,14 @@ mod tests {
                     {"type":"tool_search","description":"Load more tools"}
                 ]},
                 {"type":"additional_tools","tools":[
-                    {"type":"tool_search","description":"Discover client tools","parameters":{"type":"object"}}
+                    {"type":"tool_search","description":"Discover client tools","parameters":{
+                        "type":"object",
+                        "properties":{
+                            "query":{"type":"string"},
+                            "limit":{"type":"number"}
+                        },
+                        "required":["query"]
+                    }}
                 ]}
             ],
             "tool_choice": {"type":"tool_search"}
@@ -605,6 +629,14 @@ mod tests {
         let tool_search_name = body["tool_choice"]["name"].as_str().unwrap();
         assert_eq!(body["tool_choice"]["type"], "function");
         assert_eq!(map.decode(tool_search_name), ToolCallTarget::tool_search());
+        let search_tool = tools
+            .iter()
+            .find(|tool| tool["name"].as_str() == Some(tool_search_name))
+            .expect("tool_search function");
+        assert_eq!(
+            search_tool["parameters"]["properties"]["limit"]["type"],
+            "integer"
+        );
 
         let fs_tool = tools
             .iter()
