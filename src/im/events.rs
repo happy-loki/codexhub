@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose};
@@ -122,7 +122,7 @@ pub(crate) async fn send_turn_reply(
     if !should_send {
         if matches!(
             route.platform,
-            ImPlatformKind::Telegram | ImPlatformKind::Wechat
+            ImPlatformKind::Telegram | ImPlatformKind::Wechat | ImPlatformKind::Wecom
         ) {
             let event_kind = format!("{}_turn_reply_skipped", route.platform.key());
             state
@@ -298,6 +298,38 @@ pub(crate) async fn send_turn_reply(
                 }
             }
         }
+        ImPlatformKind::Wecom => {
+            let rendered = text_renderer::render_agent_message_text(text);
+            let Some(outbound_tx) = outbound_tx else {
+                state
+                    .push_event(
+                        "error",
+                        "wecom_turn_enqueue_failed",
+                        format!(
+                            "thread={thread_id} chat={} outbound queue unavailable",
+                            route.chat_id
+                        ),
+                    )
+                    .await;
+                return;
+            };
+            if let Err(err) = outbound_tx.enqueue(ImOutboundMessage {
+                thread_id: thread_id.to_string(),
+                route: route.clone(),
+                item_id: None,
+                item_type: Some("agentMessage".to_string()),
+                kind: ImOutboundKind::TurnReply,
+                payload: ImOutboundPayload::Text(rendered),
+            }) {
+                state
+                    .push_event(
+                        "error",
+                        "wecom_turn_enqueue_failed",
+                        format!("thread={thread_id} chat={} err={err}", route.chat_id),
+                    )
+                    .await;
+            }
+        }
     }
 }
 
@@ -381,7 +413,7 @@ async fn send_turn_completed_mark(
                 }
             }
         }
-        ImPlatformKind::Telegram | ImPlatformKind::Wechat => {
+        ImPlatformKind::Telegram | ImPlatformKind::Wechat | ImPlatformKind::Wecom => {
             if let Err(err) = outbound_tx.enqueue(ImOutboundMessage {
                 thread_id: thread_id.to_string(),
                 route: route.clone(),
@@ -508,6 +540,14 @@ pub(crate) async fn handle_codex_notification(
                     .await;
                 return;
             };
+            if route.platform == ImPlatformKind::Wecom {
+                let Some(api) = api_registry.wecom_for_route(&route) else {
+                    log_missing_api(&state, &route, "wecom_agent_delta").await;
+                    return;
+                };
+                send_wecom_stream_delta(&state, &api, thread_id, &route, delta, false).await;
+                return;
+            }
             if route.platform != ImPlatformKind::Feishu {
                 return;
             }
@@ -732,8 +772,26 @@ pub(crate) async fn handle_codex_notification(
             };
             if matches!(
                 route.platform,
-                ImPlatformKind::Telegram | ImPlatformKind::Wechat
+                ImPlatformKind::Telegram | ImPlatformKind::Wechat | ImPlatformKind::Wecom
             ) {
+                if route.platform == ImPlatformKind::Wecom && item_type == "agentMessage" {
+                    if let Some(text) = extract_agent_message_text(item) {
+                        let Some(api) = api_registry.wecom_for_route(&route) else {
+                            log_missing_api(&state, &route, "wecom_agent_complete").await;
+                            return;
+                        };
+                        send_wecom_stream_final(
+                            &state,
+                            &api,
+                            thread_id,
+                            &route,
+                            Some(&text),
+                            false,
+                        )
+                        .await;
+                    }
+                    return;
+                }
                 if item_type == "agentMessage"
                     && let Some(text) = extract_agent_message_text(item)
                 {
@@ -909,7 +967,33 @@ pub(crate) async fn handle_codex_notification(
                     .mark_turn_completed(thread_id, turn_id);
                 return;
             };
-            if let Some(text) = extract_turn_reply_text(params) {
+            let wecom_stream_finished = if route.platform == ImPlatformKind::Wecom {
+                let stream = state
+                    .runtime
+                    .lock()
+                    .await
+                    .wecom_streams_by_thread
+                    .get(&route.conversation_key)
+                    .cloned();
+                if stream.is_some()
+                    && let Some(api) = api_registry.wecom_for_route(&route)
+                {
+                    send_wecom_stream_final(
+                        &state,
+                        &api,
+                        thread_id,
+                        &route,
+                        extract_turn_reply_text(params).as_deref(),
+                        true,
+                    )
+                    .await
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if !wecom_stream_finished && let Some(text) = extract_turn_reply_text(params) {
                 send_turn_reply(
                     &state,
                     &api_registry,
@@ -929,6 +1013,211 @@ pub(crate) async fn handle_codex_notification(
         }
         _ => {}
     }
+}
+
+async fn send_wecom_stream_delta(
+    state: &SharedState,
+    api: &crate::im::wecom::WecomApi,
+    thread_id: &str,
+    route: &RouteTarget,
+    delta: &str,
+    finish: bool,
+) {
+    let key = route.conversation_key.clone();
+    let driver = {
+        let mut runtime = state.runtime.lock().await;
+        let Some(stream) = runtime.wecom_streams_by_thread.get_mut(&key) else {
+            return;
+        };
+        stream.content.push_str(delta);
+        if finish {
+            stream.finished = true;
+        }
+        stream.dirty = true;
+        stream.revision = stream.revision.saturating_add(1);
+        if stream.sending {
+            None
+        } else {
+            stream.sending = true;
+            Some((stream.req_id.clone(), stream.stream_id.clone()))
+        }
+    };
+    if let Some((req_id, stream_id)) = driver {
+        spawn_wecom_stream_driver(
+            state,
+            api,
+            key,
+            thread_id,
+            route.chat_id.clone(),
+            req_id,
+            stream_id,
+        );
+    }
+}
+
+async fn send_wecom_stream_final(
+    state: &SharedState,
+    api: &crate::im::wecom::WecomApi,
+    thread_id: &str,
+    route: &RouteTarget,
+    final_text: Option<&str>,
+    cleanup_after_delivery: bool,
+) -> bool {
+    let key = route.conversation_key.clone();
+    let driver = {
+        let mut runtime = state.runtime.lock().await;
+        let Some(stream) = runtime.wecom_streams_by_thread.get_mut(&key) else {
+            return false;
+        };
+        let content_changed = final_text.is_some_and(|text| text != stream.content);
+        if cleanup_after_delivery && stream.delivered && stream.finished && !content_changed {
+            runtime.wecom_streams_by_thread.remove(&key);
+            return true;
+        }
+        if let Some(final_text) = final_text {
+            stream.content = final_text.to_string();
+        }
+        stream.finished = true;
+        stream.cleanup_after_delivery |= cleanup_after_delivery;
+        stream.dirty = true;
+        stream.revision = stream.revision.saturating_add(1);
+        if stream.sending {
+            None
+        } else {
+            stream.sending = true;
+            Some((stream.req_id.clone(), stream.stream_id.clone()))
+        }
+    };
+    if let Some((req_id, stream_id)) = driver {
+        spawn_wecom_stream_driver(
+            state,
+            api,
+            key,
+            thread_id,
+            route.chat_id.clone(),
+            req_id,
+            stream_id,
+        );
+    }
+    true
+}
+
+const WECOM_STREAM_UPDATE_INTERVAL: Duration = Duration::from_millis(220);
+
+fn spawn_wecom_stream_driver(
+    state: &SharedState,
+    api: &crate::im::wecom::WecomApi,
+    key: String,
+    thread_id: &str,
+    chat_id: String,
+    req_id: String,
+    stream_id: String,
+) {
+    let state = state.clone();
+    let api = api.clone();
+    let thread_id = thread_id.to_string();
+    tokio::spawn(async move {
+        wecom_stream_driver(state, api, key, thread_id, chat_id, req_id, stream_id).await;
+    });
+}
+
+async fn wecom_stream_driver(
+    state: SharedState,
+    api: crate::im::wecom::WecomApi,
+    key: String,
+    thread_id: String,
+    chat_id: String,
+    expected_req_id: String,
+    expected_stream_id: String,
+) {
+    loop {
+        tokio::time::sleep(WECOM_STREAM_UPDATE_INTERVAL).await;
+        let snapshot = {
+            let mut runtime = state.runtime.lock().await;
+            let Some(stream) = runtime.wecom_streams_by_thread.get_mut(&key) else {
+                return;
+            };
+            if stream.req_id != expected_req_id || stream.stream_id != expected_stream_id {
+                return;
+            }
+            if !stream.dirty {
+                stream.sending = false;
+                return;
+            }
+            stream.dirty = false;
+            (
+                stream.req_id.clone(),
+                stream.stream_id.clone(),
+                truncate_utf8_bytes(&stream.content, 20 * 1024),
+                stream.finished,
+                stream.revision,
+            )
+        };
+
+        if let Err(err) = api
+            .reply_stream(&snapshot.0, &snapshot.1, &snapshot.2, snapshot.3)
+            .await
+        {
+            let mut runtime = state.runtime.lock().await;
+            if let Some(stream) = runtime.wecom_streams_by_thread.get_mut(&key)
+                && stream.req_id == expected_req_id
+                && stream.stream_id == expected_stream_id
+            {
+                stream.sending = false;
+                stream.dirty = false;
+            }
+            drop(runtime);
+            state
+                .push_event(
+                    "warn",
+                    if snapshot.3 {
+                        "wecom_stream_final_failed"
+                    } else {
+                        "wecom_stream_failed"
+                    },
+                    format!("thread={thread_id} chat={chat_id} err={err}"),
+                )
+                .await;
+            return;
+        }
+
+        let should_stop = {
+            let mut runtime = state.runtime.lock().await;
+            let Some(stream) = runtime.wecom_streams_by_thread.get_mut(&key) else {
+                return;
+            };
+            if stream.req_id != expected_req_id || stream.stream_id != expected_stream_id {
+                return;
+            }
+            stream.sent_content = snapshot.2;
+            if snapshot.3 {
+                stream.delivered = true;
+            }
+            if stream.cleanup_after_delivery && stream.delivered && !stream.dirty {
+                runtime.wecom_streams_by_thread.remove(&key);
+                true
+            } else if stream.dirty {
+                false
+            } else {
+                stream.sending = false;
+                true
+            }
+        };
+        if should_stop {
+            return;
+        }
+    }
+}
+
+fn truncate_utf8_bytes(value: &str, limit: usize) -> String {
+    if value.len() <= limit {
+        return value.to_string();
+    }
+    let mut end = limit;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_string()
 }
 
 async fn route_for_codex_output(
@@ -1003,6 +1292,7 @@ fn turn_origin_for_platform(platform: ImPlatformKind) -> Option<TurnOrigin> {
         ImPlatformKind::Feishu => Some(TurnOrigin::Feishu),
         ImPlatformKind::Telegram => Some(TurnOrigin::Telegram),
         ImPlatformKind::Wechat => Some(TurnOrigin::Wechat),
+        ImPlatformKind::Wecom => Some(TurnOrigin::Wecom),
     }
 }
 
@@ -1542,5 +1832,133 @@ fn safe_file_stem(value: &str) -> String {
         "image".to_string()
     } else {
         stem
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::{
+        app_state::AppState,
+        config::AppConfig,
+        im::wecom::{WecomApi, WecomSettings},
+        im_runtime::{RouteTarget, WecomStreamState},
+    };
+
+    fn test_state() -> SharedState {
+        AppState::new(
+            std::env::temp_dir().join(format!(
+                "codexhub-wecom-stream-{}.toml",
+                uuid::Uuid::new_v4()
+            )),
+            AppConfig::default(),
+            None,
+            None,
+        )
+    }
+
+    fn test_api() -> WecomApi {
+        WecomApi::new(WecomSettings {
+            bot_id: "bot".to_string(),
+            secret: "secret".to_string(),
+            websocket_url: String::new(),
+            allowed_user_ids: Vec::new(),
+            allowed_chat_ids: Vec::new(),
+        })
+    }
+
+    fn test_route() -> RouteTarget {
+        RouteTarget {
+            platform: ImPlatformKind::Wecom,
+            conversation_key: "wecom:account:single:user".to_string(),
+            account_id: "account".to_string(),
+            chat_id: "single:user".to_string(),
+            remote_client_key: "remote".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn wecom_stream_coalesces_deltas_and_does_not_duplicate_final() {
+        let state = test_state();
+        let api = test_api();
+        let route = test_route();
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        api.install_sender(Some(sender)).await;
+        state.runtime.lock().await.wecom_streams_by_thread.insert(
+            route.conversation_key.clone(),
+            WecomStreamState {
+                req_id: "callback".to_string(),
+                stream_id: "stream-1".to_string(),
+                content: String::new(),
+                sent_content: String::new(),
+                finished: false,
+                sending: false,
+                dirty: false,
+                delivered: false,
+                cleanup_after_delivery: false,
+                revision: 0,
+            },
+        );
+
+        send_wecom_stream_delta(&state, &api, "thread-1", &route, "hello", false).await;
+        send_wecom_stream_delta(&state, &api, "thread-1", &route, " world", false).await;
+
+        let command = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("stream driver should send an update")
+            .expect("stream command");
+        assert_eq!(
+            command.body.pointer("/stream/content"),
+            Some(&json!("hello world"))
+        );
+        assert_eq!(command.body.pointer("/stream/finish"), Some(&json!(false)));
+        command
+            .result
+            .send(Ok(json!({ "headers": { "req_id": "ack" } })))
+            .expect("stream acknowledgement");
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), receiver.recv())
+                .await
+                .is_err()
+        );
+
+        assert!(
+            send_wecom_stream_final(&state, &api, "thread-1", &route, Some("hello world"), true,)
+                .await
+        );
+        let final_command = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("stream driver should send the final update")
+            .expect("final stream command");
+        assert_eq!(
+            final_command.body.pointer("/stream/content"),
+            Some(&json!("hello world"))
+        );
+        assert_eq!(
+            final_command.body.pointer("/stream/finish"),
+            Some(&json!(true))
+        );
+        final_command
+            .result
+            .send(Ok(json!({ "headers": { "req_id": "final-ack" } })))
+            .expect("final stream acknowledgement");
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), receiver.recv())
+                .await
+                .is_err()
+        );
+        assert!(
+            !state
+                .runtime
+                .lock()
+                .await
+                .wecom_streams_by_thread
+                .contains_key(&route.conversation_key)
+        );
     }
 }

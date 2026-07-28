@@ -5,7 +5,10 @@ use crate::{
     app_state::SharedState,
     im::{
         core::{
-            approval::{ApprovalReplyOutcome, resolve_approval_reply, submit_approval_decision},
+            approval::{
+                ApprovalReplyOutcome, resolve_approval_button_reply, resolve_approval_reply,
+                submit_approval_decision,
+            },
             i18n::{ImText, im_text_for_state},
             outbound::ImOutboundSender,
             routing::{
@@ -13,6 +16,7 @@ use crate::{
                 route_for_message,
             },
             session::{create_and_bind_thread, resume_and_bind_thread},
+            text_adapter::TextChatAdapter,
             thread::{
                 ThreadCreateOption, apply_thread_create_draft_value, create_options_for_field,
                 expand_home_prefix, is_approval_reply, load_thread_create_defaults_for_client,
@@ -20,6 +24,7 @@ use crate::{
                 summarize_thread_cwd, summarize_thread_start_options, summarize_thread_title,
                 thread_create_form_from_draft, thread_create_help_text,
                 thread_start_options_from_form_for_client,
+                thread_start_options_with_current_provider,
             },
             thread_list::{empty_thread_routing_request, load_thread_routing_page},
             turn::{TurnStartOutcome, start_turn_for_route},
@@ -29,7 +34,7 @@ use crate::{
     },
     im_runtime::{RouteTarget, ThreadRoutingRequestState, ThreadRoutingStage, TurnOrigin},
     remote_control_backend,
-    types::InboundMessage,
+    types::{InboundAction, InboundMessage, ThreadRouteDirection},
 };
 
 const WECHAT_CREATE_OPTION_PAGE_SIZE: usize = 8;
@@ -63,6 +68,25 @@ pub(crate) async fn handle_inbound(
     let settings = WechatSettings::from_app_config(&wechat_config);
     let api = WechatApi::new(settings);
     let adapter = WechatAdapter::new(api);
+    handle_text_inbound(
+        state,
+        outbound_tx,
+        message,
+        &adapter,
+        TurnOrigin::Wechat,
+        "wechat",
+    )
+    .await
+}
+
+pub(crate) async fn handle_text_inbound(
+    state: SharedState,
+    outbound_tx: ImOutboundSender,
+    message: InboundMessage,
+    adapter: &dyn TextChatAdapter,
+    turn_origin: TurnOrigin,
+    platform_key: &str,
+) -> Result<()> {
     let account_id = message.account_id.clone();
     let route = route_for_message(&message);
     let text = im_text_for_state(&state);
@@ -73,7 +97,11 @@ pub(crate) async fn handle_inbound(
 
     let trimmed = message.text.trim();
     let normalized = command(trimmed);
-    let menu_command = menu_command(trimmed);
+    let menu_command = if message.platform == crate::types::ImPlatformKind::Wecom {
+        wecom_card_command(trimmed).or_else(|| menu_command(trimmed))
+    } else {
+        menu_command(trimmed)
+    };
     crate::chain_log::write_line(format!(
         "[wechat_flow] event=inbound_begin account={} chat={} text_len={} command={} menu_command={}",
         message.account_id,
@@ -83,6 +111,29 @@ pub(crate) async fn handle_inbound(
         menu_command.as_deref().unwrap_or("")
     ));
 
+    if let Some(InboundAction::ApprovalDecision {
+        request_fingerprint,
+        option_index,
+    }) = message.action.clone()
+    {
+        handle_approval_outcome(
+            &state,
+            &outbound_tx,
+            adapter,
+            &message,
+            resolve_approval_button_reply(&state, &message, &request_fingerprint, option_index)
+                .await,
+        )
+        .await?;
+        return Ok(());
+    }
+
+    if let Some(action) = message.action.clone()
+        && handle_thread_routing_action(&state, adapter, &message, action).await?
+    {
+        return Ok(());
+    }
+
     if let Some(command) = menu_command.as_deref()
         && is_approval_reply(command)
         && state
@@ -91,12 +142,11 @@ pub(crate) async fn handle_inbound(
             .await
             .has_pending_approvals(&message.conversation_key())
     {
-        handle_wechat_approval_text_reply(&state, &outbound_tx, &adapter, &message, command)
-            .await?;
+        handle_wechat_approval_text_reply(&state, &outbound_tx, adapter, &message, command).await?;
         return Ok(());
     }
 
-    if handle_thread_create_custom_cwd_text_input(&state, &adapter, &message, trimmed).await? {
+    if handle_thread_create_custom_cwd_text_input(&state, adapter, &message, trimmed).await? {
         crate::chain_log::write_line(format!(
             "[wechat_flow] event=inbound_handled stage=create_custom_cwd chat={}",
             message.chat_id
@@ -106,7 +156,7 @@ pub(crate) async fn handle_inbound(
 
     if handle_thread_create_option_text_reply(
         &state,
-        &adapter,
+        adapter,
         &message,
         trimmed,
         menu_command.as_deref(),
@@ -122,7 +172,7 @@ pub(crate) async fn handle_inbound(
 
     if handle_thread_create_settings_text_reply(
         &state,
-        &adapter,
+        adapter,
         &message,
         trimmed,
         menu_command.as_deref(),
@@ -137,7 +187,7 @@ pub(crate) async fn handle_inbound(
     }
 
     if let Some(command) = menu_command.as_deref()
-        && handle_thread_route_choice_text_reply(&state, &adapter, &message, command).await?
+        && handle_thread_route_choice_text_reply(&state, adapter, &message, command).await?
     {
         crate::chain_log::write_line(format!(
             "[wechat_flow] event=inbound_handled stage=route_choice chat={} command={}",
@@ -147,7 +197,7 @@ pub(crate) async fn handle_inbound(
     }
 
     if let Some(command) = menu_command.as_deref()
-        && handle_thread_list_text_reply(&state, &adapter, &message, command).await?
+        && handle_thread_list_text_reply(&state, adapter, &message, command).await?
     {
         crate::chain_log::write_line(format!(
             "[wechat_flow] event=inbound_handled stage=thread_list chat={} command={}",
@@ -278,7 +328,7 @@ pub(crate) async fn handle_inbound(
         trimmed,
         &message.attachments,
         message.received_at_ms,
-        TurnOrigin::Wechat,
+        turn_origin,
     )
     .await
     {
@@ -290,7 +340,7 @@ pub(crate) async fn handle_inbound(
             state
                 .push_event(
                     "info",
-                    "wechat_turn_started",
+                    &format!("{platform_key}_turn_started"),
                     format!(
                         "chat={} thread={} turn={turn_id}",
                         message.chat_id, thread_id
@@ -330,7 +380,7 @@ pub(crate) async fn handle_inbound(
             state
                 .push_event(
                     "warn",
-                    "wechat_inbound_expired",
+                    &format!("{platform_key}_inbound_expired"),
                     format!(
                         "chat={} thread={thread_id} message={}",
                         message.chat_id, message.message_id
@@ -344,7 +394,7 @@ pub(crate) async fn handle_inbound(
                 "[wechat_flow] event=no_thread_route chat={}",
                 message.chat_id
             ));
-            send_thread_routing_choice(&state, &adapter, &message).await?;
+            send_thread_routing_choice(&state, adapter, &message, None).await?;
             Ok(())
         }
         TurnStartOutcome::Stale { thread_id } => {
@@ -355,11 +405,11 @@ pub(crate) async fn handle_inbound(
             state
                 .push_event(
                     "warn",
-                    "wechat_thread_route_stale",
+                    &format!("{platform_key}_thread_route_stale"),
                     format!("conversation={} thread={thread_id}", route.conversation_key),
                 )
                 .await;
-            send_thread_routing_choice(&state, &adapter, &message).await
+            send_thread_routing_choice(&state, adapter, &message, None).await
         }
         TurnStartOutcome::Failed { error } => {
             crate::chain_log::write_line(format!(
@@ -381,7 +431,7 @@ pub(crate) async fn handle_inbound(
 
 async fn create_wechat_thread_for_route(
     state: &SharedState,
-    adapter: &WechatAdapter,
+    adapter: &dyn TextChatAdapter,
     route: &RouteTarget,
     options: remote_control_backend::ThreadStartOptions,
     request_id: Option<&str>,
@@ -423,7 +473,7 @@ async fn create_wechat_thread_for_route(
 
 async fn send_thread_create_settings(
     state: &SharedState,
-    adapter: &WechatAdapter,
+    adapter: &dyn TextChatAdapter,
     message: &InboundMessage,
     existing_request: Option<ThreadRoutingRequestState>,
 ) -> Result<()> {
@@ -439,11 +489,25 @@ async fn send_thread_create_settings(
     let remote_client_key = route.remote_client_key.clone();
     let defaults = load_thread_create_defaults_for_client(state, &remote_client_key).await;
     let im_text = im_text_for_state(state);
-    let mut text = thread_create_help_text(&defaults, &create_draft, im_text);
-    text.push_str(im_text.create_settings_menu_suffix());
-    let message_id = adapter
-        .send_text(state, &message.account_id, &message.chat_id, &text)
-        .await?;
+    let message_id = if let Some(message_id) = adapter
+        .send_thread_create_settings_card(
+            state,
+            message,
+            &request_id,
+            &defaults,
+            &create_draft,
+            im_text,
+        )
+        .await?
+    {
+        message_id
+    } else {
+        let mut text = thread_create_help_text(&defaults, &create_draft, im_text);
+        text.push_str(im_text.create_settings_menu_suffix());
+        adapter
+            .send_text(state, &message.account_id, &message.chat_id, &text)
+            .await?
+    };
     state
         .runtime
         .lock()
@@ -468,7 +532,7 @@ async fn send_thread_create_settings(
 
 async fn handle_thread_create_settings_text_reply(
     state: &SharedState,
-    adapter: &WechatAdapter,
+    adapter: &dyn TextChatAdapter,
     message: &InboundMessage,
     text: &str,
     command: Option<&str>,
@@ -549,7 +613,7 @@ async fn handle_thread_create_settings_text_reply(
 
 async fn create_wechat_thread_from_request(
     state: &SharedState,
-    adapter: &WechatAdapter,
+    adapter: &dyn TextChatAdapter,
     message: &InboundMessage,
     request: ThreadRoutingRequestState,
 ) -> Result<()> {
@@ -583,7 +647,7 @@ async fn create_wechat_thread_from_request(
 
 async fn send_thread_create_options(
     state: &SharedState,
-    adapter: &WechatAdapter,
+    adapter: &dyn TextChatAdapter,
     message: &InboundMessage,
     mut request: ThreadRoutingRequestState,
     field: &str,
@@ -657,7 +721,7 @@ async fn send_thread_create_options(
 
 async fn handle_thread_create_option_text_reply(
     state: &SharedState,
-    adapter: &WechatAdapter,
+    adapter: &dyn TextChatAdapter,
     message: &InboundMessage,
     text: &str,
     command: Option<&str>,
@@ -749,7 +813,7 @@ async fn handle_thread_create_option_text_reply(
 
 async fn handle_thread_create_custom_cwd_text_input(
     state: &SharedState,
-    adapter: &WechatAdapter,
+    adapter: &dyn TextChatAdapter,
     message: &InboundMessage,
     text: &str,
 ) -> Result<bool> {
@@ -810,7 +874,7 @@ async fn handle_thread_create_custom_cwd_text_input(
 
 async fn send_thread_create_custom_cwd_prompt(
     state: &SharedState,
-    adapter: &WechatAdapter,
+    adapter: &dyn TextChatAdapter,
     message: &InboundMessage,
 ) -> Result<()> {
     adapter
@@ -922,19 +986,32 @@ fn looks_like_path(value: &str) -> bool {
 
 async fn send_thread_routing_choice(
     state: &SharedState,
-    adapter: &WechatAdapter,
+    adapter: &dyn TextChatAdapter,
     message: &InboundMessage,
+    existing_request: Option<ThreadRoutingRequestState>,
 ) -> Result<()> {
     let route = route_for_message(message);
-    let request_id = next_thread_routing_request_id();
-    let message_id = adapter
-        .send_text(
-            state,
-            &message.account_id,
-            &message.chat_id,
-            im_text_for_state(state).create_choice_wechat(),
-        )
-        .await?;
+    let request_id = existing_request
+        .as_ref()
+        .map(|request| request.request_id.clone())
+        .unwrap_or_else(next_thread_routing_request_id);
+    let im_text = im_text_for_state(state);
+    let message_id = match adapter
+        .send_thread_routing_choice_card(state, message, &request_id, im_text)
+        .await?
+    {
+        Some(message_id) => message_id,
+        None => {
+            adapter
+                .send_text(
+                    state,
+                    &message.account_id,
+                    &message.chat_id,
+                    im_text.create_choice_wechat(),
+                )
+                .await?
+        }
+    };
     state
         .runtime
         .lock()
@@ -947,7 +1024,7 @@ async fn send_thread_routing_choice(
 
 async fn handle_thread_route_choice_text_reply(
     state: &SharedState,
-    adapter: &WechatAdapter,
+    adapter: &dyn TextChatAdapter,
     message: &InboundMessage,
     command: &str,
 ) -> Result<bool> {
@@ -961,11 +1038,11 @@ async fn handle_thread_route_choice_text_reply(
     }
 
     match command {
-        "/1" => {
+        "/1" | "/codexhub-new" => {
             send_thread_create_settings(state, adapter, message, Some(request)).await?;
             Ok(true)
         }
-        "/2" => {
+        "/2" | "/codexhub-history" => {
             send_thread_routing_list(state, adapter, message, Some(request), None, 1).await?;
             Ok(true)
         }
@@ -986,7 +1063,7 @@ async fn handle_thread_route_choice_text_reply(
 
 async fn send_thread_routing_list(
     state: &SharedState,
-    adapter: &WechatAdapter,
+    adapter: &dyn TextChatAdapter,
     message: &InboundMessage,
     existing_request: Option<ThreadRoutingRequestState>,
     cursor: Option<&str>,
@@ -999,6 +1076,7 @@ async fn send_thread_routing_list(
         existing_request.as_ref(),
         cursor,
         page,
+        adapter.thread_routing_page_size(),
     )
     .await
     {
@@ -1022,6 +1100,31 @@ async fn send_thread_routing_list(
             return Ok(());
         }
     };
+    let provisional_message_id = existing_request
+        .as_ref()
+        .and_then(|request| request.message_id.clone())
+        .unwrap_or_default();
+    state
+        .runtime
+        .lock()
+        .await
+        .remember_thread_routing_request(loaded_page.clone().into_request(
+            &route,
+            provisional_message_id,
+            existing_request.as_ref(),
+            cursor,
+        ));
+    if let Some(message_id) = adapter
+        .send_thread_routing_list_cards(state, message, &loaded_page, im_text_for_state(state))
+        .await?
+    {
+        let _ = state
+            .runtime
+            .lock()
+            .await
+            .update_thread_routing_request_message_id(&loaded_page.request_id, message_id);
+        return Ok(());
+    }
     if loaded_page.entries.is_empty() {
         let message_id = adapter
             .send_text(
@@ -1059,9 +1162,369 @@ async fn send_thread_routing_list(
     Ok(())
 }
 
+async fn handle_thread_routing_action(
+    state: &SharedState,
+    adapter: &dyn TextChatAdapter,
+    message: &InboundMessage,
+    action: InboundAction,
+) -> Result<bool> {
+    match action {
+        InboundAction::ThreadRouteOpen => {
+            if crate::im::core::routing::live_thread_for_route(state, &route_for_message(message))
+                .await
+                .is_none()
+            {
+                send_thread_routing_choice(state, adapter, message, None).await?;
+            }
+            Ok(true)
+        }
+        InboundAction::ThreadRouteChoice { request_id, action } => {
+            let Some(request) =
+                checked_thread_routing_request(state, adapter, message, &request_id, true).await?
+            else {
+                return Ok(true);
+            };
+            let inbound_action = InboundAction::ThreadRouteChoice {
+                request_id: request_id.clone(),
+                action: action.clone(),
+            };
+            acknowledge_thread_routing_action(state, adapter, message, &inbound_action).await;
+            match action.as_str() {
+                "create_new" => {
+                    send_thread_create_settings(state, adapter, message, Some(request)).await?
+                }
+                "resume_history" => {
+                    send_thread_routing_list(state, adapter, message, Some(request), None, 1)
+                        .await?
+                }
+                "back" => {
+                    send_thread_routing_choice(state, adapter, message, Some(request)).await?
+                }
+                other => {
+                    adapter
+                        .send_text(
+                            state,
+                            &message.account_id,
+                            &message.chat_id,
+                            &im_text_for_state(state).unsupported_thread_action(other),
+                        )
+                        .await?;
+                }
+            }
+            Ok(true)
+        }
+        InboundAction::ThreadRouteCreateSubmit {
+            request_id,
+            cwd_choice,
+            cwd_custom,
+            model,
+            effort,
+            permission,
+        } => {
+            let Some(request) =
+                checked_thread_routing_request(state, adapter, message, &request_id, true).await?
+            else {
+                return Ok(true);
+            };
+            if cwd_choice.as_deref() == Some("__custom__") && cwd_custom.is_none() {
+                let mut request = request;
+                request.stage = ThreadRoutingStage::CreateOptions;
+                request.create_draft.cwd_choice = Some("__custom__".to_string());
+                request.create_draft.cwd_custom = None;
+                request.create_draft.model = model;
+                request.create_draft.effort = effort;
+                request.create_draft.permission = permission;
+                state
+                    .runtime
+                    .lock()
+                    .await
+                    .remember_thread_routing_request(request);
+                send_thread_create_custom_cwd_prompt(state, adapter, message).await?;
+                return Ok(true);
+            }
+            let route = route_for_message(message);
+            let form = crate::im::core::thread::ThreadCreateForm {
+                cwd_choice: request.create_draft.cwd_choice.clone(),
+                cwd_custom: cwd_custom.or_else(|| request.create_draft.cwd_custom.clone()),
+                model,
+                effort,
+                permission,
+            };
+            let options = match thread_start_options_from_form_for_client(
+                state,
+                &route.remote_client_key,
+                form,
+            )
+            .await
+            {
+                Ok(options) => options,
+                Err(err) => {
+                    adapter
+                        .send_text(
+                            state,
+                            &message.account_id,
+                            &message.chat_id,
+                            &im_text_for_state(state).invalid_create_form(&err),
+                        )
+                        .await?;
+                    return Ok(true);
+                }
+            };
+            create_wechat_thread_for_route(
+                state,
+                adapter,
+                &route,
+                options,
+                Some(&request.request_id),
+            )
+            .await?;
+            Ok(true)
+        }
+        InboundAction::ThreadRouteCreateDefault { request_id } => {
+            let Some(request) =
+                checked_thread_routing_request(state, adapter, message, &request_id, true).await?
+            else {
+                return Ok(true);
+            };
+            let route = route_for_message(message);
+            create_wechat_thread_for_route(
+                state,
+                adapter,
+                &route,
+                thread_start_options_with_current_provider(
+                    remote_control_backend::ThreadStartOptions::default(),
+                ),
+                Some(&request.request_id),
+            )
+            .await?;
+            Ok(true)
+        }
+        InboundAction::ThreadRouteCreateEdit { request_id, field } if field == "cwd" => {
+            let Some(mut request) =
+                checked_thread_routing_request(state, adapter, message, &request_id, true).await?
+            else {
+                return Ok(true);
+            };
+            request.stage = ThreadRoutingStage::CreateOptions;
+            request.create_draft.cwd_choice = Some("__custom__".to_string());
+            request.create_draft.cwd_custom = None;
+            state
+                .runtime
+                .lock()
+                .await
+                .remember_thread_routing_request(request);
+            send_thread_create_custom_cwd_prompt(state, adapter, message).await?;
+            Ok(true)
+        }
+        InboundAction::ThreadRouteResumeIndex {
+            request_id,
+            page,
+            index,
+        } => {
+            let Some(request) =
+                checked_thread_routing_request(state, adapter, message, &request_id, false).await?
+            else {
+                return Ok(true);
+            };
+            let Some(thread_id) = request
+                .thread_ids_by_page
+                .get(page.saturating_sub(1))
+                .and_then(|thread_ids| thread_ids.get(index))
+                .cloned()
+            else {
+                adapter
+                    .send_text(
+                        state,
+                        &message.account_id,
+                        &message.chat_id,
+                        im_text_for_state(state).thread_selection_expired(),
+                    )
+                    .await?;
+                return Ok(true);
+            };
+            let inbound_action = InboundAction::ThreadRouteResumeIndex {
+                request_id: request_id.clone(),
+                page,
+                index,
+            };
+            acknowledge_thread_routing_action(state, adapter, message, &inbound_action).await;
+            resume_thread_for_request(state, adapter, message, request, &thread_id).await?;
+            Ok(true)
+        }
+        InboundAction::ThreadRouteResumeSelected {
+            request_id,
+            thread_id,
+        } => {
+            let Some(request) =
+                checked_thread_routing_request(state, adapter, message, &request_id, false).await?
+            else {
+                return Ok(true);
+            };
+            if !request
+                .thread_ids_by_page
+                .iter()
+                .flatten()
+                .any(|candidate| candidate == &thread_id)
+            {
+                adapter
+                    .send_text(
+                        state,
+                        &message.account_id,
+                        &message.chat_id,
+                        im_text_for_state(state).thread_selection_expired(),
+                    )
+                    .await?;
+                return Ok(true);
+            }
+            resume_thread_for_request(state, adapter, message, request, &thread_id).await?;
+            Ok(true)
+        }
+        InboundAction::ThreadRouteListPage {
+            request_id,
+            direction,
+        } => {
+            let Some(request) =
+                checked_thread_routing_request(state, adapter, message, &request_id, false).await?
+            else {
+                return Ok(true);
+            };
+            let target_page = match direction {
+                ThreadRouteDirection::Prev => request.page.saturating_sub(1).max(1),
+                ThreadRouteDirection::Next => request.page.saturating_add(1),
+            };
+            if target_page == request.page
+                || matches!(direction, ThreadRouteDirection::Next) && !request.history_has_next
+            {
+                let notice = match direction {
+                    ThreadRouteDirection::Prev => im_text_for_state(state).first_page(),
+                    ThreadRouteDirection::Next => im_text_for_state(state).last_page(),
+                };
+                adapter
+                    .send_text(state, &message.account_id, &message.chat_id, notice)
+                    .await?;
+                return Ok(true);
+            }
+            let cursor = request
+                .page_cursors
+                .get(target_page.saturating_sub(1))
+                .cloned()
+                .flatten();
+            let inbound_action = InboundAction::ThreadRouteListPage {
+                request_id: request_id.clone(),
+                direction,
+            };
+            acknowledge_thread_routing_action(state, adapter, message, &inbound_action).await;
+            send_thread_routing_list(
+                state,
+                adapter,
+                message,
+                Some(request),
+                cursor.as_deref(),
+                target_page,
+            )
+            .await?;
+            Ok(true)
+        }
+        _ => Ok(false),
+    }
+}
+
+async fn checked_thread_routing_request(
+    state: &SharedState,
+    adapter: &dyn TextChatAdapter,
+    message: &InboundMessage,
+    request_id: &str,
+    choice: bool,
+) -> Result<Option<ThreadRoutingRequestState>> {
+    let request = state
+        .runtime
+        .lock()
+        .await
+        .thread_routing_request(request_id);
+    let Some(request) = request else {
+        adapter
+            .send_text(
+                state,
+                &message.account_id,
+                &message.chat_id,
+                im_text_for_state(state).thread_choice_card_expired(),
+            )
+            .await?;
+        return Ok(None);
+    };
+    if request.conversation_key != message.conversation_key() {
+        let notice = if choice {
+            im_text_for_state(state).thread_choice_not_current()
+        } else {
+            im_text_for_state(state).thread_list_not_current()
+        };
+        adapter
+            .send_text(state, &message.account_id, &message.chat_id, notice)
+            .await?;
+        return Ok(None);
+    }
+    Ok(Some(request))
+}
+
+async fn acknowledge_thread_routing_action(
+    state: &SharedState,
+    adapter: &dyn TextChatAdapter,
+    message: &InboundMessage,
+    action: &InboundAction,
+) {
+    if let Err(err) = adapter
+        .acknowledge_thread_routing_action(message, action, im_text_for_state(state))
+        .await
+    {
+        state
+            .push_event(
+                "warn",
+                "thread_route_card_update_failed",
+                format!("conversation={} err={err}", message.conversation_key()),
+            )
+            .await;
+    }
+}
+
+async fn resume_thread_for_request(
+    state: &SharedState,
+    adapter: &dyn TextChatAdapter,
+    message: &InboundMessage,
+    request: ThreadRoutingRequestState,
+    thread_id: &str,
+) -> Result<()> {
+    let route = route_for_message(message);
+    let thread =
+        resume_and_bind_thread(state, &route, thread_id, Some(&request.request_id)).await?;
+    let text = im_text_for_state(state);
+    adapter
+        .send_text(
+            state,
+            &message.account_id,
+            &message.chat_id,
+            &format!(
+                "{}\n\n{}",
+                text.resumed_session_title(),
+                text.resumed_session_body(
+                    &summarize_thread_title(&thread, text),
+                    &summarize_thread_cwd(&thread, text)
+                )
+            ),
+        )
+        .await?;
+    state
+        .push_event(
+            "info",
+            "thread_route_resumed",
+            format!("conversation={} thread={thread_id}", route.conversation_key),
+        )
+        .await;
+    Ok(())
+}
+
 async fn handle_thread_list_text_reply(
     state: &SharedState,
-    adapter: &WechatAdapter,
+    adapter: &dyn TextChatAdapter,
     message: &InboundMessage,
     command: &str,
 ) -> Result<bool> {
@@ -1074,7 +1537,11 @@ async fn handle_thread_list_text_reply(
         return Ok(false);
     }
     match command {
-        "/next" => {
+        "/back" | "/codexhub-back" => {
+            send_thread_routing_choice(state, adapter, message, Some(request)).await?;
+            return Ok(true);
+        }
+        "/next" | "/codexhub-next" => {
             if request.history_has_next {
                 let next_page = request.page + 1;
                 let cursor = request
@@ -1103,7 +1570,7 @@ async fn handle_thread_list_text_reply(
             }
             return Ok(true);
         }
-        "/prev" => {
+        "/prev" | "/codexhub-prev" => {
             if request.page > 1 {
                 let previous_page = request.page - 1;
                 let cursor = request
@@ -1135,7 +1602,8 @@ async fn handle_thread_list_text_reply(
         _ => {}
     }
     let Some(index) = command
-        .strip_prefix('/')
+        .strip_prefix("/codexhub-thread-")
+        .or_else(|| command.strip_prefix('/'))
         .and_then(|value| value.parse::<usize>().ok())
     else {
         return Ok(false);
@@ -1188,11 +1656,28 @@ async fn handle_thread_list_text_reply(
 async fn handle_wechat_approval_text_reply(
     state: &SharedState,
     outbound_tx: &ImOutboundSender,
-    adapter: &WechatAdapter,
+    adapter: &dyn TextChatAdapter,
     message: &InboundMessage,
     command: &str,
 ) -> Result<()> {
-    match resolve_approval_reply(state, message, command).await {
+    handle_approval_outcome(
+        state,
+        outbound_tx,
+        adapter,
+        message,
+        resolve_approval_reply(state, message, command).await,
+    )
+    .await
+}
+
+async fn handle_approval_outcome(
+    state: &SharedState,
+    outbound_tx: &ImOutboundSender,
+    adapter: &dyn TextChatAdapter,
+    message: &InboundMessage,
+    outcome: ApprovalReplyOutcome,
+) -> Result<()> {
+    match outcome {
         ApprovalReplyOutcome::Ready {
             pending, decision, ..
         } => {
@@ -1387,6 +1872,22 @@ fn menu_command(text: &str) -> Option<String> {
     }
 }
 
+fn wecom_card_command(text: &str) -> Option<String> {
+    let text = text.trim();
+    match text {
+        "创建新会话" | "Create new session" => Some("/codexhub-new".to_string()),
+        "恢复历史会话" | "Restore history session" => Some("/codexhub-history".to_string()),
+        "下一页" | "Next" => Some("/codexhub-next".to_string()),
+        "返回" | "Back" => Some("/codexhub-back".to_string()),
+        _ => text
+            .strip_prefix("选择会话 ")
+            .or_else(|| text.strip_prefix("Select session "))
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| *value > 0)
+            .map(|value| format!("/codexhub-thread-{value}")),
+    }
+}
+
 fn truncate_line(text: &str, max_chars: usize) -> String {
     let text = text.replace('\r', " ").replace('\n', " ");
     if text.chars().count() <= max_chars {
@@ -1402,7 +1903,7 @@ fn truncate_line(text: &str, max_chars: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{command, menu_command};
+    use super::{command, menu_command, wecom_card_command};
 
     #[test]
     fn command_keeps_bare_numbers_as_user_text() {
@@ -1422,5 +1923,17 @@ mod tests {
         assert_eq!(menu_command("p"), Some("/prev".to_string()));
         assert_eq!(menu_command("new"), None);
         assert_eq!(menu_command("恢复历史"), None);
+    }
+
+    #[test]
+    fn wecom_card_command_hides_internal_slash_commands() {
+        assert_eq!(
+            wecom_card_command("恢复历史会话"),
+            Some("/codexhub-history".to_string())
+        );
+        assert_eq!(
+            wecom_card_command("选择会话 2"),
+            Some("/codexhub-thread-2".to_string())
+        );
     }
 }

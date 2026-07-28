@@ -43,6 +43,7 @@ pub struct AppState {
     pub wechat_recovery: Mutex<WechatRecoveryState>,
     pub im_accounts: Mutex<HashMap<String, ImAccountRuntimeState>>,
     pub wechat_onboard: Mutex<Option<WechatOnboardSession>>,
+    pub wecom_onboard: Mutex<Option<WecomOnboardSession>>,
     pub shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
 }
 
@@ -323,6 +324,13 @@ pub struct WechatOnboardSession {
     pub current_api_base_url: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct WecomOnboardSession {
+    pub session_key: String,
+    pub scode: String,
+    pub started_at_ms: u128,
+}
+
 impl AppState {
     pub fn new(
         config_path: PathBuf,
@@ -352,6 +360,7 @@ impl AppState {
             wechat_recovery: Mutex::new(WechatRecoveryState::default()),
             im_accounts: Mutex::new(HashMap::new()),
             wechat_onboard: Mutex::new(None),
+            wecom_onboard: Mutex::new(None),
             shutdown_tx: Mutex::new(shutdown_tx),
         })
     }

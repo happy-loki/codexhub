@@ -1,39 +1,39 @@
-CodexHub v0.4.12
+CodexHub v0.4.13
 
-本次版本重点完善第三方模型对 Codex 本地工具发现 `tool_search` 的支持，修复 Grok 在工具发现后的后续轮次中可能出现协议不兼容的问题。
+本次版本重点新增企业微信接入，完善第三方模型工具协议与 Anthropic 缓存，并修复新版 Codex App 中本地精选插件目录无法进入的问题。
 
-## DeepSeek 工具发现
+## 企业微信接入
 
-- 为 `deepseek-v4-pro` 和 `deepseek-v4-flash` 开启 Codex 本地工具搜索能力。
-- 复用现有 Responses 与 Chat Completions 双向转换，支持工具声明、工具发现结果、动态 namespace 工具以及流式工具调用。
-- 保持 DeepSeek 现有 developer、thinking、JSON 输出和 reasoning 兼容策略不变。
+- 新增企业微信 AI Bot WebSocket 接入和扫码配置流程。
+- 支持私聊与群聊文本消息、流式回复、最终回复以及图片和文件收发。
+- 支持新建会话、恢复历史会话、切换模型和工作目录等交互卡片。
+- 支持 Codex 审批模板卡片，可直接在企业微信内处理审批请求。
+- 个人微信与企业微信在 GUI 中并列展示，并使用独立连接状态和企业微信官方图标。
 
-## Grok 双向协议兼容
+## IM 稳定性与体验
 
-- 将 Codex 原生 `tool_search` 声明和 `tool_choice` 转换为 Grok 可接受的普通 function。
-- 将 `tool_search_output.tools` 合并到下一轮工具列表，并继续处理 namespace 和自定义工具名称。
-- 将历史 `tool_search_call` / `tool_search_output` 转换为 Grok Responses 可接受的 `function_call` / `function_call_output`。
-- 将 Grok 返回的 `function_call(name=tool_search)` 在 JSON 和 SSE 回程中恢复为 Codex 原生 `tool_search_call`。
-- 修复工具发现完成后第二轮请求可能因 Grok 不认识 Codex 原生 item 而失败的问题。
+- 统一飞书、Telegram、微信和企业微信的文本适配与出站消息处理。
+- 完善 IM 路由、会话列表和运行状态管理，避免不同平台消息状态互相干扰。
+- 优化微信长回复、菜单指令、图片处理和流式消息合并。
+- 补充企业微信用户与群聊白名单配置，并纳入诊断导出。
 
-## 协议边界
+## 第三方模型工具协议
 
-- OpenAI Responses 和 Responses Lite 继续保持原生透传，不因第三方适配丢失新字段。
-- `tool_search` 仅表示 Codex 本地延迟工具发现，不等同于 hosted `web_search` 或客户端 `web.run`。
-- 本次版本不改变现有联网搜索和图片生成策略。
+- Anthropic 请求在 tools 尾部增加缓存断点，提升稳定工具定义的缓存命中率。
+- 规范化 Grok 工具搜索结果，并兼容 apply_patch 等自定义工具的历史回放。
+- DeepSeek 请求自动去重同名工具，修复跨模型会话中 `Tool names must be unique` 错误。
+- OpenAI Responses 和 Responses Lite 继续保持原生透传，不改写未来字段。
 
-## 文档
+## Codex App 插件目录
 
-- 新增第三方 Provider `tool_search` 兼容方案文档。
-- 补充 Grok Responses 工具适配和 Provider Adapter 设计说明。
+- 适配 Codex App 26.721.4979 的新版插件页面和 React 内存路由。
+- 保留本地 `openai-curated` 精选插件目录，并排除不需要的远程市场目录。
+- 在已安装插件管理页增加“浏览插件”入口，可进入 Codex 官方目录页查看和安装完整精选插件。
+- 延长冷启动时插件缓存刷新窗口，避免 renderer 挂载较慢时只显示少量已安装插件。
 
 ## 验证
 
-- `cargo fmt` 通过。
-- AI Gateway 全部 354 个相关测试通过。
-- Grok 工具声明、历史回放、JSON 回程和 SSE 回程均已增加专项测试。
-
-## 当前边界
-
-- 本版完成网关级协议转换和自动化测试；不同第三方上游对 function schema 的实现仍可能存在差异，建议按实际渠道进行端到端验证。
-- hosted `web_search`、`web.run` 与 `tool_search` 保持彼此独立，不进行语义混用。
+- `cargo fmt --all -- --check` 通过。
+- `cargo test --bin codexhub` 通过：568 passed，2 ignored。
+- `cargo check --features gui --bin codexhub` 通过。
+- 已在 Windows Codex App 26.721.4979 中验证插件目录入口和完整精选插件展示。

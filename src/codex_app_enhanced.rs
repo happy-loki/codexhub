@@ -19,11 +19,11 @@ const CODEX_APP_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const EARLY_ATTACH_TIMEOUT: Duration = Duration::from_secs(8);
 const EARLY_ATTACH_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const ENHANCED_INJECTION_TIMEOUT: Duration = Duration::from_secs(45);
-// The injected script retries internally for about 24 seconds. Re-run it only
+// The injected script retries internally for about 42 seconds. Re-run it only
 // after that window so a cold renderer does not accumulate retry timers.
-const ENHANCED_SCRIPT_RETRY_INTERVAL: Duration = Duration::from_secs(26);
+const ENHANCED_SCRIPT_RETRY_INTERVAL: Duration = Duration::from_secs(43);
 const ENHANCED_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const ENHANCED_SCRIPT_VERSION: u64 = 16;
+const ENHANCED_SCRIPT_VERSION: u64 = 19;
 type CdpSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 #[derive(Default)]
@@ -1183,6 +1183,8 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     pluginCatalogCacheRefreshInFlight: false,
     pluginCatalogCacheRefreshed: false,
     pluginCatalogCacheRefreshError: null,
+    pluginDirectoryLinkInstalled: false,
+    pluginDirectoryLinkError: null,
   }};
   window[MARKER] = state;
 
@@ -1932,9 +1934,9 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     const queryClient = findReactQueryClient();
     if (!queryClient) {{
       state.pluginCatalogCacheRefreshAttempts += 1;
-      if (state.pluginCatalogCacheRefreshAttempts < 120) {{
+      if (state.pluginCatalogCacheRefreshAttempts < 240) {{
         setTimeout(refreshPluginCatalogCache,
-          state.pluginCatalogCacheRefreshAttempts < 80 ? 25 : 100);
+          state.pluginCatalogCacheRefreshAttempts < 80 ? 25 : 250);
       }} else {{
         state.pluginCatalogCacheRefreshError = "React Query client unavailable";
       }}
@@ -1996,6 +1998,101 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
   state.pluginCatalogBridgeInstalled = true;
   state.refreshPluginCatalogCache = refreshPluginCatalogCache;
   queueMicrotask(refreshPluginCatalogCache);
+
+  const PLUGIN_DIRECTORY_LINK_ID = "codexhub-plugin-directory-link";
+  let pluginDirectoryLinkScheduled = false;
+  const findReactRouterNavigator = () => {{
+    const elements = document.querySelectorAll("button,main,[role='main']");
+    for (const element of elements) {{
+      const reactKey = Object.getOwnPropertyNames(element).find((name) =>
+        name.startsWith("__reactFiber$") || name.startsWith("__reactInternalInstance$"));
+      if (!reactKey) continue;
+      let fiber = element[reactKey];
+      for (let level = 0; fiber && level < 300; level += 1, fiber = fiber.return) {{
+        for (const value of [fiber.memoizedProps, fiber.pendingProps, fiber.memoizedState]) {{
+          if (value?.navigator && typeof value.navigator.push === "function") {{
+            return value.navigator;
+          }}
+        }}
+        for (let dependency = fiber.dependencies?.firstContext;
+          dependency;
+          dependency = dependency.next) {{
+          const value = dependency.memoizedValue;
+          if (value?.navigator && typeof value.navigator.push === "function") {{
+            return value.navigator;
+          }}
+        }}
+      }}
+    }}
+    return null;
+  }};
+  const openPluginDirectory = () => {{
+    try {{
+      const navigator = findReactRouterNavigator();
+      if (!navigator) throw new Error("React Router navigator unavailable");
+      navigator.push("/plugins");
+      state.pluginDirectoryLinkError = null;
+    }} catch (error) {{
+      state.pluginDirectoryLinkError = String(error?.stack ?? error);
+    }}
+  }};
+  const installPluginDirectoryLink = () => {{
+    pluginDirectoryLinkScheduled = false;
+    try {{
+      const existingLink = document.getElementById(PLUGIN_DIRECTORY_LINK_ID);
+      const searchInput = document.getElementById("plugins-page-manage-search");
+      if (!searchInput) {{
+        existingLink?.remove();
+        state.pluginDirectoryLinkInstalled = false;
+        return;
+      }}
+      if (existingLink?.isConnected) {{
+        const isChinese = document.documentElement.lang.toLowerCase().startsWith("zh");
+        const label = isChinese ? "浏览插件" : "Browse plugins";
+        if (existingLink.textContent !== label) existingLink.textContent = label;
+        return;
+      }}
+      const searchContainer = searchInput?.parentElement;
+      const toolbar = searchContainer?.parentElement;
+      if (!(toolbar instanceof HTMLElement) || !(searchContainer instanceof HTMLElement)) return;
+      const link = document.createElement("button");
+      link.id = PLUGIN_DIRECTORY_LINK_ID;
+      link.type = "button";
+      link.textContent = document.documentElement.lang.toLowerCase().startsWith("zh")
+        ? "浏览插件"
+        : "Browse plugins";
+      link.setAttribute("aria-label", link.textContent);
+      link.style.cssText = [
+        "height:32px",
+        "padding:0 12px",
+        "border:1px solid var(--color-token-border-default, rgba(0,0,0,.14))",
+        "border-radius:6px",
+        "background:var(--color-token-button-secondary-background, transparent)",
+        "color:var(--color-token-text-primary, inherit)",
+        "font:inherit",
+        "font-size:14px",
+        "cursor:pointer",
+        "white-space:nowrap",
+      ].join(";");
+      link.addEventListener("click", openPluginDirectory);
+      toolbar.insertBefore(link, searchContainer);
+      state.pluginDirectoryLinkInstalled = true;
+      state.pluginDirectoryLinkError = null;
+    }} catch (error) {{
+      state.pluginDirectoryLinkError = String(error?.stack ?? error);
+    }}
+  }};
+  const schedulePluginDirectoryLink = () => {{
+    if (pluginDirectoryLinkScheduled) return;
+    pluginDirectoryLinkScheduled = true;
+    queueMicrotask(installPluginDirectoryLink);
+  }};
+  new MutationObserver(schedulePluginDirectoryLink).observe(document.documentElement, {{
+    childList: true,
+    subtree: true,
+  }});
+  window.addEventListener("popstate", schedulePluginDirectoryLink);
+  schedulePluginDirectoryLink();
 
   Storage.prototype.getItem = function(key) {{
     const raw = originalGetItem.call(this, key);
@@ -2582,7 +2679,13 @@ mod tests {
         assert!(script.contains("const modelIsV2"));
         assert!(script.contains("installStorePatch"));
         assert!(script.contains("patchCachedI18nLayer"));
-        assert!(script.contains("SCRIPT_VERSION = 16"));
+        assert!(script.contains("SCRIPT_VERSION = 19"));
+        assert!(script.contains("state.pluginCatalogCacheRefreshAttempts < 240"));
+        assert!(script.contains("state.pluginCatalogCacheRefreshAttempts < 80 ? 25 : 250"));
+        assert!(script.contains("PLUGIN_DIRECTORY_LINK_ID"));
+        assert!(script.contains("plugins-page-manage-search"));
+        assert!(script.contains("findReactRouterNavigator"));
+        assert!(script.contains("navigator.push(\"/plugins\")"));
         assert!(script.contains("http://127.0.0.1:3847/codex-app/statsig/v1/initialize"));
         assert!(script.contains("installLocalInitializePatch"));
         assert!(script.contains("_initializeUrlConfig"));

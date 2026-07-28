@@ -118,6 +118,15 @@ pub fn router(state: SharedState) -> Router {
             post(onboarding::wechat_onboard_poll),
         )
         .route("/api/wechat/bot", get(im_api::wechat_bot_status))
+        .route(
+            "/api/wecom/onboard/start",
+            post(onboarding::wecom_onboard_start),
+        )
+        .route(
+            "/api/wecom/onboard/poll",
+            post(onboarding::wecom_onboard_poll),
+        )
+        .route("/api/wecom/bot", get(im_api::wecom_bot_status))
         .route("/api/events", get(events))
         .merge(plugins::router())
         .merge(remote_control_backend::router())
@@ -307,6 +316,7 @@ struct RemoteControlBackendStatusResponse {
     feishu_configured: bool,
     telegram_configured: bool,
     wechat_configured: bool,
+    wecom_configured: bool,
     reason: Option<String>,
 }
 
@@ -318,6 +328,7 @@ async fn remote_control_backend_status(
     let feishu_configured = im_api::feishu_configured(&config);
     let telegram_configured = im_api::telegram_configured(&config);
     let wechat_configured = im_api::wechat_configured(&config);
+    let wecom_configured = im_api::wecom_configured(&config);
     let im_configured = im_api::im_bridge_configured(&config);
     let reason = if !config.bridge.enabled {
         Some("bridge disabled".to_string())
@@ -339,6 +350,7 @@ async fn remote_control_backend_status(
         feishu_configured,
         telegram_configured,
         wechat_configured,
+        wecom_configured,
         reason,
     })
 }

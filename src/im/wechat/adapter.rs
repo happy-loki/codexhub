@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use anyhow::Result;
+use async_trait::async_trait;
 use tokio::time::{Duration, sleep};
 
 use crate::{
@@ -8,6 +9,7 @@ use crate::{
 };
 
 use super::{api::WechatApi, store};
+use crate::im::core::text_adapter::TextChatAdapter;
 
 pub(crate) const WECHAT_TEXT_CHUNK_CHARS: usize = 3500;
 const WECHAT_CHUNK_DELAY_MS: u64 = 120;
@@ -168,6 +170,19 @@ impl WechatAdapter {
             ),
         );
         Ok(message_id)
+    }
+}
+
+#[async_trait]
+impl TextChatAdapter for WechatAdapter {
+    async fn send_text(
+        &self,
+        state: &SharedState,
+        account_id: &str,
+        target: &str,
+        text: &str,
+    ) -> Result<String> {
+        WechatAdapter::send_text(self, state, account_id, target, text).await
     }
 }
 

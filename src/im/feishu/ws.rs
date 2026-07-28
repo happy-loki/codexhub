@@ -404,6 +404,8 @@ async fn handle_event(
         approval_request_key: None,
         action: None,
         card_message_id: None,
+        callback_req_id: None,
+        callback_kind: None,
         attachments,
     })
     .await
@@ -625,6 +627,8 @@ async fn handle_card_action_event(
             .context
             .as_ref()
             .and_then(|context| context.open_message_id.clone()),
+        callback_req_id: None,
+        callback_kind: None,
         attachments: vec![],
     })
     .await

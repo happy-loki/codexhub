@@ -231,6 +231,8 @@ async fn inbound_from_message(
         approval_request_key: None,
         action: None,
         card_message_id: None,
+        callback_req_id: None,
+        callback_kind: None,
         attachments: vec![],
     }))
 }

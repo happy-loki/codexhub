@@ -15,7 +15,6 @@ use crate::{
     remote_control_backend,
 };
 
-const THREAD_HISTORY_PAGE_SIZE: u32 = 8;
 const THREAD_LOADED_LIMIT: u32 = 64;
 
 #[derive(Debug, Clone)]
@@ -65,6 +64,7 @@ pub(crate) async fn load_thread_routing_page(
     existing_request: Option<&ThreadRoutingRequestState>,
     cursor: Option<&str>,
     page: usize,
+    page_size: u32,
 ) -> Result<ThreadRoutingPage> {
     let request_id = existing_request
         .map(|request| request.request_id.clone())
@@ -105,7 +105,7 @@ pub(crate) async fn load_thread_routing_page(
         state,
         &client_key,
         cursor,
-        Some(THREAD_HISTORY_PAGE_SIZE),
+        Some(page_size),
         None,
         model_provider_filter.as_deref(),
     )

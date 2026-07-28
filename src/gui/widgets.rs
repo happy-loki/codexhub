@@ -27,6 +27,7 @@ pub(super) struct ImStatusPanel {
     pub(super) feishu: ImChannelRow,
     pub(super) telegram: ImChannelRow,
     pub(super) wechat: ImChannelRow,
+    pub(super) wecom: ImChannelRow,
 }
 
 #[derive(Clone, Copy)]
@@ -44,6 +45,7 @@ pub(super) enum ImChannelKind {
     Feishu,
     Telegram,
     Wechat,
+    Wecom,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
@@ -349,7 +351,7 @@ fn build_status_panel<W: WxWidget>(
 pub(super) fn im_status_panel<W: WxWidget>(parent: &W, text: GuiText) -> ImStatusPanel {
     let panel = Panel::builder(parent).build();
     panel.set_background_color(theme::theme().bg_app);
-    panel.set_min_size(Size::new(260, 156));
+    panel.set_min_size(Size::new(520, 156));
 
     let sizer = BoxSizer::builder(Orientation::Vertical).build();
     let feishu = im_channel_row(
@@ -360,13 +362,22 @@ pub(super) fn im_status_panel<W: WxWidget>(parent: &W, text: GuiText) -> ImStatu
         text,
     );
     let telegram = im_channel_row(&panel, &sizer, ImChannelKind::Telegram, "Telegram", text);
+    let wechat_row = BoxSizer::builder(Orientation::Horizontal).build();
     let wechat = im_channel_row(
         &panel,
-        &sizer,
+        &wechat_row,
         ImChannelKind::Wechat,
         text.wechat_label(),
         text,
     );
+    let wecom = im_channel_row(
+        &panel,
+        &wechat_row,
+        ImChannelKind::Wecom,
+        text.wecom_label(),
+        text,
+    );
+    sizer.add_sizer(&wechat_row, 1, SizerFlag::Expand, 0);
 
     panel.set_sizer(sizer, true);
     ImStatusPanel {
@@ -374,6 +385,7 @@ pub(super) fn im_status_panel<W: WxWidget>(parent: &W, text: GuiText) -> ImStatu
         feishu,
         telegram,
         wechat,
+        wecom,
     }
 }
 
@@ -655,6 +667,21 @@ fn render_im_channel_icon_bitmap(kind: ImChannelKind, disabled: bool, size: usiz
                 svg_brand_bitmap(
                     "wechat-logo.svg",
                     include_bytes!("../../packaging/brand/wechat-logo.svg"),
+                    size,
+                )
+            }
+        }
+        ImChannelKind::Wecom => {
+            if disabled {
+                disabled_svg_brand_bitmap(
+                    "wecom-logo.svg",
+                    include_bytes!("../../packaging/brand/wecom-logo.svg"),
+                    size,
+                )
+            } else {
+                svg_brand_bitmap(
+                    "wecom-logo.svg",
+                    include_bytes!("../../packaging/brand/wecom-logo.svg"),
                     size,
                 )
             }
@@ -961,6 +988,7 @@ pub(super) fn set_im_channel_row(row: &ImChannelRow, state: &str, detail: &str, 
     let t = theme::theme();
     let tone_colour = tone.colour();
     let muted = matches!(tone, StateTone::Muted);
+    let disconnected = !matches!(tone, StateTone::Ok);
     let name_colour = if muted { t.ink_muted } else { t.ink_secondary };
     if row.state.get_label() == state
         && row.detail.get_label() == detail
@@ -969,10 +997,8 @@ pub(super) fn set_im_channel_row(row: &ImChannelRow, state: &str, detail: &str, 
     {
         return;
     }
-    if row.name.get_foreground_color() != name_colour {
-        row.icon
-            .set_bitmap(&im_channel_icon_bitmap(row.kind, muted, 24));
-    }
+    row.icon
+        .set_bitmap(&im_channel_icon_bitmap(row.kind, disconnected, 24));
     row.name.set_foreground_color(name_colour);
     row.marker.set_foreground_color(tone_colour);
     row.state.set_label(state);

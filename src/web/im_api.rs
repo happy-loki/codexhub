@@ -104,6 +104,18 @@ pub(super) async fn set_im_channel_enabled(
                 }
                 config.wechat.enabled = request.enabled;
             }
+            "wecom" => {
+                if request.enabled && !wecom_configured(&config) {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(json!({ "ok": false, "error": "WeCom is not configured" })),
+                    );
+                }
+                for account in &mut config.wecom_accounts {
+                    account.enabled = request.enabled;
+                }
+                config.wecom.enabled = request.enabled;
+            }
             _ => {
                 return (
                     StatusCode::BAD_REQUEST,
@@ -348,7 +360,7 @@ pub(super) async fn start_bridge_task(
             .push_event(
                 "warn",
                 "bridge_waiting_for_im_config",
-                "bridge is waiting for Feishu, Telegram, or WeChat configuration",
+                "bridge is waiting for Feishu, Telegram, WeChat, or WeCom configuration",
             )
             .await;
         return false;
@@ -426,6 +438,13 @@ pub(super) fn wechat_configured(config: &AppConfig) -> bool {
         .any(|account| account.is_configured())
 }
 
+pub(super) fn wecom_configured(config: &AppConfig) -> bool {
+    config
+        .effective_wecom_accounts()
+        .iter()
+        .any(|account| account.is_configured())
+}
+
 fn feishu_active(config: &AppConfig) -> bool {
     config
         .effective_feishu_accounts()
@@ -447,8 +466,18 @@ fn wechat_active(config: &AppConfig) -> bool {
         .any(|account| account.is_active())
 }
 
+fn wecom_active(config: &AppConfig) -> bool {
+    config
+        .effective_wecom_accounts()
+        .iter()
+        .any(|account| account.is_active())
+}
+
 pub(super) fn im_bridge_configured(config: &AppConfig) -> bool {
-    feishu_active(config) || telegram_active(config) || wechat_active(config)
+    feishu_active(config)
+        || telegram_active(config)
+        || wechat_active(config)
+        || wecom_active(config)
 }
 
 fn im_account_items(
@@ -488,6 +517,17 @@ fn im_account_items(
             account.enabled,
             account.is_configured(),
             !account.bot_token.trim().is_empty(),
+            runtime,
+        ));
+    }
+    for account in config.effective_wecom_accounts() {
+        accounts.push(im_account_item(
+            ImPlatformKind::Wecom,
+            &account.account_id,
+            non_empty_string(&account.display_name).or_else(|| Some("企业微信机器人".to_string())),
+            account.enabled,
+            account.is_configured(),
+            !account.secret.trim().is_empty(),
             runtime,
         ));
     }
@@ -540,6 +580,7 @@ fn set_legacy_im_account_enabled(
         "wechat" if config.wechat.account_id.trim() == account_id => {
             config.wechat.enabled = enabled
         }
+        "wecom" if config.wecom.account_id.trim() == account_id => config.wecom.enabled = enabled,
         _ => {}
     }
 }
@@ -562,6 +603,9 @@ fn clear_legacy_im_account(config: &mut AppConfig, platform: &str, account_id: &
         }
         "wechat" if config.wechat.account_id.trim() == account_id => {
             config.wechat = Default::default();
+        }
+        "wecom" if config.wecom.account_id.trim() == account_id => {
+            config.wecom = Default::default();
         }
         _ => {}
     }
@@ -606,6 +650,7 @@ fn im_platform_from_key(platform: &str) -> Option<ImPlatformKind> {
         "feishu" => Some(ImPlatformKind::Feishu),
         "telegram" => Some(ImPlatformKind::Telegram),
         "wechat" => Some(ImPlatformKind::Wechat),
+        "wecom" => Some(ImPlatformKind::Wecom),
         _ => None,
     }
 }
@@ -921,6 +966,58 @@ pub(super) async fn wechat_bot_status(State(state): State<SharedState>) -> Json<
         last_error: wechat.last_error,
         last_event_at_ms: wechat.last_event_at_ms,
         last_inbound_at_ms: wechat.last_inbound_at_ms,
+    })
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct WecomBotStatus {
+    configured: bool,
+    enabled: bool,
+    display_name: Option<String>,
+    account_id: Option<String>,
+    bot_id: Option<String>,
+    connecting: bool,
+    connected: bool,
+    last_error: Option<String>,
+    last_event_at_ms: Option<u128>,
+    last_inbound_at_ms: Option<u128>,
+}
+
+pub(super) async fn wecom_bot_status(State(state): State<SharedState>) -> Json<WecomBotStatus> {
+    let config = state.config.lock().await.clone();
+    let account = config.effective_wecom_accounts().into_iter().next();
+    let runtime = account.as_ref().and_then(|account| {
+        let key = im_account_key(ImPlatformKind::Wecom, &account.account_id);
+        state
+            .im_accounts
+            .try_lock()
+            .ok()
+            .and_then(|items| items.get(&key).cloned())
+    });
+    Json(WecomBotStatus {
+        configured: account
+            .as_ref()
+            .is_some_and(|account| account.is_configured()),
+        enabled: account.as_ref().is_some_and(|account| account.enabled),
+        display_name: account
+            .as_ref()
+            .and_then(|account| non_empty_string(&account.display_name)),
+        account_id: account
+            .as_ref()
+            .and_then(|account| non_empty_string(&account.account_id)),
+        bot_id: account
+            .as_ref()
+            .and_then(|account| non_empty_string(&account.bot_id)),
+        connecting: runtime.as_ref().is_some_and(|runtime| runtime.connecting),
+        connected: runtime.as_ref().is_some_and(|runtime| runtime.connected),
+        last_error: runtime
+            .as_ref()
+            .and_then(|runtime| runtime.last_error.clone()),
+        last_event_at_ms: runtime
+            .as_ref()
+            .and_then(|runtime| runtime.last_event_at_ms),
+        last_inbound_at_ms: runtime.and_then(|runtime| runtime.last_inbound_at_ms),
     })
 }
 

@@ -4,13 +4,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::{
-    app_state::{SharedState, WechatOnboardSession},
+    app_state::{SharedState, WechatOnboardSession, WecomOnboardSession},
     im::feishu::{FeishuApi, FeishuSettings},
     im::wechat::{
         api::WechatApi,
         store as wechat_store,
         types::{DEFAULT_WECHAT_API_BASE, WechatSettings},
     },
+    im::wecom::onboarding::{self as wecom_onboarding, QrPoll},
 };
 
 use super::im_api;
@@ -200,6 +201,7 @@ pub(super) async fn feishu_onboard_poll(
 }
 
 const WECHAT_ONBOARD_TTL_MS: u128 = 5 * 60_000;
+const WECOM_ONBOARD_TTL_MS: u128 = 5 * 60_000;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -458,6 +460,135 @@ pub(super) async fn wechat_onboard_poll(
             },
         })),
     )
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WecomOnboardStartResponse {
+    session_key: String,
+    qrcode_url: String,
+    qr_svg: String,
+    expires_in: u64,
+    interval: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct WecomOnboardPollRequest {
+    session_key: String,
+}
+
+pub(super) async fn wecom_onboard_start(State(state): State<SharedState>) -> impl IntoResponse {
+    let http_client = crate::outbound_http::get();
+    match wecom_onboarding::start(&http_client).await {
+        Ok(qr) => {
+            let session_key = format!("wecom-onboard-{}", unix_now_millis());
+            let qr_svg = build_qr_svg(&qr.auth_url).unwrap_or_default();
+            *state.wecom_onboard.lock().await = Some(WecomOnboardSession {
+                session_key: session_key.clone(),
+                scode: qr.scode,
+                started_at_ms: unix_now_millis(),
+            });
+            state
+                .push_event("info", "wecom_onboard_started", "scan flow started")
+                .await;
+            (
+                StatusCode::OK,
+                Json(json!(WecomOnboardStartResponse {
+                    session_key,
+                    qrcode_url: qr.auth_url,
+                    qr_svg,
+                    expires_in: (WECOM_ONBOARD_TTL_MS / 1000) as u64,
+                    interval: 3,
+                })),
+            )
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "error": err.to_string() })),
+        ),
+    }
+}
+
+pub(super) async fn wecom_onboard_poll(
+    State(state): State<SharedState>,
+    Json(request): Json<WecomOnboardPollRequest>,
+) -> impl IntoResponse {
+    let Some(session) = state.wecom_onboard.lock().await.clone() else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "done": false, "error": "missing_session" })),
+        );
+    };
+    if session.session_key != request.session_key {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "done": false, "error": "invalid_session" })),
+        );
+    }
+    if unix_now_millis().saturating_sub(session.started_at_ms) > WECOM_ONBOARD_TTL_MS {
+        *state.wecom_onboard.lock().await = None;
+        return (
+            StatusCode::OK,
+            Json(json!({ "done": false, "status": "expired", "error": "expired" })),
+        );
+    }
+
+    let http_client = crate::outbound_http::get();
+    match wecom_onboarding::poll(&http_client, &session.scode).await {
+        Ok(QrPoll::Pending(status)) => (
+            StatusCode::OK,
+            Json(json!({ "done": false, "status": status })),
+        ),
+        Ok(QrPoll::Success { bot_id, secret }) => {
+            let account_id = bot_id.clone();
+            {
+                let mut config = state.config.lock().await;
+                config.migrate_legacy_im_accounts();
+                let mut account = config.wecom_account(&account_id).unwrap_or_default();
+                account.enabled = true;
+                account.account_id = account_id.clone();
+                account.bot_id = bot_id;
+                account.secret = secret;
+                if account.display_name.trim().is_empty() {
+                    account.display_name = "企业微信机器人".to_string();
+                }
+                config.upsert_wecom_account(account.clone());
+                if !config.wecom.is_configured() || config.wecom.account_id == account_id {
+                    config.wecom = account;
+                }
+                config.bridge.enabled = true;
+                if let Err(err) = config.save(&state.config_path) {
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(json!({ "done": false, "error": err.to_string() })),
+                    );
+                }
+            }
+            *state.wecom_onboard.lock().await = None;
+            state
+                .push_event(
+                    "info",
+                    "wecom_onboard_completed",
+                    format!("account={account_id}"),
+                )
+                .await;
+            im_api::start_bridge_task(
+                &state,
+                im_api::BridgeStartMode::Restart,
+                "bridge restarted after WeCom onboarding",
+            )
+            .await;
+            (
+                StatusCode::OK,
+                Json(json!({ "done": true, "status": "success", "accountId": account_id })),
+            )
+        }
+        Err(err) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "done": false, "error": err.to_string() })),
+        ),
+    }
 }
 
 fn build_qr_svg(content: &str) -> anyhow::Result<String> {

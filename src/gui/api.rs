@@ -320,6 +320,18 @@ impl ApiClient {
         )
     }
 
+    pub(super) fn start_wecom_onboard(&self) -> Result<WecomOnboardStart, String> {
+        self.post_empty_with_timeout("/api/wecom/onboard/start", GUI_CONFIG_TIMEOUT)
+    }
+
+    pub(super) fn poll_wecom_onboard(&self, session_key: &str) -> Result<WecomOnboardPoll, String> {
+        self.post_json_with_timeout(
+            "/api/wecom/onboard/poll",
+            &serde_json::json!({ "sessionKey": session_key }),
+            GUI_WECHAT_ONBOARD_POLL_TIMEOUT,
+        )
+    }
+
     pub(super) fn get_app_config(&self) -> Result<AppConfig, String> {
         self.get_with_timeout("/api/config", GUI_CONFIG_TIMEOUT)
     }
@@ -725,4 +737,20 @@ pub(super) struct WechatOnboardPoll {
     pub(super) error: Option<serde_json::Value>,
     pub(super) need_verify_code: Option<bool>,
     pub(super) already_connected: Option<bool>,
+}
+
+#[derive(Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct WecomOnboardStart {
+    pub(super) session_key: String,
+    pub(super) qrcode_url: String,
+    pub(super) expires_in: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct WecomOnboardPoll {
+    pub(super) done: bool,
+    pub(super) status: Option<String>,
+    pub(super) error: Option<serde_json::Value>,
 }

@@ -104,6 +104,7 @@ fn im_platform_label(text: GuiText, platform: &str) -> &'static str {
         "feishu" => text.feishu_label(),
         "telegram" => "Telegram",
         "wechat" => text.wechat_label(),
+        "wecom" => text.wecom_label(),
         _ => "IM",
     }
 }
@@ -113,6 +114,7 @@ pub(super) fn im_platform_key(label: &str) -> Option<String> {
         "飞书" | "Feishu" | "feishu" => Some("feishu".to_string()),
         "Telegram" | "telegram" => Some("telegram".to_string()),
         "微信" | "WeChat" | "wechat" => Some("wechat".to_string()),
+        "企业微信" | "WeCom" | "wecom" => Some("wecom".to_string()),
         _ => None,
     }
 }
@@ -232,6 +234,8 @@ fn refresh_im_status_from_rows(text: GuiText, status: &ImStatusPanel, rows: &[[S
     set_im_channel_row(&status.telegram, state, &detail, tone);
     let (state, detail, tone) = im_channel_summary_from_rows(text, rows, "wechat");
     set_im_channel_row(&status.wechat, state, &detail, tone);
+    let (state, detail, tone) = im_channel_summary_from_rows(text, rows, "wecom");
+    set_im_channel_row(&status.wecom, state, &detail, tone);
 }
 
 fn im_channel_summary_from_rows<'a>(

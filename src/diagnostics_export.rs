@@ -316,6 +316,7 @@ fn is_im_runtime_status_key(key: &str) -> bool {
             | "wechat"
             | "wechatrecovery"
             | "wechat_recovery"
+            | "wecom"
     ) || key.starts_with("im_")
 }
 
@@ -391,6 +392,7 @@ fn is_im_diagnostics_log_line(line: &str) -> bool {
         "[im_",
         "[telegram_",
         "[wechat_",
+        "[wecom_",
         "api.telegram",
         "feishu",
         "feishu=",
@@ -401,12 +403,16 @@ fn is_im_diagnostics_log_line(line: &str) -> bool {
         "platform=feishu",
         "platform=telegram",
         "platform=wechat",
+        "platform=wecom",
         "telegram",
         "telegram=",
         "telegram_",
         "wechat",
         "wechat=",
         "wechat_",
+        "wecom",
+        "wecom=",
+        "wecom_",
     ]
     .iter()
     .any(|needle| lower.contains(needle))
@@ -483,7 +489,7 @@ fn redact_im_client_keys(line: &str) -> String {
     // IM `client_key`s look like `im:feishu:<hash>`. The hash is derived from the
     // account and chat, so it identifies a conversation. Keep the platform for
     // diagnostics, but strip the identifying suffix.
-    ["feishu", "telegram", "wechat"]
+    ["feishu", "telegram", "wechat", "wecom"]
         .iter()
         .fold(line.to_string(), |line, platform| {
             let needle = format!("im:{platform}:");
@@ -541,6 +547,8 @@ fn is_sensitive_key(key: &str) -> bool {
         || key.contains("authorization")
         || key.contains("auth")
         || key.contains("bot_token")
+        || key == "botid"
+        || key == "bot_id"
         || key == "clientid"
         || key == "client_id"
         || key.contains("client_secret")

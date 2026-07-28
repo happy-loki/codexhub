@@ -241,6 +241,7 @@ pub(crate) async fn handle_inbound_action(
     action: InboundAction,
 ) -> Result<()> {
     match action {
+        InboundAction::ThreadRouteOpen => Ok(()),
         InboundAction::ApprovalDecision { .. } => {
             let text = im_text_for_state(&state);
             send_text_to_message(&api, &message, text.unsupported_approval_callback()).await?;
@@ -762,36 +763,31 @@ async fn send_thread_routing_list(
         .as_ref()
         .and_then(|request| request.message_id.as_deref());
     let adapter = FeishuAdapter::new(api.clone());
-    let loaded_page = match load_thread_routing_page(
-        state,
-        &route,
-        existing_request.as_ref(),
-        cursor,
-        page,
-    )
-    .await
-    {
-        Ok(page) => page,
-        Err(err) => {
-            state
-                .push_event(
-                    "error",
-                    "thread_route_list_failed",
-                    format!("conversation={} err={err}", route.conversation_key),
-                )
-                .await;
-            let text = im_text_for_state(state);
-            let _ = adapter
-                .send_thread_routing_result(
-                    &route.chat_id,
-                    text.list_load_failed_title(),
-                    text.list_load_failed(),
-                    existing_message_id,
-                )
-                .await;
-            return Ok(());
-        }
-    };
+    let loaded_page =
+        match load_thread_routing_page(state, &route, existing_request.as_ref(), cursor, page, 8)
+            .await
+        {
+            Ok(page) => page,
+            Err(err) => {
+                state
+                    .push_event(
+                        "error",
+                        "thread_route_list_failed",
+                        format!("conversation={} err={err}", route.conversation_key),
+                    )
+                    .await;
+                let text = im_text_for_state(state);
+                let _ = adapter
+                    .send_thread_routing_result(
+                        &route.chat_id,
+                        text.list_load_failed_title(),
+                        text.list_load_failed(),
+                        existing_message_id,
+                    )
+                    .await;
+                return Ok(());
+            }
+        };
     let feishu_entries = loaded_page
         .entries
         .iter()
