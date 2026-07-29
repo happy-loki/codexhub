@@ -207,7 +207,7 @@ dynamic config / layer config 推荐使用间接引用:
 | `410065390` | true | external browser / Chrome 扩展入口 | 仅用于 CodexHub 当前提供的外部浏览器能力，不应再描述为通用 computer-use gate |
 | `2296472986` | true | locked computer use | 与 `1042620455` 组合控制锁屏状态下的远控能力 |
 | `824038554` | 保留官方值 | 当前 renderer 零引用 | 已从本地 bootstrap 和强制注入中删除，并清理旧 `codexhub-local` 值 |
-| `3446105535` | 保留官方值 | `suppressResumeHistoryDrain` / paginated history | 官方尚未默认开启；强开会让新任务进入 paginated 模式，并导致当前 renderer 禁止 fork、编辑和 rollback |
+| `3446105535` | true | `suppressResumeHistoryDrain` / paginated history | 已有分页历史会话依赖它恢复；关闭后 renderer 不发送读取请求，导致这些会话无法打开。代价是分页会话暂不支持 fork、编辑和 rollback |
 | `2055603567` | false 或不返回 | 官方 mobile setup / server pairing 流程 | 设为 true 会触发 `remoteControl/pairing/start`，在 CodexHub 当前本地 enrollment 模式下会报 `remote control pairing is unavailable until enrollment completes` |
 | `3936985709` | false 或不返回 | remote pair 分支反向 gate | 代码里存在 `!gate(3936985709)`；当前不依赖官方 pairing 流程，不要用它解决本地兼容问题 |
 
@@ -324,13 +324,11 @@ i18n layer。已挂载页面还需要处理 React Compiler 的 memo cache：当�
 5. Codex App `26.715.4045` renderer 已提供 gate `3446105535`，其语义名称为
    `suppressResumeHistoryDrain`。
 
-Codex App `26.721.4979.0` 已具备分页读取和 app-server paginated fork 的后端实现，但官方
-`/v1/initialize` 仍未下发该 gate，当前 renderer 也会直接禁止 paginated task 的 fork、消息编辑和
-rollback。CodexHub 因此不再强制开启它，并会删除旧响应中 `rule_id/r=codexhub-local` 的本地覆盖。
-
-这表示超长会话启动问题在官方架构上已经得到部分处理，但功能矩阵尚未闭合，不能把实验 gate 当作
-稳定修复。已经用 paginated 模式创建的任务不会因为 gate 关闭而自动转换为 legacy；本次调整只保证
-后续新任务不再被 CodexHub 强制切入该模式。
+Codex App `26.721.4979.0` 已具备分页读取和 app-server paginated fork 的后端实现，但当前 renderer
+仍会禁止 paginated task 的 fork、消息编辑和 rollback。实机回归确认，已经用 paginated 模式创建的
+任务不会因为 gate 关闭而自动转换为 legacy；关闭 gate 后，renderer 甚至不会发送 `thread/read`、
+`thread/resume` 或 `thread/turns/list`，导致这些任务无法打开。因此在官方提供迁移能力或拆分读写开关前，
+CodexHub 必须继续开启该 gate，优先保证已有会话可访问。
 
 ## 语义结构与旧版兜底 ID
 
@@ -344,7 +342,7 @@ rollback。CodexHub 因此不再强制开启它，并会删除旧响应中 `rule
 `available_models/use_hidden_models/default_model` 自动发现，语言层通过
 `enable_i18n/locale_source` 自动发现；`107580212` 和 `72216192` 只在旧 ID 本身仍存在时兜底。
 如果 schema 和兜底 ID 都不存在，本次增强启动失败关闭并保留官方状态，不会凭空创建旧配置。
-纯布尔 feature gate 没有可供安全推断的 value schema，因此 6 个必要 gate 仍是显式语义清单。
+纯布尔 feature gate 没有可供安全推断的 value schema，因此 5 个必要 gate 仍是显式语义清单。
 
 注意: i18n layer 只决定语言能力是否启用和 locale 来源。用户语言的最终值属于 Codex App
 自己的应用设置。快速启动兼容层不应伪造 `localeOverride`，也不应覆盖用户明确选择的语言；
@@ -446,10 +444,10 @@ layer_configs
 3. `410065390` 为 true。
 4. `2296472986` 为 true。
 5. `824038554` 不为 true。
-6. `3446105535` 不为 true。
+6. `3446105535` 为 true，已有分页历史会话可以打开。
 7. `2055603567` 不为 true。
 8. `3936985709` 不为 true。
-9. 本地 bootstrap 只包含 4 个已确认 gate，旧兼容集合不再被强制开启。
+9. 本地 bootstrap 只包含 5 个已确认 gate，旧兼容集合不再被强制开启。
 10. `72216192` layer 存在且 `enable_i18n=true`。
 11. 增强启动报告中的 `i18nEnabled` 为 true。
 

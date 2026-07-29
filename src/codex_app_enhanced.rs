@@ -33,7 +33,13 @@ struct RetainedCdpSessions {
 }
 
 static ENHANCED_CDP_SESSIONS: OnceLock<Mutex<RetainedCdpSessions>> = OnceLock::new();
-const SUPPORTED_FEATURE_GATES: &[&str] = &["1042620455", "4114442250", "410065390", "2296472986"];
+const SUPPORTED_FEATURE_GATES: &[&str] = &[
+    "1042620455",
+    "4114442250",
+    "410065390",
+    "2296472986",
+    "3446105535",
+];
 const LEGACY_CODEXHUB_FEATURE_GATES: &[&str] = &[
     "1834314516",
     "1714131075",
@@ -49,7 +55,6 @@ const LEGACY_CODEXHUB_FEATURE_GATES: &[&str] = &[
     "824038554",
     "410065390",
     "2296472986",
-    "3446105535",
 ];
 
 #[derive(Debug, Serialize)]
@@ -2681,9 +2686,9 @@ mod tests {
         assert!(script.contains("grok-4.5"));
         assert!(script.contains("107580212"));
         assert!(!SUPPORTED_FEATURE_GATES.contains(&"824038554"));
-        assert!(!SUPPORTED_FEATURE_GATES.contains(&"3446105535"));
+        assert!(SUPPORTED_FEATURE_GATES.contains(&"3446105535"));
         assert!(LEGACY_CODEXHUB_FEATURE_GATES.contains(&"824038554"));
-        assert!(LEGACY_CODEXHUB_FEATURE_GATES.contains(&"3446105535"));
+        assert!(!LEGACY_CODEXHUB_FEATURE_GATES.contains(&"3446105535"));
         assert!(script.contains("72216192"));
         assert!(script.contains("enable_i18n: true"));
         assert!(script.contains("response_format = \"init-v2\""));
