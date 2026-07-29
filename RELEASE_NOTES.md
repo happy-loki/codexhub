@@ -1,39 +1,25 @@
-CodexHub v0.4.13
+CodexHub v0.4.14
 
-本次版本重点新增企业微信接入，完善第三方模型工具协议与 Anthropic 缓存，并修复新版 Codex App 中本地精选插件目录无法进入的问题。
+本次版本修复 Anthropic 流式响应的 Token 统计，并适配新版 Codex App 的增强模式启动流程。
 
-## 企业微信接入
+## Anthropic 流式 Token 统计
 
-- 新增企业微信 AI Bot WebSocket 接入和扫码配置流程。
-- 支持私聊与群聊文本消息、流式回复、最终回复以及图片和文件收发。
-- 支持新建会话、恢复历史会话、切换模型和工作目录等交互卡片。
-- 支持 Codex 审批模板卡片，可直接在企业微信内处理审批请求。
-- 个人微信与企业微信在 GUI 中并列展示，并使用独立连接状态和企业微信官方图标。
+- 按 Anthropic SSE 的实际分帧语义分别合并未缓存输入、缓存读取和缓存写入 Token。
+- 保留 `message_start` 首帧报告的非零输入 Token，避免被 `message_delta` 末帧中的零值覆盖。
+- 当末帧提供非零输入 Token 时，以末帧最新快照为准，不与首帧重复相加。
+- 修复缓存数据在末帧返回时，输入 Token 总数只包含缓存量或错误显示为零的问题。
+- 补充基于真实请求日志结构的回归测试，覆盖首帧输入与末帧缓存分离上报的场景。
 
-## IM 稳定性与体验
+## Codex App 增强模式
 
-- 统一飞书、Telegram、微信和企业微信的文本适配与出站消息处理。
-- 完善 IM 路由、会话列表和运行状态管理，避免不同平台消息状态互相干扰。
-- 优化微信长回复、菜单指令、图片处理和流式消息合并。
-- 补充企业微信用户与群聊白名单配置，并纳入诊断导出。
-
-## 第三方模型工具协议
-
-- Anthropic 请求在 tools 尾部增加缓存断点，提升稳定工具定义的缓存命中率。
-- 规范化 Grok 工具搜索结果，并兼容 apply_patch 等自定义工具的历史回放。
-- DeepSeek 请求自动去重同名工具，修复跨模型会话中 `Tool names must be unique` 错误。
-- OpenAI Responses 和 Responses Lite 继续保持原生透传，不改写未来字段。
-
-## Codex App 插件目录
-
-- 适配 Codex App 26.721.4979 的新版插件页面和 React 内存路由。
-- 保留本地 `openai-curated` 精选插件目录，并排除不需要的远程市场目录。
-- 在已安装插件管理页增加“浏览插件”入口，可进入 Codex 官方目录页查看和安装完整精选插件。
-- 延长冷启动时插件缓存刷新窗口，避免 renderer 挂载较慢时只显示少量已安装插件。
+- 适配新版 Codex renderer 的 JavaScript realm 变化，修复 `MutationObserver.observe` 参数不是 `Node` 导致的 HTTP 500 启动错误。
+- 使用页面自身的 `MutationObserver` 观察插件页面，避免注入环境与页面 DOM 跨 realm 不兼容。
+- 将插件目录快捷入口改为非关键增强：即使该入口安装失败，也不会中断模型列表、中文、Statsig 和插件目录数据桥接。
+- 增强脚本版本升级至 20，确保升级后重新注入兼容脚本。
 
 ## 验证
 
 - `cargo fmt --all -- --check` 通过。
-- `cargo test --bin codexhub` 通过：568 passed，2 ignored。
-- `cargo check --features gui --bin codexhub` 通过。
-- 已在 Windows Codex App 26.721.4979 中验证插件目录入口和完整精选插件展示。
+- `cargo test --bin codexhub` 通过：569 passed，2 ignored。
+- Anthropic provider 专项测试通过：84 passed。
+- Codex App 增强模式专项测试通过：16 passed，2 ignored。

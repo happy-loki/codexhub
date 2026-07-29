@@ -23,7 +23,7 @@ const ENHANCED_INJECTION_TIMEOUT: Duration = Duration::from_secs(45);
 // after that window so a cold renderer does not accumulate retry timers.
 const ENHANCED_SCRIPT_RETRY_INTERVAL: Duration = Duration::from_secs(43);
 const ENHANCED_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const ENHANCED_SCRIPT_VERSION: u64 = 19;
+const ENHANCED_SCRIPT_VERSION: u64 = 20;
 type CdpSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 #[derive(Default)]
@@ -2087,10 +2087,24 @@ fn enhanced_statsig_script(models: &[String], backend_url: &str) -> Result<Strin
     pluginDirectoryLinkScheduled = true;
     queueMicrotask(installPluginDirectoryLink);
   }};
-  new MutationObserver(schedulePluginDirectoryLink).observe(document.documentElement, {{
-    childList: true,
-    subtree: true,
-  }});
+  try {{
+    // Keep the observer and target in the same renderer realm. Newer Codex App
+    // builds can expose the injected global and the page DOM through different
+    // realms, making a global MutationObserver reject documentElement as a Node.
+    const PageMutationObserver = document.defaultView?.MutationObserver;
+    const pluginDirectoryRoot = document.documentElement;
+    if (typeof PageMutationObserver !== "function" || !pluginDirectoryRoot) {{
+      throw new Error("Plugin directory observer is unavailable");
+    }}
+    new PageMutationObserver(schedulePluginDirectoryLink).observe(pluginDirectoryRoot, {{
+      childList: true,
+      subtree: true,
+    }});
+  }} catch (error) {{
+    // The directory shortcut is optional. A renderer compatibility issue here
+    // must not abort model, language, Statsig, or plugin catalog enhancement.
+    state.pluginDirectoryLinkError = String(error?.stack ?? error);
+  }}
   window.addEventListener("popstate", schedulePluginDirectoryLink);
   schedulePluginDirectoryLink();
 
@@ -2679,13 +2693,15 @@ mod tests {
         assert!(script.contains("const modelIsV2"));
         assert!(script.contains("installStorePatch"));
         assert!(script.contains("patchCachedI18nLayer"));
-        assert!(script.contains("SCRIPT_VERSION = 19"));
+        assert!(script.contains("SCRIPT_VERSION = 20"));
         assert!(script.contains("state.pluginCatalogCacheRefreshAttempts < 240"));
         assert!(script.contains("state.pluginCatalogCacheRefreshAttempts < 80 ? 25 : 250"));
         assert!(script.contains("PLUGIN_DIRECTORY_LINK_ID"));
         assert!(script.contains("plugins-page-manage-search"));
         assert!(script.contains("findReactRouterNavigator"));
         assert!(script.contains("navigator.push(\"/plugins\")"));
+        assert!(script.contains("document.defaultView?.MutationObserver"));
+        assert!(script.contains("Plugin directory observer is unavailable"));
         assert!(script.contains("http://127.0.0.1:3847/codex-app/statsig/v1/initialize"));
         assert!(script.contains("installLocalInitializePatch"));
         assert!(script.contains("_initializeUrlConfig"));

@@ -2722,6 +2722,42 @@ async fn streams_anthropic_text_as_responses_sse() {
 }
 
 #[tokio::test]
+async fn preserves_message_start_input_when_delta_reports_cache_usage() {
+    // Mirrors request log 22885: uncached input is reported at message_start,
+    // while the terminal delta reports cache usage and input_tokens = 0.
+    let input = stream::iter(vec![
+        Ok::<_, std::io::Error>(Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"claude-opus-5\",\"content\":[],\"usage\":{\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0,\"input_tokens\":26219,\"output_tokens\":1}}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"cache_creation_input_tokens\":617,\"cache_read_input_tokens\":45442,\"input_tokens\":0,\"output_tokens\":580}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        )),
+    ]);
+
+    let chunks = response_stream(input, "fallback-model", ToolNameMap::default())
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .map(Result::unwrap)
+        .collect::<Vec<_>>();
+    let events = parse_events_from_bytes(&chunks);
+    let completed = events
+        .iter()
+        .find(|(event, _)| event == "response.completed")
+        .unwrap();
+    let usage = &completed.1["response"]["usage"];
+
+    assert_eq!(usage["input_tokens"], 72_278);
+    assert_eq!(usage["output_tokens"], 580);
+    assert_eq!(usage["total_tokens"], 72_858);
+    assert_eq!(usage["input_tokens_details"]["cached_tokens"], 45_442);
+    assert_eq!(usage["input_tokens_details"]["cache_creation_tokens"], 617);
+}
+
+#[tokio::test]
 async fn streams_anthropic_tool_use_as_responses_sse() {
     let mut map = ToolNameMap::default();
     let encoded = map.encode_function(Some("browser"), "open page");

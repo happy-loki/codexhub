@@ -128,22 +128,51 @@ impl AnthropicStreamState {
             self.usage = Some(usage);
             return;
         };
-        merge_i64_field(existing, &usage, "input_tokens");
+        // Anthropic may report uncached input tokens in message_start, then
+        // report only cache components (with input_tokens = 0) in
+        // message_delta. Preserve and merge those components independently;
+        // replacing the aggregate would discard the start-frame input usage.
+        let existing_uncached = uncached_input_tokens(existing);
+        let incoming_uncached = uncached_input_tokens(&usage);
         merge_i64_field(existing, &usage, "output_tokens");
-        let input = existing
-            .get("input_tokens")
-            .and_then(Value::as_i64)
-            .unwrap_or(0);
+        merge_input_detail(existing, &usage, "cached_tokens");
+        merge_input_detail(existing, &usage, "cache_creation_tokens");
+        merge_input_detail(existing, &usage, "cache_creation_5m_tokens");
+        merge_input_detail(existing, &usage, "cache_creation_1h_tokens");
+        merge_output_detail(existing, &usage, "reasoning_tokens");
+
+        let uncached = if incoming_uncached != 0 || existing_uncached == 0 {
+            incoming_uncached
+        } else {
+            existing_uncached
+        };
+        let input = uncached
+            + input_detail(existing, "cached_tokens")
+            + input_detail(existing, "cache_creation_tokens");
         let output = existing
             .get("output_tokens")
             .and_then(Value::as_i64)
             .unwrap_or(0);
+        existing["input_tokens"] = json!(input);
         existing["total_tokens"] = json!(input + output);
-
-        merge_input_detail(existing, &usage, "cached_tokens");
-        merge_input_detail(existing, &usage, "cache_creation_tokens");
-        merge_output_detail(existing, &usage, "reasoning_tokens");
     }
+}
+
+fn uncached_input_tokens(usage: &Value) -> i64 {
+    usage
+        .get("input_tokens")
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
+        .saturating_sub(input_detail(usage, "cached_tokens"))
+        .saturating_sub(input_detail(usage, "cache_creation_tokens"))
+}
+
+fn input_detail(usage: &Value, field: &str) -> i64 {
+    usage
+        .get("input_tokens_details")
+        .and_then(|details| details.get(field))
+        .and_then(Value::as_i64)
+        .unwrap_or(0)
 }
 
 fn merge_input_detail(existing: &mut Value, usage: &Value, field: &str) {
