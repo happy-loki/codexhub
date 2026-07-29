@@ -1,25 +1,28 @@
-CodexHub v0.4.14
+CodexHub v0.4.15
 
-本次版本修复 Anthropic 流式响应的 Token 统计，并适配新版 Codex App 的增强模式启动流程。
+本次版本重点修复 DeepSeek 工具调用兼容性，并恢复 Codex App 已有分页历史会话的访问能力。
 
-## Anthropic 流式 Token 统计
+## DeepSeek 工具兼容
 
-- 按 Anthropic SSE 的实际分帧语义分别合并未缓存输入、缓存读取和缓存写入 Token。
-- 保留 `message_start` 首帧报告的非零输入 Token，避免被 `message_delta` 末帧中的零值覆盖。
-- 当末帧提供非零输入 Token 时，以末帧最新快照为准，不与首帧重复相加。
-- 修复缓存数据在末帧返回时，输入 Token 总数只包含缓存量或错误显示为零的问题。
-- 补充基于真实请求日志结构的回归测试，覆盖首帧输入与末帧缓存分离上报的场景。
+- Responses 转 Chat Completions 时，自动为缺少根类型的函数参数补充 `type: "object"`。
+- 保留 `$defs`、`oneOf` 等完整 JSON Schema 内容，不再因为规范化而丢失工具约束。
+- 修复 Codex App 自动化工具等 schema 根类型为空时，DeepSeek 返回 `Invalid schema for function` 的问题。
+- 增加缺失参数、已有对象类型以及复杂 schema 的回归测试。
 
-## Codex App 增强模式
+## Codex App 会话恢复
 
-- 适配新版 Codex renderer 的 JavaScript realm 变化，修复 `MutationObserver.observe` 参数不是 `Node` 导致的 HTTP 500 启动错误。
-- 使用页面自身的 `MutationObserver` 观察插件页面，避免注入环境与页面 DOM 跨 realm 不兼容。
-- 将插件目录快捷入口改为非关键增强：即使该入口安装失败，也不会中断模型列表、中文、Statsig 和插件目录数据桥接。
-- 增强脚本版本升级至 20，确保升级后重新注入兼容脚本。
+- 恢复分页历史 gate，使此前由增强模式创建的分页会话可以正常打开。
+- 修复关闭该 gate 后，点击历史会话但 renderer 不发送 `thread/read`、`thread/resume` 或 `thread/turns/list` 的问题。
+- 移除当前 renderer 已无引用的旧 gate，减少不必要的本地门控覆盖。
+- 同步更新 Statsig bootstrap、增强模式注入与兼容性文档。
+
+## 已知限制
+
+- 当前 Codex App renderer 仍明确禁止分页会话执行 fork、消息编辑和 rollback；最新版 app-server 已具备部分后端能力，但官方前端尚未开放。
+- CodexHub 本次优先保证已有会话可访问，不修改 ASAR，也不拦截 renderer 资源；相关功能等待 Codex App 官方完善。
 
 ## 验证
 
-- `cargo fmt --all -- --check` 通过。
-- `cargo test --bin codexhub` 通过：569 passed，2 ignored。
-- Anthropic provider 专项测试通过：84 passed。
-- Codex App 增强模式专项测试通过：16 passed，2 ignored。
+- `cargo fmt --check` 通过。
+- `cargo check --features gui --bin codexhub` 通过。
+- `cargo test --release --features gui` 通过：598 passed，2 ignored。
