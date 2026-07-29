@@ -97,14 +97,7 @@ fn statsig_response_headers() -> HeaderMap {
 
 fn statsig_bootstrap_payload(now_ms: u64, model_slugs: &[String]) -> Value {
     let mut feature_gates = Map::new();
-    for gate in [
-        "1042620455",
-        "4114442250",
-        "824038554",
-        "410065390",
-        "2296472986",
-        "3446105535",
-    ] {
+    for gate in ["1042620455", "4114442250", "410065390", "2296472986"] {
         feature_gates.insert(
             gate.to_string(),
             json!({
@@ -275,15 +268,8 @@ mod tests {
         assert_eq!(response["time"], 1234);
         assert_eq!(response["user"]["userID"], "user_codexhub_local");
         let gates = response["feature_gates"].as_object().unwrap();
-        assert_eq!(gates.len(), 6);
-        for gate in [
-            "1042620455",
-            "4114442250",
-            "824038554",
-            "410065390",
-            "2296472986",
-            "3446105535",
-        ] {
+        assert_eq!(gates.len(), 4);
+        for gate in ["1042620455", "4114442250", "410065390", "2296472986"] {
             assert_eq!(gates[gate]["v"], true);
         }
         for gate in [
@@ -296,6 +282,8 @@ mod tests {
             "3245360288",
             "3646210497",
             "1186680773",
+            "824038554",
+            "3446105535",
             "2055603567",
             "3936985709",
         ] {

@@ -23,7 +23,7 @@ const ENHANCED_INJECTION_TIMEOUT: Duration = Duration::from_secs(45);
 // after that window so a cold renderer does not accumulate retry timers.
 const ENHANCED_SCRIPT_RETRY_INTERVAL: Duration = Duration::from_secs(43);
 const ENHANCED_STATUS_POLL_INTERVAL: Duration = Duration::from_millis(250);
-const ENHANCED_SCRIPT_VERSION: u64 = 20;
+const ENHANCED_SCRIPT_VERSION: u64 = 21;
 type CdpSocket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
 #[derive(Default)]
@@ -33,14 +33,7 @@ struct RetainedCdpSessions {
 }
 
 static ENHANCED_CDP_SESSIONS: OnceLock<Mutex<RetainedCdpSessions>> = OnceLock::new();
-const SUPPORTED_FEATURE_GATES: &[&str] = &[
-    "1042620455",
-    "4114442250",
-    "824038554",
-    "410065390",
-    "2296472986",
-    "3446105535",
-];
+const SUPPORTED_FEATURE_GATES: &[&str] = &["1042620455", "4114442250", "410065390", "2296472986"];
 const LEGACY_CODEXHUB_FEATURE_GATES: &[&str] = &[
     "1834314516",
     "1714131075",
@@ -56,6 +49,7 @@ const LEGACY_CODEXHUB_FEATURE_GATES: &[&str] = &[
     "824038554",
     "410065390",
     "2296472986",
+    "3446105535",
 ];
 
 #[derive(Debug, Serialize)]
@@ -2686,14 +2680,17 @@ mod tests {
         assert!(script.contains("gpt-5.6-sol"));
         assert!(script.contains("grok-4.5"));
         assert!(script.contains("107580212"));
-        assert!(script.contains("3446105535"));
+        assert!(!SUPPORTED_FEATURE_GATES.contains(&"824038554"));
+        assert!(!SUPPORTED_FEATURE_GATES.contains(&"3446105535"));
+        assert!(LEGACY_CODEXHUB_FEATURE_GATES.contains(&"824038554"));
+        assert!(LEGACY_CODEXHUB_FEATURE_GATES.contains(&"3446105535"));
         assert!(script.contains("72216192"));
         assert!(script.contains("enable_i18n: true"));
         assert!(script.contains("response_format = \"init-v2\""));
         assert!(script.contains("const modelIsV2"));
         assert!(script.contains("installStorePatch"));
         assert!(script.contains("patchCachedI18nLayer"));
-        assert!(script.contains("SCRIPT_VERSION = 20"));
+        assert!(script.contains("SCRIPT_VERSION = 21"));
         assert!(script.contains("state.pluginCatalogCacheRefreshAttempts < 240"));
         assert!(script.contains("state.pluginCatalogCacheRefreshAttempts < 80 ? 25 : 250"));
         assert!(script.contains("PLUGIN_DIRECTORY_LINK_ID"));

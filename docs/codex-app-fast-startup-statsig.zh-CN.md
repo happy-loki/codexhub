@@ -194,18 +194,20 @@ dynamic config / layer config 推荐使用间接引用:
 2. 真实配置放在 `values[value_key]`。
 3. 未确认 schema 的 config 保持空对象或保守默认值。
 
-## 当前必须维护的 Gate
+## 当前维护的 Gate
 
-这些 gate 和 CodexHub 当前快速启动目标有关。
+以下结论基于 Codex App `26.721.4979.0` 的 renderer bundle 和官方
+`/v1/initialize` 响应重新审计。只有 CodexHub 当前产品能力确实依赖的 gate 才由本地设为 true；
+实验性启动优化和已经没有引用的 gate 只清理 CodexHub 旧注入，不覆盖官方值。
 
 | Gate ID | 建议值 | 作用 | 说明 |
 | --- | --- | --- | --- |
 | `1042620455` | true | remote-control / slingshot 入口 | 缺失会导致底部手机/远控入口消失 |
 | `4114442250` | true | `features.remote_connections` fallback | remote connection visibility 使用 |
-| `824038554` | true | remote/mobile/browser-use 相关 UI | 多处远控和浏览器设置使用 |
-| `410065390` | true | browser/computer use 可见性 | `use-is-plugins-enabled` 里检查外部 browser/computer use 能力 |
-| `2296472986` | true | 插件安装流程中的 remote-control / locked computer use 判断 | 影响 plugin install flow |
-| `3446105535` | true | `suppressResumeHistoryDrain` | 启动只恢复最近 5 个 turn，旧历史在用户滚动时分页加载，避免超长会话启动时被完整排空 |
+| `410065390` | true | external browser / Chrome 扩展入口 | 仅用于 CodexHub 当前提供的外部浏览器能力，不应再描述为通用 computer-use gate |
+| `2296472986` | true | locked computer use | 与 `1042620455` 组合控制锁屏状态下的远控能力 |
+| `824038554` | 保留官方值 | 当前 renderer 零引用 | 已从本地 bootstrap 和强制注入中删除，并清理旧 `codexhub-local` 值 |
+| `3446105535` | 保留官方值 | `suppressResumeHistoryDrain` / paginated history | 官方尚未默认开启；强开会让新任务进入 paginated 模式，并导致当前 renderer 禁止 fork、编辑和 rollback |
 | `2055603567` | false 或不返回 | 官方 mobile setup / server pairing 流程 | 设为 true 会触发 `remoteControl/pairing/start`，在 CodexHub 当前本地 enrollment 模式下会报 `remote control pairing is unavailable until enrollment completes` |
 | `3936985709` | false 或不返回 | remote pair 分支反向 gate | 代码里存在 `!gate(3936985709)`；当前不依赖官方 pairing 流程，不要用它解决本地兼容问题 |
 
@@ -227,7 +229,7 @@ dynamic config / layer config 推荐使用间接引用:
 | `1186680773` | 模型列表和动态工具中的 Ultra reasoning effort | 当前不属于核心兼容目标，保留官方值 |
 | `1042620455` | remote-control / slingshot 入口 | CodexHub 强制 true |
 | `4114442250` | `features.remote_connections` fallback 和侧栏远程连接状态 | CodexHub 强制 true |
-| `824038554` | 旧版远控、移动端或 browser-use 相关 UI；当前 `26.715.4045` 已无引用 | 暂时保留 true，升级时可移除验证 |
+| `824038554` | 旧版远控、移动端或 browser-use 相关 UI；当前 `26.721.4979.0` 已无引用 | 清理 CodexHub 旧值，保留官方值 |
 | `410065390` | external browser/computer-use、Chrome 扩展及移动端设置入口 | CodexHub 强制 true |
 | `2296472986` | 插件安装时的 remote-control / locked computer-use 判断 | CodexHub 强制 true |
 
@@ -322,12 +324,13 @@ i18n layer。已挂载页面还需要处理 React Compiler 的 memo cache：当�
 5. Codex App `26.715.4045` renderer 已提供 gate `3446105535`，其语义名称为
    `suppressResumeHistoryDrain`。
 
-CodexHub 在本地 bootstrap 和增强模式启动的增量 Statsig 注入中都将该 gate 设为 true。
-启用后，恢复会话只先读取最近 5 个 turn；更早历史仍保留在原 JSONL 中，用户向上滚动时再分页读取。
-这项修复不删除、不截断、不归档，也不改写会话内容。
+Codex App `26.721.4979.0` 已具备分页读取和 app-server paginated fork 的后端实现，但官方
+`/v1/initialize` 仍未下发该 gate，当前 renderer 也会直接禁止 paginated task 的 fork、消息编辑和
+rollback。CodexHub 因此不再强制开启它，并会删除旧响应中 `rule_id/r=codexhub-local` 的本地覆盖。
 
-该 gate 针对的是已经确认的超长历史启动触发路径，不能承诺消除所有 Windows 原生堆异常。若开启后
-仍在不加载该会话时崩溃，应按新的转储和时间线独立排查。
+这表示超长会话启动问题在官方架构上已经得到部分处理，但功能矩阵尚未闭合，不能把实验 gate 当作
+稳定修复。已经用 paginated 模式创建的任务不会因为 gate 关闭而自动转换为 legacy；本次调整只保证
+后续新任务不再被 CodexHub 强制切入该模式。
 
 ## 语义结构与旧版兜底 ID
 
@@ -439,14 +442,16 @@ layer_configs
 `src/remote_control_backend/compatibility.rs` 的测试需要至少断言:
 
 1. `1042620455` 为 true。
-2. `410065390` 为 true。
-3. `2296472986` 为 true。
-4. `3446105535` 为 true。
-5. `2055603567` 不为 true。
-6. `3936985709` 不为 true。
-7. 本地 bootstrap 只包含 6 个已确认 gate，旧兼容集合不再被强制开启。
-8. `72216192` layer 存在且 `enable_i18n=true`。
-9. 增强启动报告中的 `i18nEnabled` 为 true。
+2. `4114442250` 为 true。
+3. `410065390` 为 true。
+4. `2296472986` 为 true。
+5. `824038554` 不为 true。
+6. `3446105535` 不为 true。
+7. `2055603567` 不为 true。
+8. `3936985709` 不为 true。
+9. 本地 bootstrap 只包含 4 个已确认 gate，旧兼容集合不再被强制开启。
+10. `72216192` layer 存在且 `enable_i18n=true`。
+11. 增强启动报告中的 `i18nEnabled` 为 true。
 
 ### 5. 手动验证
 

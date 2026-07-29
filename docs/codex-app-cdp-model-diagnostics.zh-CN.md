@@ -325,7 +325,7 @@ Codex 接入页提供“增强模式启动 Codex”按钮。按钮只在 Codex �
 普通启动、VS Code 插件和 CLI 不经过这条 CDP 链路。增强状态只在本次 Codex App 进程期间存在，完全退出后 9335 端口和内存注入同时消失，不修改 ASAR、LevelDB 或快捷方式。
 
 实机回归结果：12 个模型全部进入 Statsig 和真实菜单，模型与 i18n ID 均由 `schema` 自动发现，
-`use_hidden_models=false`，6 个已确认 gate 全部启用，三个 adapter 均被识别，
+`use_hidden_models=false`，当前 4 个兼容 gate 全部启用，三个 adapter 均被识别，
 `compatibilityFailure=null`；`codex-primary-runtime` layer 和其他官方字段保持不变。
 
 ### Codex App 26.715.3651 启动刷新竞态
@@ -355,11 +355,13 @@ Desktop bootstrap failed to start the main app
 `0xC0000409 / FAST_FAIL_UNEXPECTED_HEAP_EXCEPTION`。
 
 当前 renderer bundle 将 Statsig gate `3446105535` 映射为
-`suppressResumeHistoryDrain`。CodexHub 现在只维护 6 个已确认 gate，其中包含该项；开启后首次恢复
-只加载最近 5 个 turn，旧历史随用户滚动分页获取。原始 JSONL 不会被删除、截断、归档或重写。
+`suppressResumeHistoryDrain`。Codex App `26.721.4979.0` 虽然已有分页历史框架，但官方初始化响应未默认
+开启该 gate；CodexHub 强开后，新任务会进入 paginated history，而当前 renderer 又会禁止此类任务
+执行 fork、消息编辑和 rollback。因此 CodexHub 不再开启该 gate，只清理旧的本地覆盖并保留官方值。
 
-同时，增强脚本会撤销旧版 CodexHub 对另外 9 个历史 gate 的本地强制值，只保留官方值；本地
-`/wham/statsig/bootstrap` 也从 14 项收敛为相同的 6 项，避免未知 gate 引入新的前端分支。
+同时，增强脚本会撤销旧版 CodexHub 对 9 个非核心历史 gate 和上述 2 个退役 gate 的本地强制值，
+只保留官方值；本地
+`/wham/statsig/bootstrap` 也从 14 项收敛为当前 4 项，避免未知或未完成的 gate 引入新的前端分支。
 
 ### 2026-07-18 Windows 蓝屏与配置全零事件
 

@@ -245,6 +245,8 @@ fn build_chat_function_object(
             function.insert("strict".to_string(), strict.clone());
         }
     }
+    let parameters = normalize_chat_function_parameters(function.remove("parameters"));
+    function.insert("parameters".to_string(), parameters);
 
     let name = function.get("name").and_then(|v| v.as_str())?;
     let encoded_name = tool_name_map.encode_function(namespace, name);
@@ -266,11 +268,25 @@ fn build_chat_tool_search_object(
     if let Some(description) = tool.get("description") {
         function.insert("description".to_string(), description.clone());
     }
-    if let Some(parameters) = tool.get("parameters") {
-        function.insert("parameters".to_string(), parameters.clone());
-    }
+    function.insert(
+        "parameters".to_string(),
+        normalize_chat_function_parameters(tool.get("parameters").cloned()),
+    );
     tool_name_map.encode_tool_search();
     Some(Value::Object(function))
+}
+
+fn normalize_chat_function_parameters(parameters: Option<Value>) -> Value {
+    let mut schema = parameters
+        .filter(Value::is_object)
+        .unwrap_or_else(|| json!({}));
+    let schema_object = schema
+        .as_object_mut()
+        .expect("function parameter schema should be an object");
+    if schema_object.get("type").is_none_or(Value::is_null) {
+        schema_object.insert("type".to_string(), json!("object"));
+    }
+    schema
 }
 
 fn build_chat_custom_tool_object(
@@ -2211,6 +2227,65 @@ mod tests {
         assert_eq!(tool["function"]["strict"], true);
         assert!(tool.get("name").is_none());
         assert!(tool.get("parameters").is_none());
+    }
+
+    #[test]
+    fn test_chat_function_schema_adds_object_type_without_losing_one_of() {
+        let mut req = make_request(vec![]);
+        req.tools = vec![json!({
+            "type": "namespace",
+            "name": "codex_app__codexns__",
+            "tools": [{
+                "type": "function",
+                "name": "automation_update",
+                "parameters": {
+                    "$defs": {
+                        "id": {"type": "string"}
+                    },
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "mode": {"const": "view"},
+                                "id": {"$ref": "#/$defs/id"}
+                            },
+                            "required": ["mode", "id"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "mode": {"const": "delete"},
+                                "id": {"$ref": "#/$defs/id"}
+                            },
+                            "required": ["mode", "id"]
+                        }
+                    ]
+                }
+            }]
+        })];
+
+        let body = build_chat_request(&req, false).unwrap();
+        let parameters = &body["tools"][0]["function"]["parameters"];
+        assert_eq!(parameters["type"], "object");
+        assert_eq!(parameters["$defs"]["id"]["type"], "string");
+        assert_eq!(parameters["oneOf"].as_array().unwrap().len(), 2);
+        assert_eq!(parameters["oneOf"][0]["required"], json!(["mode", "id"]));
+    }
+
+    #[test]
+    fn test_chat_function_schema_replaces_null_with_empty_object_schema() {
+        let mut req = make_request(vec![]);
+        req.tools = vec![json!({
+            "type": "function",
+            "name": "no_args",
+            "parameters": null
+        })];
+
+        let body = build_chat_request(&req, false).unwrap();
+        assert_eq!(
+            body["tools"][0]["function"]["parameters"],
+            json!({"type": "object"})
+        );
     }
 
     #[test]
