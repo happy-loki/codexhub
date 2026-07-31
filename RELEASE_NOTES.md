@@ -1,28 +1,33 @@
-CodexHub v0.4.15
+CodexHub v0.4.16
 
-本次版本重点修复 DeepSeek 工具调用兼容性，并恢复 Codex App 已有分页历史会话的访问能力。
+本次版本新增 DeepSeek 官方 Responses API 接入，同步官方模型能力，并优化 DeepSeek 两种协议渠道的模型获取体验。
 
-## DeepSeek 工具兼容
+## DeepSeek Responses 原生接入
 
-- Responses 转 Chat Completions 时，自动为缺少根类型的函数参数补充 `type: "object"`。
-- 保留 `$defs`、`oneOf` 等完整 JSON Schema 内容，不再因为规范化而丢失工具约束。
-- 修复 Codex App 自动化工具等 schema 根类型为空时，DeepSeek 返回 `Invalid schema for function` 的问题。
-- 增加缺失参数、已有对象类型以及复杂 schema 的回归测试。
+- 新增独立的 `DeepSeek Responses` 渠道，原生转发至 DeepSeek `/v1/responses`。
+- 支持官方 hosted web search、function tools、custom `apply_patch` 及对应 SSE 流式事件。
+- 兼容 Codex Responses Lite 的 `additional_tools` 结构，将工具提升到 DeepSeek 支持的顶层 `tools`。
+- 不向 DeepSeek 注入 OpenAI 专用的 `prompt_cache_key` 与 `prompt_cache_retention`。
+- 使用独立的 `deepseek_responses` 密文作用域，避免与 OpenAI、Grok 的协议状态混用。
 
-## Codex App 会话恢复
+## DeepSeek 模型目录
 
-- 恢复分页历史 gate，使此前由增强模式创建的分页会话可以正常打开。
-- 修复关闭该 gate 后，点击历史会话但 renderer 不发送 `thread/read`、`thread/resume` 或 `thread/turns/list` 的问题。
-- 移除当前 renderer 已无引用的旧 gate，减少不必要的本地门控覆盖。
-- 同步更新 Statsig bootstrap、增强模式注入与兼容性文档。
+- 根据 DeepSeek 官方目录同步 `deepseek-v4-pro` 与 `deepseek-v4-flash` 的上下文、推理档位、客户端版本和能力字段。
+- 保留 CodexHub 原有的 DeepSeek `availability_nux` 中文提示。
+- `DeepSeek Chat` 获取模型时只展示 `deepseek-v4-pro`。
+- `DeepSeek Responses` 获取模型时只展示 `deepseek-v4-flash`。
+- 上述筛选仅作用于 GUI 的“获取模型”结果；手工添加、配置文件和 AI Gateway 实际路由不受限制。
 
-## 已知限制
+## 兼容性
 
-- 当前 Codex App renderer 仍明确禁止分页会话执行 fork、消息编辑和 rollback；最新版 app-server 已具备部分后端能力，但官方前端尚未开放。
-- CodexHub 本次优先保证已有会话可访问，不修改 ASAR，也不拦截 renderer 资源；相关功能等待 Codex App 官方完善。
+- 现有 `DeepSeek Chat / Chat Completions` 渠道保持不变，不会自动迁移或改写。
+- OpenAI Responses、Grok Responses 和 Anthropic Messages 渠道的模型获取结果不受影响。
+- 增加 DeepSeek Responses 配置、原生请求处理、Lite 工具提升和模型列表筛选的回归测试。
 
 ## 验证
 
 - `cargo fmt --check` 通过。
 - `cargo check --features gui --bin codexhub` 通过。
-- `cargo test --release --features gui` 通过：598 passed，2 ignored。
+- DeepSeek 专项测试通过：27 passed。
+- Responses Lite 工具专项测试通过：8 passed。
+- GitHub Actions 将在各平台执行干净环境构建并生成安装包。
