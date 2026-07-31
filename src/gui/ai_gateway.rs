@@ -210,6 +210,7 @@ pub(super) fn provider_logo_variant(row: &AiGwProviderRow) -> Variant {
 fn provider_logo_kind(row: &AiGwProviderRow) -> ProviderLogoKind {
     match row.provider_type {
         ProviderType::OpenAiResponses => ProviderLogoKind::OpenAi,
+        ProviderType::DeepSeekResponses => ProviderLogoKind::DeepSeek,
         ProviderType::GrokResponses => ProviderLogoKind::Grok,
         ProviderType::ChatCompletions => ProviderLogoKind::DeepSeek,
         ProviderType::AnthropicMessages => match row.compatibility.as_deref() {
@@ -225,6 +226,7 @@ pub(super) fn provider_protocol_display(
 ) -> String {
     match provider_type {
         ProviderType::OpenAiResponses => "OpenAI Responses".to_string(),
+        ProviderType::DeepSeekResponses => "DeepSeek Responses".to_string(),
         ProviderType::GrokResponses => "Grok Responses".to_string(),
         ProviderType::ChatCompletions => "Chat Completions".to_string(),
         ProviderType::AnthropicMessages => match compatibility {

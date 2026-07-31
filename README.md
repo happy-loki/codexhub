@@ -143,7 +143,8 @@ AI Gateway 解决的是“Codex 只认原生模型入口，但用户想用更多
 当前重点能力：
 
 - OpenAI Responses 渠道：适合原生 Responses 或兼容 Responses 的模型服务。
-- DeepSeek / Chat Completions 渠道：把 Codex 请求转换成 Chat Completions，再把返回结果转换回 Codex 可消费的格式。
+- DeepSeek Responses 渠道：原生对接 DeepSeek `/v1/responses`，支持官方 hosted web search、function 和 `apply_patch`。
+- DeepSeek Chat / Chat Completions 渠道：保留旧接入方式，把 Codex 请求转换成 Chat Completions，再把返回结果转换回 Codex 可消费的格式。
 - Anthropic Messages 渠道：用于 Claude / Anthropic 兼容模型，支持文本、图片、工具调用、思考输出和 web search 的协议转换。
 - 智谱 GLM 渠道：按 Anthropic 兼容方式接入，并处理 GLM web search 的返回差异。
 - 模型映射：解决上游模型名大小写、别名、第三方转发命名不一致的问题。

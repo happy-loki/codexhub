@@ -141,20 +141,21 @@ async fn passthrough_to_endpoint(
         grok_tool_names = Some(ToolNameMap::default());
     }
 
-    // 1. 补齐 prompt_cache_key
-    let existing_key = raw_body
-        .get("prompt_cache_key")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    if existing_key.is_empty() {
-        raw_body["prompt_cache_key"] = json!(ctx.prompt_cache_key);
-    }
+    // DeepSeek manages prompt caching automatically and documents these fields
+    // as unsupported. Keep its native Responses request free of injected cache knobs.
+    if provider.provider_type != ProviderType::DeepSeekResponses {
+        let existing_key = raw_body
+            .get("prompt_cache_key")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if existing_key.is_empty() {
+            raw_body["prompt_cache_key"] = json!(ctx.prompt_cache_key);
+        }
 
-    // 2. 补齐 prompt_cache_retention
-    if !endpoint.is_compact()
-        && let Some(retention) = &provider.prompt_cache_retention
-    {
-        if raw_body.get("prompt_cache_retention").is_none() {
+        if !endpoint.is_compact()
+            && let Some(retention) = &provider.prompt_cache_retention
+            && raw_body.get("prompt_cache_retention").is_none()
+        {
             raw_body["prompt_cache_retention"] = json!(retention);
         }
     }
@@ -1312,6 +1313,56 @@ mod tests {
             upstream["input"][2]["output"],
             "Wall time: 0.1 seconds\nfile.txt"
         );
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn deepseek_responses_uses_native_endpoint_without_injected_cache_fields() {
+        let (base_url, mut requests, server) = capture_server().await;
+        let provider = ProviderConfig {
+            name: "deepseek-responses".to_string(),
+            provider_type: ProviderType::DeepSeekResponses,
+            base_url,
+            api_key: "secret".to_string(),
+            prompt_cache_retention: Some("24h".to_string()),
+            timeout_secs: 10,
+            ..ProviderConfig::default()
+        };
+        let client = reqwest::Client::new();
+        let context = GatewayContext::extract(&HeaderMap::new(), Some("deepseek-session"));
+        let request = json!({
+            "model": "deepseek-client-alias",
+            "stream": false,
+            "input": [{
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello"}]
+            }],
+            "tools": [
+                {"type": "web_search", "search_context_size": "medium"},
+                {"type": "custom", "name": "apply_patch"}
+            ]
+        });
+
+        let response = passthrough(
+            &client,
+            &context,
+            request,
+            "deepseek-v4-flash",
+            &provider,
+            None,
+        )
+        .await
+        .expect("DeepSeek Responses request should reach the native endpoint");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let upstream = requests.recv().await.expect("captured upstream request");
+        assert_eq!(upstream["model"], "deepseek-v4-flash");
+        assert!(upstream.get("prompt_cache_key").is_none());
+        assert!(upstream.get("prompt_cache_retention").is_none());
+        assert_eq!(upstream["tools"][0]["type"], "web_search");
+        assert_eq!(upstream["tools"][1]["type"], "custom");
 
         server.abort();
     }

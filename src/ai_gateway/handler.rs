@@ -578,7 +578,9 @@ pub async fn handle_responses(
     let grok_tool_names = tool_preparation.grok_tool_names;
     let http_client = crate::outbound_http::get();
     match provider.provider_type {
-        ProviderType::OpenAiResponses | ProviderType::GrokResponses => {
+        ProviderType::OpenAiResponses
+        | ProviderType::DeepSeekResponses
+        | ProviderType::GrokResponses => {
             let result = openai_responses::passthrough_with_tool_names(
                 &http_client,
                 &ctx,
@@ -1229,6 +1231,7 @@ fn update_failed_log(log_context: &Option<RequestLogContext>, message: &str) {
 fn provider_type_key(provider_type: &ProviderType) -> &'static str {
     match provider_type {
         ProviderType::OpenAiResponses => "responses",
+        ProviderType::DeepSeekResponses => "deepseek_responses",
         ProviderType::GrokResponses => "grok_responses",
         ProviderType::ChatCompletions => "chat_completions",
         ProviderType::AnthropicMessages => "anthropic_messages",

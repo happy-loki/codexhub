@@ -2539,6 +2539,13 @@ fn show_ai_gw_channel_dialog(
         Some(ProviderLogoKind::DeepSeek),
         false,
     );
+    let radio_deepseek_responses = ai_gw_service_option(
+        &service_panel,
+        &service_sizer,
+        text.ai_gw_service_deepseek_responses(),
+        Some(ProviderLogoKind::DeepSeek),
+        false,
+    );
     let radio_anthropic = ai_gw_service_option(
         &service_panel,
         &service_sizer,
@@ -2725,6 +2732,7 @@ fn show_ai_gw_channel_dialog(
         &radio_openai,
         &radio_grok,
         &radio_deepseek,
+        &radio_deepseek_responses,
         &radio_anthropic,
         &radio_glm,
         &type_input,
@@ -2754,6 +2762,7 @@ fn show_ai_gw_channel_dialog(
             &radio_openai,
             &radio_grok,
             &radio_deepseek,
+            &radio_deepseek_responses,
             &radio_anthropic,
             &radio_glm,
             &type_input,
@@ -2781,6 +2790,7 @@ fn show_ai_gw_channel_dialog(
                     &radio_openai,
                     &radio_grok,
                     &radio_deepseek,
+                    &radio_deepseek_responses,
                     &radio_anthropic,
                     &radio_glm,
                     &type_input,
@@ -2819,6 +2829,7 @@ fn show_ai_gw_channel_dialog(
                     &radio_openai,
                     &radio_grok,
                     &radio_deepseek,
+                    &radio_deepseek_responses,
                     &radio_anthropic,
                     &radio_glm,
                     &type_input,
@@ -2857,6 +2868,46 @@ fn show_ai_gw_channel_dialog(
                     &radio_openai,
                     &radio_grok,
                     &radio_deepseek,
+                    &radio_deepseek_responses,
+                    &radio_anthropic,
+                    &radio_glm,
+                    &type_input,
+                    &name_input,
+                    &base_url_input,
+                    &models_url_input,
+                    &key_input,
+                    &models_list,
+                    &model_mapping_rows,
+                    &model_mapping_model,
+                    &weight_input,
+                    &service_template_applying,
+                );
+                *current_ai_gw_provider_template.borrow_mut() = provider;
+            }
+        });
+    }
+    if initial.is_none() {
+        let type_input = type_input;
+        let name_input = name_input;
+        let base_url_input = base_url_input;
+        let models_url_input = models_url_input;
+        let key_input = key_input;
+        let models_list = models_list;
+        let model_mapping_rows = model_mapping_rows.clone();
+        let model_mapping_model = model_mapping_model.clone();
+        let weight_input = weight_input;
+        let service_template_applying = service_template_applying.clone();
+        let current_ai_gw_provider_template = current_ai_gw_provider_template.clone();
+        radio_deepseek_responses.on_selected(move |_| {
+            if radio_deepseek_responses.get_value() && !*service_template_applying.borrow() {
+                let provider = default_ai_gw_service_provider(ProviderType::DeepSeekResponses);
+                apply_ai_gw_service_template(
+                    text,
+                    provider.clone(),
+                    &radio_openai,
+                    &radio_grok,
+                    &radio_deepseek,
+                    &radio_deepseek_responses,
                     &radio_anthropic,
                     &radio_glm,
                     &type_input,
@@ -2895,6 +2946,7 @@ fn show_ai_gw_channel_dialog(
                     &radio_openai,
                     &radio_grok,
                     &radio_deepseek,
+                    &radio_deepseek_responses,
                     &radio_anthropic,
                     &radio_glm,
                     &type_input,
@@ -2933,6 +2985,7 @@ fn show_ai_gw_channel_dialog(
                     &radio_openai,
                     &radio_grok,
                     &radio_deepseek,
+                    &radio_deepseek_responses,
                     &radio_anthropic,
                     &radio_glm,
                     &type_input,
@@ -3054,6 +3107,7 @@ fn show_ai_gw_channel_dialog(
             let models_url_value = strip_nul(&models_url_input.get_value());
             let models_url = normalize_optional_url(Some(&models_url_value));
             let fallback_models_url = known_models_url_for_provider(&template);
+            let provider_type = template.provider_type.clone();
             let fetch_models_result = fetch_models_result.clone();
             let fetch_models_in_flight = fetch_models_in_flight.clone();
             let fetch_models_closed = fetch_models_closed.clone();
@@ -3064,7 +3118,13 @@ fn show_ai_gw_channel_dialog(
                     fallback_models_url.as_deref(),
                     &api_key,
                     GUI_MODEL_LIST_FETCH_TIMEOUT_SECS,
-                );
+                )
+                .map(|(models, normalized_base_url)| {
+                    (
+                        filter_fetched_models_for_provider(&provider_type, models),
+                        normalized_base_url,
+                    )
+                });
                 if fetch_models_closed.load(Ordering::SeqCst) {
                     fetch_models_in_flight.store(false, Ordering::SeqCst);
                     return;
@@ -3146,6 +3206,7 @@ fn show_ai_gw_channel_dialog(
                     selected_ai_gw_dialog_provider_type(
                         &radio_grok,
                         &radio_deepseek,
+                        &radio_deepseek_responses,
                         &radio_anthropic,
                         &radio_glm,
                     )
@@ -3201,6 +3262,7 @@ fn apply_ai_gw_dialog_template(
     radio_openai: &RadioButton,
     radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
+    radio_deepseek_responses: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
     type_input: &TextCtrl,
@@ -3225,6 +3287,7 @@ fn apply_ai_gw_dialog_template(
         radio_openai,
         radio_grok,
         radio_deepseek,
+        radio_deepseek_responses,
         radio_anthropic,
         radio_glm,
         type_input,
@@ -3248,6 +3311,7 @@ fn apply_ai_gw_service_template(
     radio_openai: &RadioButton,
     radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
+    radio_deepseek_responses: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
     type_input: &TextCtrl,
@@ -3268,6 +3332,7 @@ fn apply_ai_gw_service_template(
         radio_openai,
         radio_grok,
         radio_deepseek,
+        radio_deepseek_responses,
         radio_anthropic,
         radio_glm,
         type_input,
@@ -3290,6 +3355,7 @@ fn bind_locked_ai_gw_service_selection(
     radio_openai: &RadioButton,
     radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
+    radio_deepseek_responses: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
     type_input: &TextCtrl,
@@ -3303,6 +3369,7 @@ fn bind_locked_ai_gw_service_selection(
         radio_openai,
         radio_grok,
         radio_deepseek,
+        radio_deepseek_responses,
         radio_anthropic,
         radio_glm,
         type_input,
@@ -3316,6 +3383,7 @@ fn bind_locked_ai_gw_service_selection(
         radio_openai,
         radio_grok,
         radio_deepseek,
+        radio_deepseek_responses,
         radio_anthropic,
         radio_glm,
         type_input,
@@ -3329,6 +3397,21 @@ fn bind_locked_ai_gw_service_selection(
         radio_openai,
         radio_grok,
         radio_deepseek,
+        radio_deepseek_responses,
+        radio_anthropic,
+        radio_glm,
+        type_input,
+        service_template_applying.clone(),
+    );
+    bind_locked_ai_gw_service_radio(
+        text,
+        provider_type.clone(),
+        compatibility.clone(),
+        radio_deepseek_responses,
+        radio_openai,
+        radio_grok,
+        radio_deepseek,
+        radio_deepseek_responses,
         radio_anthropic,
         radio_glm,
         type_input,
@@ -3342,6 +3425,7 @@ fn bind_locked_ai_gw_service_selection(
         radio_openai,
         radio_grok,
         radio_deepseek,
+        radio_deepseek_responses,
         radio_anthropic,
         radio_glm,
         type_input,
@@ -3355,6 +3439,7 @@ fn bind_locked_ai_gw_service_selection(
         radio_openai,
         radio_grok,
         radio_deepseek,
+        radio_deepseek_responses,
         radio_anthropic,
         radio_glm,
         type_input,
@@ -3370,6 +3455,7 @@ fn bind_locked_ai_gw_service_radio(
     radio_openai: &RadioButton,
     radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
+    radio_deepseek_responses: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
     type_input: &TextCtrl,
@@ -3379,6 +3465,7 @@ fn bind_locked_ai_gw_service_radio(
     let radio_openai = *radio_openai;
     let radio_grok = *radio_grok;
     let radio_deepseek = *radio_deepseek;
+    let radio_deepseek_responses = *radio_deepseek_responses;
     let radio_anthropic = *radio_anthropic;
     let radio_glm = *radio_glm;
     let type_input = *type_input;
@@ -3394,6 +3481,7 @@ fn bind_locked_ai_gw_service_radio(
             &radio_openai,
             &radio_grok,
             &radio_deepseek,
+            &radio_deepseek_responses,
             &radio_anthropic,
             &radio_glm,
             &type_input,
@@ -3414,6 +3502,13 @@ fn default_ai_gw_service_provider(provider_type: ProviderType) -> ProviderConfig
             name: "grok".to_string(),
             provider_type: ProviderType::GrokResponses,
             base_url: "https://api.x.ai/v1".to_string(),
+            ..Default::default()
+        },
+        ProviderType::DeepSeekResponses => ProviderConfig {
+            name: "deepseek-responses".to_string(),
+            provider_type: ProviderType::DeepSeekResponses,
+            base_url: "https://api.deepseek.com/v1".to_string(),
+            models: vec!["deepseek-v4-flash".to_string()],
             ..Default::default()
         },
         ProviderType::ChatCompletions => ProviderConfig {
@@ -3490,6 +3585,7 @@ fn set_ai_gw_dialog_provider_type(
     radio_openai: &RadioButton,
     radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
+    radio_deepseek_responses: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
     type_input: &TextCtrl,
@@ -3497,6 +3593,7 @@ fn set_ai_gw_dialog_provider_type(
     radio_openai.set_value(false);
     radio_grok.set_value(false);
     radio_deepseek.set_value(false);
+    radio_deepseek_responses.set_value(false);
     radio_anthropic.set_value(false);
     radio_glm.set_value(false);
     match provider_type {
@@ -3507,6 +3604,10 @@ fn set_ai_gw_dialog_provider_type(
         ProviderType::OpenAiResponses => {
             radio_openai.set_value(true);
             type_input.change_value(text.provider_type_openai_responses());
+        }
+        ProviderType::DeepSeekResponses => {
+            radio_deepseek_responses.set_value(true);
+            type_input.change_value(text.provider_type_deepseek_responses());
         }
         ProviderType::GrokResponses => {
             radio_grok.set_value(true);
@@ -3540,6 +3641,7 @@ fn selected_ai_gw_dialog_compatibility(
 fn selected_ai_gw_dialog_provider_type(
     radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
+    radio_deepseek_responses: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
 ) -> ProviderType {
@@ -3549,6 +3651,8 @@ fn selected_ai_gw_dialog_provider_type(
         ProviderType::GrokResponses
     } else if radio_deepseek.get_value() {
         ProviderType::ChatCompletions
+    } else if radio_deepseek_responses.get_value() {
+        ProviderType::DeepSeekResponses
     } else {
         ProviderType::OpenAiResponses
     }
@@ -3883,6 +3987,45 @@ mod model_mapping_tests {
 
         let saved_aliases = build_model_aliases_for_save(&models, BTreeMap::new());
         assert!(saved_aliases.is_empty());
+    }
+
+    #[test]
+    fn fetched_deepseek_models_are_filtered_by_selected_protocol() {
+        let models = vec![
+            "deepseek-v4-flash".to_string(),
+            "deepseek-v4-pro".to_string(),
+            "other-model".to_string(),
+        ];
+
+        assert_eq!(
+            filter_fetched_models_for_provider(&ProviderType::ChatCompletions, models.clone()),
+            vec!["deepseek-v4-pro"]
+        );
+        assert_eq!(
+            filter_fetched_models_for_provider(&ProviderType::DeepSeekResponses, models.clone()),
+            vec!["deepseek-v4-flash"]
+        );
+        assert_eq!(
+            filter_fetched_models_for_provider(&ProviderType::OpenAiResponses, models.clone()),
+            models
+        );
+    }
+
+    #[test]
+    fn fetched_deepseek_filter_accepts_namespaced_model_ids() {
+        let models = vec![
+            "deepseek-ai/DeepSeek-V4-Pro".to_string(),
+            "deepseek-ai/DeepSeek-V4-Flash".to_string(),
+        ];
+
+        assert_eq!(
+            filter_fetched_models_for_provider(&ProviderType::ChatCompletions, models.clone()),
+            vec!["deepseek-ai/DeepSeek-V4-Pro"]
+        );
+        assert_eq!(
+            filter_fetched_models_for_provider(&ProviderType::DeepSeekResponses, models),
+            vec!["deepseek-ai/DeepSeek-V4-Flash"]
+        );
     }
 
     #[test]
@@ -4268,6 +4411,31 @@ fn extract_model_ids(value: &serde_json::Value) -> Vec<String> {
         push_model_items(&mut models, items);
     }
     models
+}
+
+fn filter_fetched_models_for_provider(
+    provider_type: &ProviderType,
+    models: Vec<String>,
+) -> Vec<String> {
+    let expected = match provider_type {
+        ProviderType::ChatCompletions => Some("deepseek-v4-pro"),
+        ProviderType::DeepSeekResponses => Some("deepseek-v4-flash"),
+        _ => None,
+    };
+    let Some(expected) = expected else {
+        return models;
+    };
+
+    models
+        .into_iter()
+        .filter(|model| {
+            model
+                .trim()
+                .rsplit('/')
+                .next()
+                .is_some_and(|slug| slug.eq_ignore_ascii_case(expected))
+        })
+        .collect()
 }
 
 fn push_model_items(models: &mut Vec<String>, items: &[serde_json::Value]) {

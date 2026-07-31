@@ -535,6 +535,32 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_responses_promotes_supported_tools_without_rewriting_them() {
+        let mut body = json!({
+            "tools": [{"type":"web_search","search_context_size":"medium"}],
+            "input": [
+                {"type":"additional_tools","role":"developer","tools":[
+                    {"type":"custom","name":"apply_patch","description":"Apply a patch"},
+                    {"type":"function","name":"lookup","parameters":{"type":"object"}}
+                ]},
+                {"type":"message","role":"user","content":"look it up"}
+            ]
+        });
+
+        let preparation =
+            prepare_for_provider(&mut body, &ProviderType::DeepSeekResponses).unwrap();
+
+        assert_eq!(preparation.carriers_removed, 1);
+        assert_eq!(preparation.tools_added, 2);
+        assert_eq!(body["input"].as_array().unwrap().len(), 1);
+        assert_eq!(body["tools"].as_array().unwrap().len(), 3);
+        assert_eq!(body["tools"][0]["type"], "web_search");
+        assert_eq!(body["tools"][1]["type"], "custom");
+        assert_eq!(body["tools"][1]["name"], "apply_patch");
+        assert_eq!(body["tools"][2]["type"], "function");
+    }
+
+    #[test]
     fn duplicate_namespaces_merge_children_in_order() {
         let mut body = json!({
             "tools": [{"type":"namespace","name":"browser","tools":[

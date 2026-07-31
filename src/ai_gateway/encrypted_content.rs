@@ -47,6 +47,7 @@ impl EncryptedContentScope {
     pub(crate) fn for_provider(provider: &ProviderConfig) -> Self {
         let protocol = match provider.provider_type {
             ProviderType::OpenAiResponses => "openai",
+            ProviderType::DeepSeekResponses => "deepseek_responses",
             ProviderType::GrokResponses => "grok",
             ProviderType::ChatCompletions => "chat_completions",
             ProviderType::AnthropicMessages => "anthropic",

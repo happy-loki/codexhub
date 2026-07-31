@@ -130,6 +130,7 @@ impl ProviderType {
     fn route_key(&self) -> &'static str {
         match self {
             Self::OpenAiResponses => "openai_responses",
+            Self::DeepSeekResponses => "deepseek_responses",
             Self::GrokResponses => "grok_responses",
             Self::ChatCompletions => "chat_completions",
             Self::AnthropicMessages => "anthropic_messages",
@@ -170,7 +171,7 @@ pub struct ProviderConfig {
     pub name: String,
     /// 是否启用该 provider。
     pub enabled: bool,
-    /// provider 类型：`"openai_responses"`、`"grok_responses"`、`"chat_completions"` 或 `"anthropic_messages"`。
+    /// provider 类型：OpenAI/DeepSeek/Grok Responses、Chat Completions 或 Anthropic Messages。
     pub provider_type: ProviderType,
     /// provider 兼容 profile。Anthropic Messages 兼容厂商优先使用该字段表达差异。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -257,6 +258,9 @@ impl ProviderConfig {
 pub enum ProviderType {
     /// OpenAI Responses API 透传。
     OpenAiResponses,
+    /// DeepSeek Responses API 原生透传。
+    #[serde(rename = "deepseek_responses")]
+    DeepSeekResponses,
     /// Grok/xAI Responses API 透传，带 Grok 专用兼容处理。
     GrokResponses,
     /// Chat Completions API（DeepSeek 等）。
@@ -284,6 +288,14 @@ mod tests {
             providers,
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn deepseek_responses_provider_type_uses_stable_wire_name() {
+        let encoded = serde_json::to_string(&ProviderType::DeepSeekResponses).unwrap();
+        assert_eq!(encoded, r#""deepseek_responses""#);
+        let decoded: ProviderType = serde_json::from_str(r#""deepseek_responses""#).unwrap();
+        assert_eq!(decoded, ProviderType::DeepSeekResponses);
     }
 
     #[test]

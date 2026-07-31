@@ -193,11 +193,8 @@ mod tests {
             response["models"][3]["comp_hash"],
             "codexhub-grok-summary-v1"
         );
-        assert_eq!(response["models"][5]["display_name"], "deepseek-v4-pro");
-        assert_eq!(
-            response["models"][5]["comp_hash"],
-            "codexhub-deepseek-summary-v1"
-        );
+        assert_eq!(response["models"][5]["display_name"], "DeepSeek-V4-Pro");
+        assert_eq!(response["models"][5]["comp_hash"], "3000");
         assert_eq!(response["models"][5]["apply_patch_tool_type"], "freeform");
         assert_eq!(response["models"][5]["supports_search_tool"], true);
         assert_eq!(
@@ -316,11 +313,8 @@ mod tests {
         };
 
         assert_eq!(comp_hash("grok-4.5"), "codexhub-grok-summary-v1");
-        assert_eq!(comp_hash("deepseek-v4-pro"), "codexhub-deepseek-summary-v1");
-        assert_eq!(
-            comp_hash("deepseek-v4-flash"),
-            "codexhub-deepseek-summary-v1"
-        );
+        assert_eq!(comp_hash("deepseek-v4-pro"), "3000");
+        assert_eq!(comp_hash("deepseek-v4-flash"), "3000");
         assert_eq!(comp_hash("GLM-5.2"), "codexhub-anthropic-summary-v1");
         assert_eq!(comp_hash("Opus-4.8"), "codexhub-anthropic-summary-v1");
         assert_eq!(comp_hash("Sonnet-4.6"), "codexhub-anthropic-summary-v1");
@@ -331,15 +325,8 @@ mod tests {
     }
 
     #[test]
-    fn non_openai_models_use_372k_context_window() {
-        for slug in [
-            "grok-4.5",
-            "deepseek-v4-pro",
-            "deepseek-v4-flash",
-            "GLM-5.2",
-            "Opus-4.8",
-            "Sonnet-4.6",
-        ] {
+    fn codexhub_third_party_models_use_372k_context_window() {
+        for slug in ["grok-4.5", "GLM-5.2", "Opus-4.8", "Sonnet-4.6"] {
             let model = catalog_models()
                 .iter()
                 .find(|model| model_slug(model) == Some(slug))
@@ -347,6 +334,50 @@ mod tests {
 
             assert_eq!(model["context_window"], 372_000, "model {slug}");
             assert_eq!(model["max_context_window"], 372_000, "model {slug}");
+        }
+    }
+
+    #[test]
+    fn deepseek_models_use_current_official_capabilities() {
+        for (slug, display_name, description, priority) in [
+            (
+                "deepseek-v4-flash",
+                "DeepSeek-V4-Flash",
+                "Latest frontier agentic coding model.",
+                1,
+            ),
+            (
+                "deepseek-v4-pro",
+                "DeepSeek-V4-Pro",
+                "Most capable frontier agentic coding model.",
+                2,
+            ),
+        ] {
+            let model = catalog_models()
+                .iter()
+                .find(|model| model_slug(model) == Some(slug))
+                .expect("DeepSeek catalog model should exist");
+
+            assert_eq!(model["display_name"], display_name, "model {slug}");
+            assert_eq!(model["description"], description, "model {slug}");
+            assert_eq!(model["prefer_websockets"], false, "model {slug}");
+            assert_eq!(model["use_responses_lite"], false, "model {slug}");
+            assert_eq!(model["context_window"], 1_048_576, "model {slug}");
+            assert_eq!(model["max_context_window"], 1_048_576, "model {slug}");
+            assert_eq!(
+                model["effective_context_window_percent"], 95,
+                "model {slug}"
+            );
+            assert_eq!(model["comp_hash"], "3000", "model {slug}");
+            assert_eq!(model["default_reasoning_level"], "high", "model {slug}");
+            assert_eq!(model["minimal_client_version"], "0.144.0", "model {slug}");
+            assert_eq!(model["priority"], priority, "model {slug}");
+            assert_eq!(model["supports_search_tool"], true, "model {slug}");
+            assert_eq!(
+                model["availability_nux"]["message"],
+                "不管你是贫穷还是富有, deepseek让所有人都感受到AI的乐趣, 人民的AI",
+                "model {slug}"
+            );
         }
     }
 

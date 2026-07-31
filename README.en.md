@@ -142,7 +142,8 @@ AI Gateway solves one practical problem: Codex expects its native model entry, b
 Current highlights:
 
 - OpenAI Responses providers for native or compatible Responses services.
-- DeepSeek / Chat Completions providers with conversion back to Codex-compatible Responses output.
+- DeepSeek Responses providers for the native DeepSeek `/v1/responses` API, including hosted web search, function tools, and `apply_patch`.
+- DeepSeek Chat / Chat Completions providers retain the existing conversion path back to Codex-compatible Responses output.
 - Anthropic Messages providers for Claude / Anthropic-compatible models, including text, images, tool calls, thinking output, and web search conversion.
 - Zhipu GLM through the Anthropic-compatible path, including GLM web search normalization.
 - Model aliases for case differences, provider-specific names, and third-party relay names.
