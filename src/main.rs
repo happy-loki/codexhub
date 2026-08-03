@@ -43,13 +43,23 @@ use crate::{
     config::AppConfig,
 };
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
     let cli = Cli::parse()?;
+    // GUI 需要在自己的线程里创建 tokio 运行时，若这里先建立外层运行时，
+    // gui::run() 内层运行时退出时会在 async 上下文中被 drop，触发
+    // "Cannot drop a runtime in a context where blocking is not allowed" panic。
+    // 因此 GUI 分支在创建任何 tokio 运行时之前直接走同步路径返回。
     if matches!(cli.command, Command::Gui) {
         return run_gui_command();
     }
 
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main(cli))
+}
+
+async fn async_main(cli: Cli) -> anyhow::Result<()> {
     let config_path = config_path_from_cli(cli.config_path.clone());
     let mut config = AppConfig::load_or_default(&config_path)?;
     let should_save_config = !config_path.exists() || config.apply_platform_defaults();
