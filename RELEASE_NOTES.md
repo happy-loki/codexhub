@@ -1,33 +1,29 @@
-CodexHub v0.4.16
+CodexHub v0.4.17
 
-本次版本新增 DeepSeek 官方 Responses API 接入，同步官方模型能力，并优化 DeepSeek 两种协议渠道的模型获取体验。
+本次版本重点修复飞书图片交互与重复回复问题，并修复 macOS GUI 启动异常。
 
-## DeepSeek Responses 原生接入
+## 飞书图片交互
 
-- 新增独立的 `DeepSeek Responses` 渠道，原生转发至 DeepSeek `/v1/responses`。
-- 支持官方 hosted web search、function tools、custom `apply_patch` 及对应 SSE 流式事件。
-- 兼容 Codex Responses Lite 的 `additional_tools` 结构，将工具提升到 DeepSeek 支持的顶层 `tools`。
-- 不向 DeepSeek 注入 OpenAI 专用的 `prompt_cache_key` 与 `prompt_cache_retention`。
-- 使用独立的 `deepseek_responses` 密文作用域，避免与 OpenAI、Grok 的协议状态混用。
+- 飞书发送纯图片时，不再向 Codex 创建正文为空的用户消息。
+- 收到纯图片后会提示用户补充说明；下一条文字会自动与图片合并，再交给 Codex 处理。
+- 支持连续发送多张图片，最多暂存最近 8 张，超过 10 分钟未补充说明会自动失效。
+- 不同飞书会话的待处理图片相互隔离，服务重连后会清理失效状态。
+- 图片附带文字时仍按原流程立即处理，不增加额外操作。
 
-## DeepSeek 模型目录
+## 飞书回复修复
 
-- 根据 DeepSeek 官方目录同步 `deepseek-v4-pro` 与 `deepseek-v4-flash` 的上下文、推理档位、客户端版本和能力字段。
-- 保留 CodexHub 原有的 DeepSeek `availability_nux` 中文提示。
-- `DeepSeek Chat` 获取模型时只展示 `deepseek-v4-pro`。
-- `DeepSeek Responses` 获取模型时只展示 `deepseek-v4-flash`。
-- 上述筛选仅作用于 GUI 的“获取模型”结果；手工添加、配置文件和 AI Gateway 实际路由不受限制。
+- 修复流式回复完成后，相同正文又被静态卡片重复发送一次的问题。
+- 保留原有流式展示和“已完成”状态提示。
+- 增加重复回复跳过日志，方便后续定位消息投递问题。
 
-## 兼容性
+## macOS 稳定性
 
-- 现有 `DeepSeek Chat / Chat Completions` 渠道保持不变，不会自动迁移或改写。
-- OpenAI Responses、Grok Responses 和 Anthropic Messages 渠道的模型获取结果不受影响。
-- 增加 DeepSeek Responses 配置、原生请求处理、Lite 工具提升和模型列表筛选的回归测试。
+- 修复 macOS GUI 启动时 Tokio runtime 初始化顺序不正确导致的 panic。
+- 保持命令行模式与其他平台启动行为不变。
 
 ## 验证
 
-- `cargo fmt --check` 通过。
+- `cargo test` 通过：578 passed，2 ignored。
 - `cargo check --features gui --bin codexhub` 通过。
-- DeepSeek 专项测试通过：27 passed。
-- Responses Lite 工具专项测试通过：8 passed。
-- GitHub Actions 将在各平台执行干净环境构建并生成安装包。
+- `git diff --check` 通过。
+- GitHub Actions 将在 Windows、macOS 和 Linux 上构建并上传安装包。
