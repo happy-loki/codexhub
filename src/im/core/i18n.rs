@@ -103,6 +103,13 @@ impl ImText {
         self.choose("✅ 已完成", "✅ Completed")
     }
 
+    pub(crate) fn image_description_needed(self) -> &'static str {
+        self.choose(
+            "图片已收到，请补充说明你希望我做什么。",
+            "Image received. Please describe what you would like me to do.",
+        )
+    }
+
     pub(crate) fn approval_request_heading(self) -> &'static str {
         self.choose("审批请求", "approval request")
     }

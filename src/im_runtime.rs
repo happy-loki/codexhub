@@ -6,7 +6,20 @@ use std::{
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use crate::{chain_log, im::feishu::FeishuStreamingCardState, types::ImPlatformKind};
+use crate::{
+    chain_log,
+    im::feishu::FeishuStreamingCardState,
+    types::{ImPlatformKind, InboundAttachment},
+};
+
+const PENDING_ATTACHMENTS_MAX_AGE_MS: u128 = 10 * 60 * 1000;
+const PENDING_ATTACHMENTS_MAX_COUNT: usize = 8;
+
+#[derive(Debug, Clone)]
+struct PendingAttachments {
+    attachments: Vec<InboundAttachment>,
+    received_at_ms: u128,
+}
 
 #[derive(Debug, Clone)]
 pub struct RouteTarget {
@@ -112,6 +125,7 @@ pub struct RuntimeState {
     pub feishu_streaming_cards_by_item: HashMap<String, FeishuStreamingCardState>,
     pub wecom_streams_by_thread: HashMap<String, WecomStreamState>,
     pub thread_routing_requests: HashMap<String, ThreadRoutingRequestState>,
+    pending_attachments_by_conversation: HashMap<String, PendingAttachments>,
 }
 
 #[derive(Debug, Clone)]
@@ -133,6 +147,7 @@ impl RuntimeState {
         self.bridge_generation = self.bridge_generation.saturating_add(1);
         self.feishu_streaming_cards_by_item.clear();
         self.wecom_streams_by_thread.clear();
+        self.pending_attachments_by_conversation.clear();
         self.bridge_generation
     }
 
@@ -140,6 +155,7 @@ impl RuntimeState {
         self.bridge_generation = self.bridge_generation.saturating_add(1);
         self.feishu_streaming_cards_by_item.clear();
         self.wecom_streams_by_thread.clear();
+        self.pending_attachments_by_conversation.clear();
     }
 
     #[allow(dead_code)]
@@ -254,6 +270,46 @@ impl RuntimeState {
     pub fn remember_sent_text(&mut self, route_key: &str, text: &str) {
         self.last_sent_text_by_route
             .insert(route_key.to_string(), text.to_string());
+    }
+
+    pub fn hold_pending_attachments(
+        &mut self,
+        conversation_key: &str,
+        attachments: Vec<InboundAttachment>,
+        received_at_ms: u128,
+    ) -> usize {
+        let entry = self
+            .pending_attachments_by_conversation
+            .entry(conversation_key.to_string())
+            .or_insert_with(|| PendingAttachments {
+                attachments: Vec::new(),
+                received_at_ms,
+            });
+        if received_at_ms.saturating_sub(entry.received_at_ms) > PENDING_ATTACHMENTS_MAX_AGE_MS {
+            entry.attachments.clear();
+        }
+        entry.received_at_ms = received_at_ms;
+        entry.attachments.extend(attachments);
+        if entry.attachments.len() > PENDING_ATTACHMENTS_MAX_COUNT {
+            let excess = entry.attachments.len() - PENDING_ATTACHMENTS_MAX_COUNT;
+            entry.attachments.drain(..excess);
+        }
+        entry.attachments.len()
+    }
+
+    pub fn take_pending_attachments(
+        &mut self,
+        conversation_key: &str,
+        received_at_ms: u128,
+    ) -> Vec<InboundAttachment> {
+        self.pending_attachments_by_conversation
+            .remove(conversation_key)
+            .filter(|entry| {
+                received_at_ms.saturating_sub(entry.received_at_ms)
+                    <= PENDING_ATTACHMENTS_MAX_AGE_MS
+            })
+            .map(|entry| entry.attachments)
+            .unwrap_or_default()
     }
 
     pub fn mark_turn_completed(&mut self, thread_id: &str, _turn_id: Option<&str>) {
@@ -556,11 +612,11 @@ pub fn route_from_conversation_key(conversation_key: &str) -> Option<RouteTarget
 mod tests {
     use serde_json::json;
 
-    use crate::types::ImPlatformKind;
+    use crate::types::{ImPlatformKind, InboundAttachment};
 
     use super::{
-        PendingApproval, RouteTarget, RuntimeState, ThreadTurnState, TurnOrigin,
-        route_from_conversation_key,
+        PENDING_ATTACHMENTS_MAX_AGE_MS, PendingApproval, RouteTarget, RuntimeState,
+        ThreadTurnState, TurnOrigin, route_from_conversation_key,
     };
 
     fn approval(id: i64) -> PendingApproval {
@@ -580,6 +636,67 @@ mod tests {
             message_id: None,
             remote_client_key: None,
         }
+    }
+
+    fn image_attachment(index: usize) -> InboundAttachment {
+        InboundAttachment {
+            kind: "image".to_string(),
+            name: Some(format!("image-{index}.png")),
+            mime_type: Some("image/png".to_string()),
+            text_hint: None,
+            local_path: Some(format!("C:\\temp\\image-{index}.png")),
+        }
+    }
+
+    #[test]
+    fn pending_attachments_accumulate_until_description_arrives() {
+        let mut runtime = RuntimeState::default();
+        let route = "feishu:default:chat-1";
+
+        assert_eq!(
+            runtime.hold_pending_attachments(route, vec![image_attachment(1)], 1_000),
+            1
+        );
+        assert_eq!(
+            runtime.hold_pending_attachments(route, vec![image_attachment(2)], 2_000),
+            2
+        );
+
+        let attachments = runtime.take_pending_attachments(route, 3_000);
+        assert_eq!(attachments.len(), 2);
+        assert_eq!(attachments[0].name.as_deref(), Some("image-1.png"));
+        assert_eq!(attachments[1].name.as_deref(), Some("image-2.png"));
+        assert!(runtime.take_pending_attachments(route, 4_000).is_empty());
+    }
+
+    #[test]
+    fn pending_attachments_keep_only_the_latest_eight_images() {
+        let mut runtime = RuntimeState::default();
+        let route = "feishu:default:chat-1";
+        let attachments = (0..10).map(image_attachment).collect();
+
+        assert_eq!(
+            runtime.hold_pending_attachments(route, attachments, 1_000),
+            8
+        );
+
+        let attachments = runtime.take_pending_attachments(route, 2_000);
+        assert_eq!(attachments.len(), 8);
+        assert_eq!(attachments[0].name.as_deref(), Some("image-2.png"));
+        assert_eq!(attachments[7].name.as_deref(), Some("image-9.png"));
+    }
+
+    #[test]
+    fn pending_attachments_expire_after_ten_minutes() {
+        let mut runtime = RuntimeState::default();
+        let route = "feishu:default:chat-1";
+        runtime.hold_pending_attachments(route, vec![image_attachment(1)], 1_000);
+
+        assert!(
+            runtime
+                .take_pending_attachments(route, 1_000 + PENDING_ATTACHMENTS_MAX_AGE_MS + 1)
+                .is_empty()
+        );
     }
 
     #[test]

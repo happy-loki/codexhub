@@ -111,7 +111,7 @@ pub(crate) async fn send_turn_reply(
     );
     let should_send = {
         let mut runtime = state.runtime.lock().await;
-        let key = format!("{}:turn-reply", route.conversation_key);
+        let key = turn_reply_dedupe_key(route);
         if runtime.should_skip_duplicate_text(&key, text) {
             false
         } else {
@@ -120,23 +120,18 @@ pub(crate) async fn send_turn_reply(
         }
     };
     if !should_send {
-        if matches!(
-            route.platform,
-            ImPlatformKind::Telegram | ImPlatformKind::Wechat | ImPlatformKind::Wecom
-        ) {
-            let event_kind = format!("{}_turn_reply_skipped", route.platform.key());
-            state
-                .push_event(
-                    "info",
-                    &event_kind,
-                    format!(
-                        "thread={thread_id} chat={} reason=duplicate text_len={}",
-                        route.chat_id,
-                        text.chars().count()
-                    ),
-                )
-                .await;
-        }
+        let event_kind = format!("{}_turn_reply_skipped", route.platform.key());
+        state
+            .push_event(
+                "info",
+                &event_kind,
+                format!(
+                    "thread={thread_id} chat={} reason=duplicate text_len={}",
+                    route.chat_id,
+                    text.chars().count()
+                ),
+            )
+            .await;
         return;
     }
     match route.platform {
@@ -331,6 +326,10 @@ pub(crate) async fn send_turn_reply(
             }
         }
     }
+}
+
+fn turn_reply_dedupe_key(route: &RouteTarget) -> String {
+    format!("{}:turn-reply", route.conversation_key)
 }
 
 fn queue_agent_message_images(
@@ -860,6 +859,15 @@ pub(crate) async fn handle_codex_notification(
             } else {
                 renderer::item_markdown_summary(item)
             };
+            if item_type == "agentMessage"
+                && let Some(text) = text.as_deref()
+            {
+                state
+                    .runtime
+                    .lock()
+                    .await
+                    .remember_sent_text(&turn_reply_dedupe_key(&route), text);
+            }
             if matches!(
                 item_type,
                 "agentMessage"

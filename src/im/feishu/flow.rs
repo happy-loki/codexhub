@@ -34,7 +34,7 @@ pub(crate) async fn handle_inbound(
     state: SharedState,
     api: FeishuApi,
     outbound_tx: ImOutboundSender,
-    message: InboundMessage,
+    mut message: InboundMessage,
 ) -> Result<()> {
     info!(
         "inbound feishu message chat={} sender={}",
@@ -54,7 +54,7 @@ pub(crate) async fn handle_inbound(
         )
         .await;
 
-    let trimmed = message.text.trim();
+    let trimmed = message.text.trim().to_string();
     let route = route_for_message(&message);
     let text = im_text_for_state(&state);
     {
@@ -64,7 +64,7 @@ pub(crate) async fn handle_inbound(
     if let Some(action) = message.action.clone() {
         return handle_inbound_action(state, api, outbound_tx, message, action).await;
     }
-    if handle_control_message(&state, &api, &outbound_tx, &message, trimmed).await? {
+    if handle_control_message(&state, &api, &outbound_tx, &message, &trimmed).await? {
         return Ok(());
     }
     if active_turn_for_message(&state, &message).await.is_some() {
@@ -77,16 +77,64 @@ pub(crate) async fn handle_inbound(
         return Ok(());
     }
 
-    match start_turn_for_route(
+    let only_images = trimmed.is_empty()
+        && !message.attachments.is_empty()
+        && message
+            .attachments
+            .iter()
+            .all(|attachment| attachment.kind == "image");
+    if only_images {
+        let attachment_count = {
+            let mut runtime = state.runtime.lock().await;
+            runtime.hold_pending_attachments(
+                &route.conversation_key,
+                std::mem::take(&mut message.attachments),
+                message.received_at_ms,
+            )
+        };
+        send_text_to_message(&api, &message, text.image_description_needed()).await?;
+        state
+            .push_event(
+                "info",
+                "feishu_image_waiting_for_description",
+                format!(
+                    "chat={} pending_attachments={attachment_count}",
+                    message.chat_id
+                ),
+            )
+            .await;
+        return Ok(());
+    }
+
+    let pending_attachments = if trimmed.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .runtime
+            .lock()
+            .await
+            .take_pending_attachments(&route.conversation_key, message.received_at_ms)
+    };
+    message.attachments.extend(pending_attachments.clone());
+
+    let outcome = start_turn_for_route(
         &state,
         &route,
-        trimmed,
+        &trimmed,
         &message.attachments,
         message.received_at_ms,
         TurnOrigin::Feishu,
     )
-    .await
-    {
+    .await;
+    if !matches!(&outcome, TurnStartOutcome::Started { .. }) && !pending_attachments.is_empty() {
+        state.runtime.lock().await.hold_pending_attachments(
+            &route.conversation_key,
+            pending_attachments,
+            message.received_at_ms,
+        );
+    }
+
+    match outcome {
         TurnStartOutcome::Started { thread_id, turn_id } => {
             state
                 .push_event(
