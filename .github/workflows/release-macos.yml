@@ -117,6 +117,7 @@ jobs:
           chmod +x "$MACOS/$APP_NAME"
 
       - name: Sign And Notarize
+        timeout-minutes: 75
         env:
           APPLE_CODESIGN_IDENTITY: ${{ secrets.APPLE_CODESIGN_IDENTITY }}
           NOTARY_KEYCHAIN_PROFILE: ${{ secrets.NOTARY_KEYCHAIN_PROFILE }}
@@ -142,23 +143,75 @@ jobs:
             export APPLE_API_KEY_PATH="$API_KEY_PATH"
           fi
 
+          run_with_timeout() {
+            local timeout_seconds="$1"
+            shift
+            python3 - "$timeout_seconds" "$@" <<'PY'
+          import os
+          import signal
+          import subprocess
+          import sys
+
+          timeout = int(sys.argv[1])
+          command = sys.argv[2:]
+          process = subprocess.Popen(command, start_new_session=True)
+          try:
+              return_code = process.wait(timeout=timeout)
+          except subprocess.TimeoutExpired:
+              print(f"Command timed out after {timeout} seconds: {command[0]}", file=sys.stderr)
+              os.killpg(process.pid, signal.SIGTERM)
+              try:
+                  process.wait(timeout=10)
+              except subprocess.TimeoutExpired:
+                  os.killpg(process.pid, signal.SIGKILL)
+                  process.wait()
+              sys.exit(124)
+          sys.exit(return_code)
+          PY
+          }
+
           notary_submit() {
             local path="$1"
+            local -a auth_args
             if [ -n "${NOTARY_KEYCHAIN_PROFILE:-}" ]; then
-              xcrun notarytool submit "$path" --keychain-profile "$NOTARY_KEYCHAIN_PROFILE" --wait
+              auth_args=(--keychain-profile "$NOTARY_KEYCHAIN_PROFILE")
             elif [ -n "${APPLE_API_KEY_ID:-}" ]; then
-              xcrun notarytool submit "$path" \
+              auth_args=(
                 --key "$APPLE_API_KEY_PATH" \
                 --key-id "$APPLE_API_KEY_ID" \
-                --issuer "$APPLE_API_ISSUER_ID" \
-                --wait
+                --issuer "$APPLE_API_ISSUER_ID"
+              )
             else
-              xcrun notarytool submit "$path" \
+              auth_args=(
                 --apple-id "$APPLE_ID" \
                 --team-id "$APPLE_TEAM_ID" \
-                --password "$APPLE_APP_SPECIFIC_PASSWORD" \
-                --wait
+                --password "$APPLE_APP_SPECIFIC_PASSWORD"
+              )
             fi
+
+            local attempt status
+            for attempt in 1 2 3; do
+              local -a transfer_args=()
+              if [ "$attempt" -gt 1 ]; then
+                transfer_args+=(--no-s3-acceleration)
+              fi
+              echo "Submitting $path for notarization (attempt $attempt/3)..."
+              if run_with_timeout 1200 \
+                xcrun notarytool submit "$path" \
+                "${auth_args[@]}" \
+                "${transfer_args[@]}" \
+                --wait --timeout 15m; then
+                return 0
+              else
+                status=$?
+              fi
+              if [ "$attempt" -lt 3 ]; then
+                echo "Notarization attempt $attempt failed with status $status; retrying..." >&2
+                sleep $((attempt * 15))
+              fi
+            done
+            echo "Notarization failed after 3 attempts: $path" >&2
+            return "$status"
           }
 
           codesign --force --timestamp --options runtime \
