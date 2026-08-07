@@ -1,4 +1,4 @@
-CodexHub v0.4.18
+CodexHub v0.4.19
 
 本次版本修复 Windows 本地服务启动卡死问题，并增强启动阶段诊断能力。
 
@@ -19,6 +19,10 @@ CodexHub v0.4.18
 - `cargo fmt -- --check` 通过。
 - `cargo check --features gui --bin codexhub` 通过。
 - GitHub Actions 将在 Windows、macOS 和 Linux 上构建并上传安装包。
+
+## 发布修复
+
+- 修复 macOS notarization 重试参数在 Bash 严格模式下触发 `unbound variable`，确保 macOS 安装包可以正常发布。
 
 CodexHub v0.4.17
 

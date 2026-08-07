@@ -191,15 +191,13 @@ jobs:
 
             local attempt status
             for attempt in 1 2 3; do
-              local -a transfer_args=()
+              local -a submit_args=(xcrun notarytool submit "$path" "${auth_args[@]}")
               if [ "$attempt" -gt 1 ]; then
-                transfer_args+=(--no-s3-acceleration)
+                submit_args+=(--no-s3-acceleration)
               fi
               echo "Submitting $path for notarization (attempt $attempt/3)..."
               if run_with_timeout 1200 \
-                xcrun notarytool submit "$path" \
-                "${auth_args[@]}" \
-                "${transfer_args[@]}" \
+                "${submit_args[@]}" \
                 --wait --timeout 15m; then
                 return 0
               else
