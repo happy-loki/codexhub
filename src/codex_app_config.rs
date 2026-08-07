@@ -7,6 +7,9 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+#[cfg(target_os = "windows")]
+use std::time::Instant;
+
 use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -1264,6 +1267,9 @@ fn gui_getenv(name: &str) -> Result<Option<String>, String> {
 
 #[cfg(target_os = "windows")]
 fn gui_setenv(name: &str, value: &str) -> Result<(), String> {
+    if gui_getenv(name)?.as_deref() == Some(value) {
+        return Ok(());
+    }
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
     let (env, _) = hkcu
         .create_subkey("Environment")
@@ -1279,19 +1285,24 @@ fn gui_unsetenv_many(names: &[&str]) -> Result<(), String> {
     let (env, _) = hkcu
         .create_subkey("Environment")
         .map_err(|err| err.to_string())?;
+    let mut changed = false;
     for name in names {
         match env.delete_value(name) {
-            Ok(()) => {}
+            Ok(()) => changed = true,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => return Err(err.to_string()),
         }
     }
-    broadcast_windows_environment_change();
+    if changed {
+        broadcast_windows_environment_change();
+    }
     Ok(())
 }
 
 #[cfg(target_os = "windows")]
 fn broadcast_windows_environment_change() {
+    let started = Instant::now();
+    tracing::info!(target: "codexhub::startup", "broadcasting Windows environment change");
     let message: Vec<u16> = "Environment".encode_utf16().chain(Some(0)).collect();
     let mut result = 0usize;
     unsafe {
@@ -1305,6 +1316,12 @@ fn broadcast_windows_environment_change() {
             &mut result,
         );
     }
+    tracing::info!(
+        target: "codexhub::startup",
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        result,
+        "Windows environment change broadcast finished"
+    );
 }
 
 #[cfg(target_os = "macos")]

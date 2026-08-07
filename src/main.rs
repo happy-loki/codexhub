@@ -193,45 +193,79 @@ async fn run_daemon(config_path: PathBuf, config: AppConfig) -> anyhow::Result<(
             format!("path={}", chain_log_path.display()),
         )
         .await;
-    {
-        let config = state.config.lock().await;
-        let backend_url = config.remote_control_base_url();
-        let gui_api_base = codex_app_config::configure_gui_environment(&backend_url, true);
-        let proxy_cleanup = codex_app_config::cleanup_legacy_app_server_proxy_environment();
-        state
-            .push_event(
-                "info",
-                "codex_app_direct_api_environment_checked",
-                format!(
-                    "configured={} value={} error={}",
-                    gui_api_base.configured,
-                    gui_api_base.value.as_deref().unwrap_or_default(),
-                    gui_api_base.error.as_deref().unwrap_or_default()
-                ),
-            )
-            .await;
-        state
-            .push_event(
-                if proxy_cleanup.is_ok() {
-                    "info"
-                } else {
-                    "warn"
-                },
-                "codex_app_server_proxy_environment_cleanup_checked",
-                match proxy_cleanup {
-                    Ok(()) => "cleaned=true".to_string(),
-                    Err(error) => format!("cleaned=false error={error}"),
-                },
-            )
-            .await;
-    }
-    tokio::spawn(run_daemon_startup_tasks(state.clone()));
-    let app = web::router(state).layer(TraceLayer::new_for_http());
+    let app = web::router(state.clone()).layer(TraceLayer::new_for_http());
     let addr: SocketAddr = bind
         .parse()
         .with_context(|| format!("invalid bind address `{bind}`"))?;
+    tracing::info!(target: "codexhub::startup", addr = %addr, "binding local service");
     let listener = TcpListener::bind(addr).await?;
     println!("codexhub web: http://{addr}");
+    tracing::info!(target: "codexhub::startup", addr = %addr, "local service listener ready");
+
+    // Environment-variable updates can synchronously broadcast WM_SETTINGCHANGE
+    // to every desktop window on Windows. Keep that work out of the service's
+    // startup path so the local API can respond even if another application is
+    // slow or hung while handling the broadcast.
+    let backend_url = state.config.lock().await.remote_control_base_url();
+    let environment_state = state.clone();
+    tokio::spawn(async move {
+        tracing::info!(target: "codexhub::startup", "starting Codex App environment synchronization");
+        let result = tokio::task::spawn_blocking(move || {
+            tracing::info!(target: "codexhub::startup", "Codex App environment synchronization entered blocking worker");
+            let gui_api_base = codex_app_config::configure_gui_environment(&backend_url, true);
+            let proxy_cleanup = codex_app_config::cleanup_legacy_app_server_proxy_environment();
+            (gui_api_base, proxy_cleanup)
+        })
+        .await;
+
+        match result {
+            Ok((gui_api_base, proxy_cleanup)) => {
+                tracing::info!(
+                    target: "codexhub::startup",
+                    configured = gui_api_base.configured,
+                    proxy_cleanup_ok = proxy_cleanup.is_ok(),
+                    "Codex App environment synchronization finished"
+                );
+                environment_state
+                    .push_event(
+                        "info",
+                        "codex_app_direct_api_environment_checked",
+                        format!(
+                            "configured={} value={} error={}",
+                            gui_api_base.configured,
+                            gui_api_base.value.as_deref().unwrap_or_default(),
+                            gui_api_base.error.as_deref().unwrap_or_default()
+                        ),
+                    )
+                    .await;
+                environment_state
+                    .push_event(
+                        if proxy_cleanup.is_ok() {
+                            "info"
+                        } else {
+                            "warn"
+                        },
+                        "codex_app_server_proxy_environment_cleanup_checked",
+                        match proxy_cleanup {
+                            Ok(()) => "cleaned=true".to_string(),
+                            Err(error) => format!("cleaned=false error={error}"),
+                        },
+                    )
+                    .await;
+            }
+            Err(error) => {
+                tracing::warn!(target: "codexhub::startup", error = %error, "Codex App environment synchronization worker failed");
+                environment_state
+                    .push_event(
+                        "warn",
+                        "codex_app_direct_api_environment_check_failed",
+                        format!("error={error}"),
+                    )
+                    .await;
+            }
+        }
+    });
+    tokio::spawn(run_daemon_startup_tasks(state.clone()));
 
     let companion = compatible_loopback_addr(addr);
     let mut companion_tasks = Vec::new();
