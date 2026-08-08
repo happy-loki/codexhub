@@ -994,7 +994,7 @@ fn turn_input_items(text: &str, attachments: &[InboundAttachment]) -> Vec<Value>
                 "type": "localImage",
                 "path": local_path,
             })),
-            "file" | "text" | "video" => items.push(json!({
+            "file" | "text" | "video" | "audio" => items.push(json!({
                 "type": "text",
                 "text": format!("File: {local_path}"),
                 "text_elements": [],

@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use anyhow::anyhow;
 use serde_json::Value;
 
@@ -27,6 +29,8 @@ use super::{
     DEFAULT_REMOTE_CLIENT_KEY, auth_tokens, json_object_keys, replay_pending_requests,
     request_id_key,
 };
+
+const ORPHANED_TURN_CLEANUP_DELAY: Duration = Duration::from_secs(120);
 
 pub(super) async fn observe_app_server_message(
     state: &SharedState,
@@ -364,6 +368,30 @@ pub(super) async fn observe_app_server_message(
         if method == "item/commandExecution/outputDelta" {
             return;
         }
+        // Cancel the shared fallback latch as soon as a terminal notification
+        // is observed at the server boundary.  The IM broadcast is handled by
+        // another task and may be delayed; waiting for that task would leave
+        // the 60-second fallback able to win a race with a real terminal event.
+        if matches!(
+            method,
+            "error" | "turn/completed" | "codex/event/turn_completed"
+        ) && !(method == "error"
+            && params
+                .as_ref()
+                .and_then(|value| value.get("willRetry"))
+                .and_then(Value::as_bool)
+                .unwrap_or(false))
+            && let Some(thread_id) = params.as_ref().and_then(thread_id_from_payload)
+        {
+            let mut runtime = state.runtime.lock().await;
+            let turn_id = params
+                .as_ref()
+                .and_then(turn_id_from_payload)
+                .or_else(|| runtime.current_turn_id(&thread_id).map(str::to_string));
+            if let Some(turn_id) = turn_id {
+                runtime.cancel_terminal_status_fallback(&thread_id, &turn_id);
+            }
+        }
         if method == "remoteControl/status/changed" {
             observe_remote_control_status_changed(state, params.as_ref()).await;
         }
@@ -433,14 +461,7 @@ pub(super) async fn observe_app_server_message(
             }
         } else if method == "turn/completed" {
             let thread_id = params.as_ref().and_then(thread_id_from_payload);
-            let turn_id = params.as_ref().and_then(turn_id_from_payload);
-            if let Some(thread_id) = thread_id.as_deref() {
-                state
-                    .runtime
-                    .lock()
-                    .await
-                    .mark_turn_completed(thread_id, turn_id.as_deref());
-            }
+            // The IM event router owns RuntimeState cleanup so it can flush platform progress first.
             let mut remote = state.remote_control.inner.lock().await;
             if let Some(client_key) = client_key.as_deref() {
                 if let Some(client) = remote.clients.get_mut(client_key) {
@@ -525,11 +546,9 @@ pub(super) async fn observe_thread_status_changed(
     if !is_terminal_or_inactive_thread_status(status_type) {
         return;
     }
-    state
-        .runtime
-        .lock()
-        .await
-        .mark_turn_completed(thread_id, None);
+    // Keep RuntimeState alive until the IM router sees the matching error or
+    // turn/completed event.  Clearing it here would discard Telegram's
+    // aggregate progress message before its final failure state can be sent.
     let normalized_client_key = client_key.map(normalize_remote_client_key);
     let cleared_turn_id = {
         let mut remote = state.remote_control.inner.lock().await;
@@ -551,11 +570,36 @@ pub(super) async fn observe_thread_status_changed(
         }
     };
     if let Some(turn_id) = cleared_turn_id {
-        state
+        let fallback_registration = state
             .runtime
             .lock()
             .await
-            .mark_turn_completed(thread_id, Some(&turn_id));
+            .register_terminal_status_fallback_token(thread_id, &turn_id);
+        if let Some((fallback_token, true)) = fallback_registration {
+            let cleanup_state = state.clone();
+            let cleanup_thread_id = thread_id.to_string();
+            let cleanup_turn_id = turn_id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(ORPHANED_TURN_CLEANUP_DELAY).await;
+                let cleaned = {
+                    let mut runtime = cleanup_state.runtime.lock().await;
+                    runtime.claim_terminal_status_fallback(
+                        &cleanup_thread_id,
+                        &cleanup_turn_id,
+                        fallback_token,
+                    ) && runtime.mark_turn_completed(&cleanup_thread_id, Some(&cleanup_turn_id))
+                };
+                if cleaned {
+                    cleanup_state
+                        .push_event(
+                            "warn",
+                            "remote_control_orphaned_turn_cleaned",
+                            format!("thread={cleanup_thread_id} turn={cleanup_turn_id}"),
+                        )
+                        .await;
+                }
+            });
+        }
         chain_log::write_line(format!(
             "[remote_control] event=thread_status_cleared_current_turn client_key={} thread={} turn={} status={}",
             normalized_client_key.as_deref().unwrap_or(""),
