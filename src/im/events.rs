@@ -21,14 +21,713 @@ use crate::{
                 ensure_started_streaming_card_state, upsert_streaming_card_state,
             },
         },
-        telegram::adapter::TelegramAdapter,
+        telegram::{
+            adapter::TelegramAdapter, api::TelegramApiError,
+            collab_progress as telegram_collab_progress, progress as telegram_progress,
+        },
         wechat::adapter::WechatAdapter,
     },
-    im_runtime::{PendingApproval, RouteTarget, TurnOrigin},
+    im_runtime::{
+        PendingApproval, RouteTarget, TelegramCollabProgressSnapshot,
+        TelegramCommandProgressSnapshot, TelegramDraftSendAction, TurnOrigin,
+    },
     types::ImPlatformKind,
 };
 
 const COMMAND_OUTPUT_PREVIEW_CHARS: usize = 2400;
+const TELEGRAM_DRAFT_THROTTLE_MS: u128 = 300;
+const TELEGRAM_DRAFT_HEARTBEAT_MS: u128 = 20_000;
+const TURN_ERROR_SUMMARY_MAX_CHARS: usize = 600;
+const TERMINAL_STATUS_FALLBACK_DELAY_MS: u64 = 60_000;
+
+enum TelegramCommandTurn {
+    Active(String),
+    Missing,
+    Stale { current: String, received: String },
+}
+
+async fn telegram_command_turn(
+    state: &SharedState,
+    thread_id: &str,
+    params: &serde_json::Value,
+) -> TelegramCommandTurn {
+    let received = params
+        .get("turnId")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let current = state
+        .runtime
+        .lock()
+        .await
+        .current_turn_id(thread_id)
+        .map(str::to_string);
+    match (received, current) {
+        (Some(received), Some(current)) if received != current => {
+            TelegramCommandTurn::Stale { current, received }
+        }
+        (Some(received), Some(_)) => TelegramCommandTurn::Active(received),
+        (None, Some(current)) => TelegramCommandTurn::Active(current),
+        _ => TelegramCommandTurn::Missing,
+    }
+}
+
+async fn update_telegram_command_progress(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    thread_id: &str,
+    route: &RouteTarget,
+    params: &serde_json::Value,
+    item_id: &str,
+    item: &serde_json::Value,
+    completed: bool,
+) -> bool {
+    let turn_id = match telegram_command_turn(state, thread_id, params).await {
+        TelegramCommandTurn::Active(turn_id) => turn_id,
+        TelegramCommandTurn::Missing => return false,
+        TelegramCommandTurn::Stale { current, received } => {
+            state
+                .push_event(
+                    "warn",
+                    "telegram_command_progress_stale",
+                    format!(
+                        "thread={thread_id} current_turn={current} received_turn={received} item={item_id}"
+                    ),
+                )
+                .await;
+            return true;
+        }
+    };
+    let entry = if completed {
+        telegram_progress::completed_entry(item_id, item)
+    } else {
+        telegram_progress::running_entry(item_id, item)
+    };
+    let snapshot = state
+        .runtime
+        .lock()
+        .await
+        .upsert_telegram_command_progress(thread_id, &turn_id, entry, completed);
+    if let Some(snapshot) = snapshot {
+        deliver_telegram_command_progress(state, api_registry, thread_id, route, snapshot).await;
+    }
+    true
+}
+
+async fn update_telegram_reasoning_progress(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    thread_id: &str,
+    route: &RouteTarget,
+    params: &serde_json::Value,
+    item_id: &str,
+    item: &serde_json::Value,
+) -> bool {
+    let turn_id = match telegram_command_turn(state, thread_id, params).await {
+        TelegramCommandTurn::Active(turn_id) => turn_id,
+        TelegramCommandTurn::Missing => return true,
+        TelegramCommandTurn::Stale { .. } => return true,
+    };
+    let summary = telegram_progress::reasoning_summary_from_item(item);
+    let snapshot = state
+        .runtime
+        .lock()
+        .await
+        .complete_telegram_reasoning(thread_id, &turn_id, item_id, summary);
+    if let Some(snapshot) = snapshot {
+        deliver_telegram_command_progress(state, api_registry, thread_id, route, snapshot).await;
+    }
+    true
+}
+
+async fn update_telegram_plan_progress(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    thread_id: &str,
+    route: &RouteTarget,
+    params: &serde_json::Value,
+    deliver_update: bool,
+) -> bool {
+    let Some(turn_id) = params.get("turnId").and_then(|value| value.as_str()) else {
+        return true;
+    };
+    if state.runtime.lock().await.current_turn_id(thread_id) != Some(turn_id) {
+        return true;
+    }
+    let (explanation, plan) = telegram_progress::plan_from_params(params);
+    let snapshot = state.runtime.lock().await.update_telegram_plan(
+        thread_id,
+        turn_id,
+        explanation,
+        plan,
+        deliver_update,
+    );
+    if let Some(snapshot) = snapshot {
+        deliver_telegram_command_progress(state, api_registry, thread_id, route, snapshot).await;
+    }
+    true
+}
+
+async fn update_telegram_diff_progress(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    thread_id: &str,
+    route: &RouteTarget,
+    params: &serde_json::Value,
+) -> bool {
+    let Some(turn_id) = params.get("turnId").and_then(|value| value.as_str()) else {
+        return true;
+    };
+    if state.runtime.lock().await.current_turn_id(thread_id) != Some(turn_id) {
+        return true;
+    }
+    let diff = params
+        .get("diff")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    // turn/diff/updated can be emitted for every hunk. Cache the latest
+    // complete diff and flush it with the corresponding fileChange item or
+    // terminal event instead of editing Telegram for every notification.
+    let summary = telegram_progress::diff_summary_from_diff(diff);
+    let snapshot = state
+        .runtime
+        .lock()
+        .await
+        .update_telegram_diff(thread_id, turn_id, summary, false);
+    if let Some(snapshot) = snapshot {
+        deliver_telegram_command_progress(state, api_registry, thread_id, route, snapshot).await;
+    }
+    true
+}
+
+async fn update_telegram_file_change_progress(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    thread_id: &str,
+    route: &RouteTarget,
+    params: &serde_json::Value,
+    item: &serde_json::Value,
+) -> bool {
+    let turn_id = match telegram_command_turn(state, thread_id, params).await {
+        TelegramCommandTurn::Active(turn_id) => turn_id,
+        TelegramCommandTurn::Missing => return true,
+        TelegramCommandTurn::Stale { .. } => return true,
+    };
+    let fallback = telegram_progress::diff_summary_from_item(item);
+    let snapshot = state
+        .runtime
+        .lock()
+        .await
+        .complete_telegram_file_change(thread_id, &turn_id, fallback);
+    if let Some(snapshot) = snapshot {
+        deliver_telegram_command_progress(state, api_registry, thread_id, route, snapshot).await;
+    }
+    true
+}
+
+async fn update_telegram_collab_progress(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    thread_id: &str,
+    route: &RouteTarget,
+    params: &serde_json::Value,
+    item_id: &str,
+    item: &serde_json::Value,
+) -> bool {
+    let item_type = item.get("type").and_then(|value| value.as_str());
+    if !item_type.is_some_and(telegram_collab_progress::is_collab_item_type) {
+        return false;
+    }
+    let turn_id = match telegram_command_turn(state, thread_id, params).await {
+        TelegramCommandTurn::Active(turn_id) => turn_id,
+        TelegramCommandTurn::Missing => {
+            state
+                .push_event(
+                    "info",
+                    "telegram_collab_progress_skipped",
+                    format!("thread={thread_id} item={item_id} reason=no_active_turn"),
+                )
+                .await;
+            return true;
+        }
+        TelegramCommandTurn::Stale { current, received } => {
+            state
+                .push_event(
+                    "warn",
+                    "telegram_collab_progress_stale",
+                    format!(
+                        "thread={thread_id} current_turn={current} received_turn={received} item={item_id}"
+                    ),
+                )
+                .await;
+            return true;
+        }
+    };
+    let updates = telegram_collab_progress::updates_for_item(item, crate::types::now_ms());
+    if updates.is_empty() {
+        state
+            .push_event(
+                "info",
+                "telegram_collab_progress_suppressed",
+                format!(
+                    "thread={thread_id} turn={turn_id} item={item_id} type={}",
+                    item_type.unwrap_or("unknown")
+                ),
+            )
+            .await;
+        return true;
+    }
+    let snapshot = state
+        .runtime
+        .lock()
+        .await
+        .apply_telegram_collab_progress_updates(thread_id, &turn_id, updates);
+    if let Some(snapshot) = snapshot {
+        deliver_telegram_collab_progress(state, api_registry, thread_id, route, snapshot).await;
+    }
+    true
+}
+
+async fn finish_telegram_command_progress(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    thread_id: &str,
+    route: &RouteTarget,
+    turn_id: Option<&str>,
+    failed: bool,
+) {
+    let turn_id = match turn_id.map(str::to_string) {
+        Some(turn_id) => Some(turn_id),
+        None => state
+            .runtime
+            .lock()
+            .await
+            .current_turn_id(thread_id)
+            .map(str::to_string),
+    };
+    let Some(turn_id) = turn_id else {
+        return;
+    };
+    let snapshot = state
+        .runtime
+        .lock()
+        .await
+        .finish_telegram_command_progress_with_outcome(thread_id, &turn_id, failed);
+    if let Some(snapshot) = snapshot {
+        let Some(api) = api_registry.telegram_for_route(route) else {
+            log_missing_api(state, route, "telegram_command_progress").await;
+            return;
+        };
+        deliver_telegram_command_progress_with_api(state, api, thread_id, route, snapshot).await;
+    }
+}
+
+async fn finish_telegram_collab_progress(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    thread_id: &str,
+    route: &RouteTarget,
+    turn_id: Option<&str>,
+) {
+    let turn_id = match turn_id.map(str::to_string) {
+        Some(turn_id) => Some(turn_id),
+        None => state
+            .runtime
+            .lock()
+            .await
+            .current_turn_id(thread_id)
+            .map(str::to_string),
+    };
+    let Some(turn_id) = turn_id else {
+        return;
+    };
+    let snapshot = state
+        .runtime
+        .lock()
+        .await
+        .finish_telegram_collab_progress(thread_id, &turn_id);
+    if let Some(snapshot) = snapshot {
+        deliver_telegram_collab_progress(state, api_registry, thread_id, route, snapshot).await;
+    }
+}
+
+pub(crate) async fn finish_telegram_command_progress_with_api(
+    state: &SharedState,
+    api: crate::im::telegram::api::TelegramApi,
+    thread_id: &str,
+    route: &RouteTarget,
+    turn_id: &str,
+) {
+    let snapshot = state
+        .runtime
+        .lock()
+        .await
+        .finish_telegram_command_progress(thread_id, turn_id);
+    if let Some(snapshot) = snapshot {
+        deliver_telegram_command_progress_with_api(state, api, thread_id, route, snapshot).await;
+    }
+}
+
+pub(crate) async fn finish_telegram_collab_progress_with_api(
+    state: &SharedState,
+    api: crate::im::telegram::api::TelegramApi,
+    thread_id: &str,
+    route: &RouteTarget,
+    turn_id: &str,
+) {
+    let snapshot = state
+        .runtime
+        .lock()
+        .await
+        .finish_telegram_collab_progress(thread_id, turn_id);
+    if let Some(snapshot) = snapshot {
+        deliver_telegram_collab_progress_with_api(state, api, thread_id, route, snapshot).await;
+    }
+}
+
+async fn finish_telegram_command_progress_with_api_and_outcome(
+    state: &SharedState,
+    api: crate::im::telegram::api::TelegramApi,
+    thread_id: &str,
+    route: &RouteTarget,
+    turn_id: &str,
+    failed: bool,
+) {
+    let snapshot = state
+        .runtime
+        .lock()
+        .await
+        .finish_telegram_command_progress_with_outcome(thread_id, turn_id, failed);
+    if let Some(snapshot) = snapshot {
+        deliver_telegram_command_progress_with_api(state, api, thread_id, route, snapshot).await;
+    }
+}
+
+async fn deliver_telegram_command_progress(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    thread_id: &str,
+    route: &RouteTarget,
+    snapshot: TelegramCommandProgressSnapshot,
+) {
+    let Some(api) = api_registry.telegram_for_route(route) else {
+        log_missing_api(state, route, "telegram_command_progress").await;
+        return;
+    };
+    deliver_telegram_command_progress_with_api(state, api, thread_id, route, snapshot).await;
+}
+
+async fn deliver_telegram_command_progress_with_api(
+    state: &SharedState,
+    api: crate::im::telegram::api::TelegramApi,
+    thread_id: &str,
+    route: &RouteTarget,
+    snapshot: TelegramCommandProgressSnapshot,
+) {
+    let snapshot = state
+        .runtime
+        .lock()
+        .await
+        .claim_telegram_command_progress_delivery(thread_id, &snapshot.turn_id);
+    let Some(snapshot) = snapshot else {
+        return;
+    };
+    spawn_telegram_command_progress_driver(state, api, thread_id, route, snapshot);
+}
+
+fn spawn_telegram_command_progress_driver(
+    state: &SharedState,
+    api: crate::im::telegram::api::TelegramApi,
+    thread_id: &str,
+    route: &RouteTarget,
+    snapshot: TelegramCommandProgressSnapshot,
+) {
+    let state = state.clone();
+    let thread_id = thread_id.to_string();
+    let route = route.clone();
+    tokio::spawn(async move {
+        telegram_command_progress_driver(state, api, thread_id, route, snapshot).await;
+    });
+}
+
+async fn telegram_command_progress_driver(
+    state: SharedState,
+    api: crate::im::telegram::api::TelegramApi,
+    thread_id: String,
+    route: RouteTarget,
+    mut snapshot: TelegramCommandProgressSnapshot,
+) {
+    let adapter = TelegramAdapter::new(api);
+    let mut consecutive_failures = 0_u32;
+    loop {
+        let is_current = state
+            .runtime
+            .lock()
+            .await
+            .telegram_command_progress_delivery_is_current(
+                &thread_id,
+                &snapshot.turn_id,
+                snapshot.revision,
+            );
+        if !is_current {
+            return;
+        }
+
+        let text = telegram_progress::render_command_progress(&snapshot, im_text_for_state(&state));
+        let result = adapter
+            .send_or_update_rich_markdown(&route.chat_id, snapshot.message_id.as_deref(), &text)
+            .await;
+
+        match result {
+            Ok(message_id) => {
+                consecutive_failures = 0;
+                let next = state
+                    .runtime
+                    .lock()
+                    .await
+                    .complete_telegram_command_progress_delivery(
+                        &thread_id,
+                        &snapshot.turn_id,
+                        snapshot.revision,
+                        message_id.clone(),
+                    );
+                state
+                    .push_event(
+                        "info",
+                        "telegram_command_progress_sent",
+                        format!(
+                            "thread={thread_id} turn={} chat={} message={} revision={} steps={} completed={}",
+                            snapshot.turn_id,
+                            route.chat_id,
+                            message_id,
+                            snapshot.revision,
+                            snapshot.dropped_entries.saturating_add(snapshot.entries.len()),
+                            snapshot.completed
+                        ),
+                    )
+                    .await;
+                let Some(next) = next else {
+                    return;
+                };
+                snapshot = next;
+            }
+            Err(err) => {
+                let retry_delay = telegram_command_progress_retry_delay_ms(
+                    &err,
+                    snapshot.message_id.is_some(),
+                    snapshot.completed,
+                );
+                let delivery_retained = state
+                    .runtime
+                    .lock()
+                    .await
+                    .fail_telegram_command_progress_delivery(
+                        &thread_id,
+                        &snapshot.turn_id,
+                        snapshot.revision,
+                    );
+                let should_retry =
+                    delivery_retained || (!snapshot.completed && retry_delay.is_some());
+                state
+                    .push_event(
+                        "warn",
+                        "telegram_command_progress_failed",
+                        format!(
+                            "thread={thread_id} turn={} chat={} revision={} completed={} retry={} err={err}",
+                            snapshot.turn_id,
+                            route.chat_id,
+                            snapshot.revision,
+                            snapshot.completed,
+                            should_retry
+                        ),
+                    )
+                    .await;
+                if !should_retry {
+                    return;
+                }
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                let delay_ms = retry_delay.unwrap_or_else(|| {
+                    let exponent = consecutive_failures.saturating_sub(1).min(6);
+                    500_u64.saturating_mul(1_u64 << exponent).min(30_000)
+                });
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                let next = {
+                    let mut runtime = state.runtime.lock().await;
+                    if delivery_retained {
+                        runtime
+                            .retry_telegram_command_progress_delivery(&thread_id, &snapshot.turn_id)
+                    } else {
+                        runtime
+                            .claim_telegram_command_progress_delivery(&thread_id, &snapshot.turn_id)
+                    }
+                };
+                let Some(next) = next else {
+                    return;
+                };
+                snapshot = next;
+            }
+        }
+    }
+}
+
+async fn deliver_telegram_collab_progress(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    thread_id: &str,
+    route: &RouteTarget,
+    snapshot: TelegramCollabProgressSnapshot,
+) {
+    let Some(api) = api_registry.telegram_for_route(route) else {
+        state
+            .runtime
+            .lock()
+            .await
+            .clear_telegram_collab_progress_for_turn(thread_id, &snapshot.turn_id);
+        log_missing_api(state, route, "telegram_collab_progress").await;
+        return;
+    };
+    deliver_telegram_collab_progress_with_api(state, api, thread_id, route, snapshot).await;
+}
+
+async fn deliver_telegram_collab_progress_with_api(
+    state: &SharedState,
+    api: crate::im::telegram::api::TelegramApi,
+    thread_id: &str,
+    route: &RouteTarget,
+    snapshot: TelegramCollabProgressSnapshot,
+) {
+    spawn_telegram_collab_progress_driver(state, api, thread_id, route, snapshot);
+}
+
+fn spawn_telegram_collab_progress_driver(
+    state: &SharedState,
+    api: crate::im::telegram::api::TelegramApi,
+    thread_id: &str,
+    route: &RouteTarget,
+    snapshot: TelegramCollabProgressSnapshot,
+) {
+    let state = state.clone();
+    let thread_id = thread_id.to_string();
+    let route = route.clone();
+    tokio::spawn(async move {
+        telegram_collab_progress_driver(state, api, thread_id, route, snapshot).await;
+    });
+}
+
+async fn telegram_collab_progress_driver(
+    state: SharedState,
+    api: crate::im::telegram::api::TelegramApi,
+    thread_id: String,
+    route: RouteTarget,
+    mut snapshot: TelegramCollabProgressSnapshot,
+) {
+    let adapter = TelegramAdapter::new(api);
+    let mut consecutive_failures = 0_u32;
+    loop {
+        let text =
+            telegram_collab_progress::render_collab_progress(&snapshot, im_text_for_state(&state));
+        let result = adapter
+            .send_or_update_rich_markdown(&route.chat_id, snapshot.message_id.as_deref(), &text)
+            .await;
+        match result {
+            Ok(message_id) => {
+                consecutive_failures = 0;
+                let next = state
+                    .runtime
+                    .lock()
+                    .await
+                    .complete_telegram_collab_progress_delivery(
+                        &thread_id,
+                        &snapshot.turn_id,
+                        snapshot.revision,
+                        message_id.clone(),
+                    );
+                state
+                    .push_event(
+                        "info",
+                        "telegram_collab_progress_sent",
+                        format!(
+                            "thread={thread_id} turn={} chat={} message={} revision={} agents={} completed={}",
+                            snapshot.turn_id,
+                            route.chat_id,
+                            message_id,
+                            snapshot.revision,
+                            snapshot.dropped_entries.saturating_add(snapshot.entries.len()),
+                            snapshot.completed
+                        ),
+                    )
+                    .await;
+                let Some(next) = next else {
+                    return;
+                };
+                snapshot = next;
+            }
+            Err(err) => {
+                let should_retry = state
+                    .runtime
+                    .lock()
+                    .await
+                    .fail_telegram_collab_progress_delivery(
+                        &thread_id,
+                        &snapshot.turn_id,
+                        snapshot.revision,
+                    );
+                state
+                    .push_event(
+                        "warn",
+                        "telegram_collab_progress_failed",
+                        format!(
+                            "thread={thread_id} turn={} chat={} revision={} completed={} retry={} err={err}",
+                            snapshot.turn_id,
+                            route.chat_id,
+                            snapshot.revision,
+                            snapshot.completed,
+                            should_retry
+                        ),
+                    )
+                    .await;
+                if !should_retry {
+                    return;
+                }
+                consecutive_failures = consecutive_failures.saturating_add(1);
+                let delay_ms = telegram_collab_progress_retry_delay_ms(&err, consecutive_failures);
+                tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                let next = state
+                    .runtime
+                    .lock()
+                    .await
+                    .retry_telegram_collab_progress_delivery(&thread_id, &snapshot.turn_id);
+                let Some(next) = next else {
+                    return;
+                };
+                snapshot = next;
+            }
+        }
+    }
+}
+
+fn telegram_collab_progress_retry_delay_ms(err: &anyhow::Error, failure_count: u32) -> u64 {
+    if let Some(api_err) = err.downcast_ref::<TelegramApiError>()
+        && let Some(retry_after) = api_err.retry_after
+    {
+        return retry_after.saturating_mul(1_000).clamp(500, 30_000);
+    }
+    let exponent = failure_count.saturating_sub(1).min(6);
+    500_u64.saturating_mul(1_u64 << exponent).min(30_000)
+}
+
+fn telegram_command_progress_retry_delay_ms(
+    err: &anyhow::Error,
+    has_message_id: bool,
+    final_update: bool,
+) -> Option<u64> {
+    if let Some(api_err) = err.downcast_ref::<TelegramApiError>()
+        && let Some(retry_after) = api_err.retry_after
+    {
+        return Some(retry_after.saturating_mul(1_000).min(5_000));
+    }
+    (has_message_id && final_update).then_some(500)
+}
+
 pub(crate) async fn send_next_approval(
     state: &SharedState,
     outbound_tx: &ImOutboundSender,
@@ -328,6 +1027,186 @@ pub(crate) async fn send_turn_reply(
     }
 }
 
+async fn send_telegram_agent_draft(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    thread_id: &str,
+    item_id: &str,
+    route: &RouteTarget,
+    delta: &str,
+) {
+    let Some(api) = api_registry.telegram_for_route(route) else {
+        log_missing_api(state, route, "agent_draft").await;
+        return;
+    };
+    let draft_id = state
+        .runtime
+        .lock()
+        .await
+        .append_telegram_draft_delta(thread_id, item_id, delta);
+    if let Some(draft_id) = draft_id {
+        spawn_telegram_draft_driver(state, api, thread_id, item_id, route, draft_id);
+    }
+}
+
+async fn finish_telegram_agent_draft(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    thread_id: &str,
+    item_id: &str,
+    route: &RouteTarget,
+    final_text: &str,
+) {
+    let Some(api) = api_registry.telegram_for_route(route) else {
+        log_missing_api(state, route, "agent_draft_final").await;
+        return;
+    };
+    let draft = state
+        .runtime
+        .lock()
+        .await
+        .finish_telegram_draft(thread_id, item_id, final_text);
+    let Some((draft_id, should_start, completed)) = draft else {
+        return;
+    };
+    if should_start {
+        spawn_telegram_draft_driver(state, api, thread_id, item_id, route, draft_id);
+    }
+    completed.notified().await;
+}
+
+fn spawn_telegram_draft_driver(
+    state: &SharedState,
+    api: crate::im::telegram::api::TelegramApi,
+    thread_id: &str,
+    item_id: &str,
+    route: &RouteTarget,
+    draft_id: i64,
+) {
+    let state = state.clone();
+    let thread_id = thread_id.to_string();
+    let item_id = item_id.to_string();
+    let route = route.clone();
+    tokio::spawn(async move {
+        telegram_draft_driver(state, api, thread_id, item_id, route, draft_id).await;
+    });
+}
+
+async fn telegram_draft_driver(
+    state: SharedState,
+    api: crate::im::telegram::api::TelegramApi,
+    thread_id: String,
+    item_id: String,
+    route: RouteTarget,
+    draft_id: i64,
+) {
+    let adapter = TelegramAdapter::new(api);
+    loop {
+        let now_ms = crate::types::now_ms();
+        let (send_delay_ms, wait_for_update) = {
+            let runtime = state.runtime.lock().await;
+            if let Some(delay_ms) = runtime.telegram_draft_send_delay_ms(
+                &thread_id,
+                &item_id,
+                draft_id,
+                now_ms,
+                TELEGRAM_DRAFT_THROTTLE_MS,
+            ) {
+                (Some(delay_ms), None)
+            } else if let Some(wait) = runtime.telegram_draft_wait_for_update(
+                &thread_id,
+                &item_id,
+                draft_id,
+                now_ms,
+                TELEGRAM_DRAFT_HEARTBEAT_MS,
+            ) {
+                (None, Some(wait))
+            } else {
+                return;
+            }
+        };
+
+        if let Some((wake_driver, heartbeat_delay_ms)) = wait_for_update {
+            tokio::select! {
+                _ = wake_driver.notified() => {}
+                _ = tokio::time::sleep(Duration::from_millis(heartbeat_delay_ms)) => {
+                    if !state.runtime.lock().await.mark_telegram_draft_heartbeat_due(
+                        &thread_id,
+                        &item_id,
+                        draft_id,
+                    ) {
+                        return;
+                    }
+                }
+            }
+            continue;
+        }
+
+        if let Some(delay_ms) = send_delay_ms
+            && delay_ms > 0
+        {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        }
+        let snapshot = state.runtime.lock().await.take_telegram_draft_snapshot(
+            &thread_id,
+            &item_id,
+            draft_id,
+            crate::types::now_ms(),
+        );
+        let Some((content, finished, revision)) = snapshot else {
+            return;
+        };
+        let result = adapter
+            .send_turn_draft(&route.chat_id, draft_id, &content)
+            .await;
+        match &result {
+            Ok(()) => {
+                state
+                    .push_event(
+                        "info",
+                        if finished {
+                            "telegram_turn_draft_final_sent"
+                        } else {
+                            "telegram_turn_draft_sent"
+                        },
+                        format!(
+                            "thread={thread_id} item={item_id} chat={} draft={draft_id} chars={}",
+                            route.chat_id,
+                            content.chars().count()
+                        ),
+                    )
+                    .await;
+            }
+            Err(err) => {
+                state
+                    .push_event(
+                        "warn",
+                        if finished {
+                            "telegram_turn_draft_final_failed"
+                        } else {
+                            "telegram_turn_draft_failed"
+                        },
+                        format!(
+                            "thread={thread_id} item={item_id} chat={} draft={draft_id} err={err}",
+                            route.chat_id
+                        ),
+                    )
+                    .await;
+            }
+        }
+        let action = state.runtime.lock().await.complete_telegram_draft_send(
+            &thread_id,
+            &item_id,
+            draft_id,
+            revision,
+            result.is_ok(),
+        );
+        if action == TelegramDraftSendAction::Stop {
+            return;
+        }
+    }
+}
+
 fn turn_reply_dedupe_key(route: &RouteTarget) -> String {
     format!("{}:turn-reply", route.conversation_key)
 }
@@ -373,14 +1252,205 @@ fn agent_message_image_fallback_text(alt: &str, target: &str) -> String {
     }
 }
 
-async fn send_turn_completed_mark(
+fn turn_error_value(params: &serde_json::Value) -> Option<&serde_json::Value> {
+    params
+        .get("error")
+        .filter(|value| !value.is_null())
+        .or_else(|| {
+            params
+                .get("turn")
+                .and_then(|turn| turn.get("error"))
+                .filter(|value| !value.is_null())
+        })
+}
+
+async fn effective_terminal_turn_id(
+    state: &SharedState,
+    thread_id: &str,
+    params: &serde_json::Value,
+) -> Option<String> {
+    if let Some(turn_id) = params
+        .get("turnId")
+        .and_then(|value| value.as_str())
+        .or_else(|| {
+            params
+                .get("turn")
+                .and_then(|turn| turn.get("id"))
+                .and_then(|value| value.as_str())
+        })
+    {
+        return Some(turn_id.to_string());
+    }
+    state
+        .runtime
+        .lock()
+        .await
+        .current_turn_id(thread_id)
+        .map(str::to_string)
+}
+
+async fn terminal_turn_is_stale(
+    state: &SharedState,
+    thread_id: &str,
+    turn_id: Option<&str>,
+) -> bool {
+    let Some(turn_id) = turn_id else {
+        return false;
+    };
+    let current = state
+        .runtime
+        .lock()
+        .await
+        .current_turn_id(thread_id)
+        .map(str::to_string);
+    let Some(current) = current else {
+        return false;
+    };
+    if current == turn_id {
+        return false;
+    }
+    state
+        .push_event(
+            "warn",
+            "codex_terminal_event_stale",
+            format!("thread={thread_id} current_turn={current} received_turn={turn_id}"),
+        )
+        .await;
+    true
+}
+
+fn turn_is_failed(params: &serde_json::Value) -> bool {
+    if turn_error_value(params).is_some() {
+        return true;
+    }
+    let status = params
+        .get("turn")
+        .and_then(|turn| turn.get("status"))
+        .or_else(|| params.get("status"));
+    match status {
+        Some(value) if value.is_string() => matches!(
+            value.as_str().unwrap_or_default(),
+            "failed" | "error" | "systemError"
+        ),
+        Some(value) => value
+            .get("type")
+            .and_then(|value| value.as_str())
+            .is_some_and(|value| matches!(value, "failed" | "error" | "systemError")),
+        None => false,
+    }
+}
+
+fn turn_failure_summary(params: &serde_json::Value) -> Option<String> {
+    let error = turn_error_value(params)?;
+    let message = error
+        .as_str()
+        .or_else(|| error.get("message").and_then(|value| value.as_str()))
+        .or_else(|| error.get("error").and_then(|value| value.as_str()))
+        .or_else(|| {
+            error
+                .get("additionalDetails")
+                .and_then(|value| value.as_str())
+        })
+        .map(sanitize_turn_error_summary)
+        .filter(|value| !value.is_empty());
+    let status_code = find_http_status_code(error);
+    match (message, status_code) {
+        (Some(message), Some(status_code)) if !contains_status_code(&message, status_code) => {
+            Some(truncate_chars(
+                &format!("{status_code} {message}"),
+                TURN_ERROR_SUMMARY_MAX_CHARS,
+            ))
+        }
+        (Some(message), _) => Some(message),
+        (None, Some(status_code)) => Some(status_code.to_string()),
+        (None, None) => None,
+    }
+}
+
+fn find_http_status_code(value: &serde_json::Value) -> Option<u16> {
+    if let Some(object) = value.as_object() {
+        for key in [
+            "httpStatusCode",
+            "http_status_code",
+            "statusCode",
+            "status_code",
+        ] {
+            if let Some(code) = object
+                .get(key)
+                .and_then(|value| value.as_u64())
+                .and_then(|code| u16::try_from(code).ok())
+                .filter(|code| (100..=599).contains(code))
+            {
+                return Some(code);
+            }
+        }
+        for child in object.values() {
+            if let Some(code) = find_http_status_code(child) {
+                return Some(code);
+            }
+        }
+    } else if let Some(array) = value.as_array() {
+        for child in array {
+            if let Some(code) = find_http_status_code(child) {
+                return Some(code);
+            }
+        }
+    }
+    None
+}
+
+fn contains_status_code(text: &str, status_code: u16) -> bool {
+    let code = status_code.to_string();
+    text.split(|ch: char| !ch.is_ascii_digit())
+        .any(|part| part == code)
+}
+
+fn sanitize_turn_error_summary(value: &str) -> String {
+    let compact = value
+        .replace("\r\n", " ")
+        .replace(['\r', '\n'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let lower = compact.to_ascii_lowercase();
+    let mut end = compact.len();
+    for marker in [
+        ", url:",
+        "; url:",
+        " url: http",
+        ", request id:",
+        "; request id:",
+        " request id:",
+        ", request_id:",
+        "; request_id:",
+        " request_id:",
+        " https://",
+        " http://",
+    ] {
+        if let Some(index) = lower.find(marker) {
+            end = end.min(index);
+        }
+    }
+    let compact = compact[..end]
+        .trim()
+        .replace("```", "'''")
+        .replace('`', "'");
+    truncate_chars(&compact, TURN_ERROR_SUMMARY_MAX_CHARS)
+}
+
+fn truncate_chars(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
+}
+
+async fn send_turn_terminal_mark(
     state: &SharedState,
     api_registry: &ImApiRegistry,
     outbound_tx: &ImOutboundSender,
     thread_id: &str,
     route: &RouteTarget,
+    text: &str,
+    failed: bool,
 ) {
-    let text = im_text_for_state(state).turn_completed_notice();
     match route.platform {
         ImPlatformKind::Feishu => {
             let Some(api) = api_registry.feishu_for_route(route) else {
@@ -417,7 +1487,11 @@ async fn send_turn_completed_mark(
                 thread_id: thread_id.to_string(),
                 route: route.clone(),
                 item_id: None,
-                item_type: Some("turnCompleted".to_string()),
+                item_type: Some(if failed {
+                    "turnFailed".to_string()
+                } else {
+                    "turnCompleted".to_string()
+                }),
                 kind: ImOutboundKind::TurnReply,
                 payload: ImOutboundPayload::Text(text.to_string()),
             }) {
@@ -435,6 +1509,135 @@ async fn send_turn_completed_mark(
             }
         }
     }
+}
+
+async fn send_turn_terminal_mark_once(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    outbound_tx: &ImOutboundSender,
+    thread_id: &str,
+    route: &RouteTarget,
+    turn_id: Option<&str>,
+    failed: bool,
+    error_summary: Option<&str>,
+) {
+    let should_send = match turn_id {
+        Some(turn_id) => state
+            .runtime
+            .lock()
+            .await
+            .claim_terminal_notice(turn_id, failed),
+        None => true,
+    };
+    if !should_send {
+        state
+            .push_event(
+                "info",
+                "im_turn_terminal_mark_skipped",
+                format!(
+                    "thread={thread_id} platform={} chat={} reason=duplicate turn={} failed={failed}",
+                    route.platform.key(),
+                    route.chat_id,
+                    turn_id.unwrap_or("")
+                ),
+            )
+            .await;
+        return;
+    }
+    let text = if failed {
+        im_text_for_state(state).turn_failed_notice(error_summary)
+    } else {
+        im_text_for_state(state).turn_completed_notice().to_string()
+    };
+    send_turn_terminal_mark(
+        state,
+        api_registry,
+        outbound_tx,
+        thread_id,
+        route,
+        &text,
+        failed,
+    )
+    .await;
+}
+
+async fn schedule_terminal_status_fallback(
+    state: &SharedState,
+    api_registry: &ImApiRegistry,
+    outbound_tx: &ImOutboundSender,
+    thread_id: &str,
+    status_type: &str,
+) {
+    let (turn_id, route, fallback_token) = {
+        let mut runtime = state.runtime.lock().await;
+        let Some(turn_id) = runtime.current_turn_id(thread_id).map(str::to_string) else {
+            return;
+        };
+        let Some(route) = runtime.route_for_thread(thread_id) else {
+            return;
+        };
+        let Some(fallback_token) = runtime.start_terminal_status_fallback(thread_id, &turn_id)
+        else {
+            return;
+        };
+        (turn_id, route, fallback_token)
+    };
+    let state = state.clone();
+    let api_registry = api_registry.clone();
+    let outbound_tx = outbound_tx.clone();
+    let thread_id = thread_id.to_string();
+    let status_type = status_type.to_string();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(TERMINAL_STATUS_FALLBACK_DELAY_MS)).await;
+        let (command_snapshot, collab_snapshot) = {
+            let mut runtime = state.runtime.lock().await;
+            if !runtime.claim_terminal_status_fallback(&thread_id, &turn_id, fallback_token) {
+                return;
+            }
+            let failed = status_type == "systemError";
+            let command_snapshot = (route.platform == ImPlatformKind::Telegram)
+                .then(|| {
+                    runtime
+                        .finish_telegram_command_progress_with_outcome(&thread_id, &turn_id, failed)
+                })
+                .flatten();
+            let collab_snapshot = (route.platform == ImPlatformKind::Telegram)
+                .then(|| runtime.finish_telegram_collab_progress(&thread_id, &turn_id))
+                .flatten();
+            if !runtime.mark_turn_completed(&thread_id, Some(&turn_id)) {
+                return;
+            }
+            (command_snapshot, collab_snapshot)
+        };
+        if let Some(snapshot) = command_snapshot {
+            deliver_telegram_command_progress(&state, &api_registry, &thread_id, &route, snapshot)
+                .await;
+        }
+        if let Some(snapshot) = collab_snapshot {
+            deliver_telegram_collab_progress(&state, &api_registry, &thread_id, &route, snapshot)
+                .await;
+        }
+        if status_type == "systemError" {
+            send_turn_terminal_mark_once(
+                &state,
+                &api_registry,
+                &outbound_tx,
+                &thread_id,
+                &route,
+                Some(&turn_id),
+                true,
+                None,
+            )
+            .await;
+        }
+        state
+            .push_event(
+                "warn",
+                "codex_terminal_status_fallback",
+                format!("thread={thread_id} turn={turn_id} status={status_type}"),
+            )
+            .await;
+    });
 }
 
 pub(crate) async fn handle_codex_notification(
@@ -471,8 +1674,164 @@ pub(crate) async fn handle_codex_notification(
                     .mark_turn_started(thread_id, turn_id);
             }
         }
+        "error" => {
+            let will_retry = params
+                .get("willRetry")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            let Some(thread_id) = params.get("threadId").and_then(|value| value.as_str()) else {
+                return;
+            };
+            let turn_id = effective_terminal_turn_id(&state, thread_id, params).await;
+            if terminal_turn_is_stale(&state, thread_id, turn_id.as_deref()).await {
+                return;
+            }
+            if will_retry {
+                let Some(turn_id) = turn_id.as_deref() else {
+                    return;
+                };
+                let route =
+                    route_for_codex_output(&state, &notification.method, thread_id, params).await;
+                let Some(route) = route.filter(|route| route.platform == ImPlatformKind::Telegram)
+                else {
+                    return;
+                };
+                let snapshot = state.runtime.lock().await.record_telegram_retry(
+                    thread_id,
+                    turn_id,
+                    turn_failure_summary(params),
+                );
+                if let Some(snapshot) = snapshot {
+                    deliver_telegram_command_progress(
+                        &state,
+                        &api_registry,
+                        thread_id,
+                        &route,
+                        snapshot,
+                    )
+                    .await;
+                }
+                return;
+            }
+            if let Some(turn_id) = turn_id.as_deref() {
+                state
+                    .runtime
+                    .lock()
+                    .await
+                    .cancel_terminal_status_fallback(thread_id, turn_id);
+            }
+            let route =
+                route_for_codex_output(&state, &notification.method, thread_id, params).await;
+            let Some(route) = route else {
+                state
+                    .runtime
+                    .lock()
+                    .await
+                    .mark_turn_completed(thread_id, turn_id.as_deref());
+                return;
+            };
+            if route.platform == ImPlatformKind::Telegram
+                && let Some(turn_id) = turn_id.as_deref()
+                && let Some(api) = api_registry.telegram_for_route(&route)
+            {
+                finish_telegram_command_progress_with_api_and_outcome(
+                    &state,
+                    api.clone(),
+                    thread_id,
+                    &route,
+                    turn_id,
+                    true,
+                )
+                .await;
+                finish_telegram_collab_progress_with_api(&state, api, thread_id, &route, turn_id)
+                    .await;
+            }
+            state
+                .runtime
+                .lock()
+                .await
+                .mark_turn_completed(thread_id, turn_id.as_deref());
+            let summary = turn_failure_summary(params);
+            send_turn_terminal_mark_once(
+                &state,
+                &api_registry,
+                &outbound_tx,
+                thread_id,
+                &route,
+                turn_id.as_deref(),
+                true,
+                summary.as_deref(),
+            )
+            .await;
+        }
         "thread/started" => {}
-        "thread/status/changed" => {}
+        "thread/status/changed" => {
+            let Some(thread_id) = params.get("threadId").and_then(|v| v.as_str()) else {
+                return;
+            };
+            let Some(status_type) = params
+                .get("status")
+                .and_then(|status| {
+                    status
+                        .get("type")
+                        .and_then(|value| value.as_str())
+                        .or_else(|| status.as_str())
+                })
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                return;
+            };
+            if matches!(status_type, "idle" | "notLoaded" | "systemError") {
+                schedule_terminal_status_fallback(
+                    &state,
+                    &api_registry,
+                    &outbound_tx,
+                    thread_id,
+                    status_type,
+                )
+                .await;
+            }
+        }
+        "turn/plan/updated" => {
+            let Some(thread_id) = params.get("threadId").and_then(|v| v.as_str()) else {
+                return;
+            };
+            let Some(route) =
+                route_for_codex_output(&state, &notification.method, thread_id, params).await
+            else {
+                return;
+            };
+            if route.platform == ImPlatformKind::Telegram {
+                update_telegram_plan_progress(
+                    &state,
+                    &api_registry,
+                    thread_id,
+                    &route,
+                    params,
+                    true,
+                )
+                .await;
+            }
+        }
+        "turn/diff/updated" => {
+            let Some(thread_id) = params.get("threadId").and_then(|v| v.as_str()) else {
+                return;
+            };
+            let Some(route) =
+                route_for_codex_output(&state, &notification.method, thread_id, params).await
+            else {
+                return;
+            };
+            if route.platform == ImPlatformKind::Telegram {
+                update_telegram_diff_progress(&state, &api_registry, thread_id, &route, params)
+                    .await;
+            }
+        }
+        "item/reasoning/summaryPartAdded" => {
+            // This notification only opens a new summary segment. There is no
+            // text to send yet; the following summaryTextDelta fills it.
+        }
         "item/started" => {
             let Some(thread_id) = params.get("threadId").and_then(|v| v.as_str()) else {
                 return;
@@ -490,11 +1849,29 @@ pub(crate) async fn handle_codex_notification(
                 return;
             };
             let route =
-                feishu_route_for_codex_output(&state, &notification.method, thread_id, params)
-                    .await;
+                route_for_codex_output(&state, &notification.method, thread_id, params).await;
             let Some(route) = route else {
                 return;
             };
+            if route.platform == ImPlatformKind::Telegram {
+                if item_type == "commandExecution" {
+                    let _ = update_telegram_command_progress(
+                        &state,
+                        &api_registry,
+                        thread_id,
+                        &route,
+                        params,
+                        item_id,
+                        item,
+                        false,
+                    )
+                    .await;
+                }
+                return;
+            }
+            if route.platform != ImPlatformKind::Feishu {
+                return;
+            }
             let Some(api) = api_registry.feishu_for_route(&route) else {
                 log_missing_api(&state, &route, "item_started").await;
                 return;
@@ -547,6 +1924,11 @@ pub(crate) async fn handle_codex_notification(
                 send_wecom_stream_delta(&state, &api, thread_id, &route, delta, false).await;
                 return;
             }
+            if route.platform == ImPlatformKind::Telegram {
+                send_telegram_agent_draft(&state, &api_registry, thread_id, item_id, &route, delta)
+                    .await;
+                return;
+            }
             if route.platform != ImPlatformKind::Feishu {
                 return;
             }
@@ -578,11 +1960,32 @@ pub(crate) async fn handle_codex_notification(
                 return;
             };
             let route =
-                feishu_route_for_codex_output(&state, &notification.method, thread_id, params)
-                    .await;
+                route_for_codex_output(&state, &notification.method, thread_id, params).await;
             let Some(route) = route else {
                 return;
             };
+            if notification.method == "item/reasoning/summaryTextDelta"
+                && route.platform == ImPlatformKind::Telegram
+            {
+                let Some(turn_id) = params.get("turnId").and_then(|value| value.as_str()) else {
+                    return;
+                };
+                let summary_index = params
+                    .get("summaryIndex")
+                    .and_then(|value| value.as_i64())
+                    .unwrap_or_default();
+                state.runtime.lock().await.append_telegram_reasoning_delta(
+                    thread_id,
+                    turn_id,
+                    item_id,
+                    summary_index,
+                    delta,
+                );
+                return;
+            }
+            if route.platform != ImPlatformKind::Feishu {
+                return;
+            }
             let Some(api) = api_registry.feishu_for_route(&route) else {
                 log_missing_api(&state, &route, "reasoning_delta").await;
                 return;
@@ -724,11 +2127,29 @@ pub(crate) async fn handle_codex_notification(
                 return;
             };
             let route =
-                feishu_route_for_codex_output(&state, &notification.method, thread_id, params)
-                    .await;
+                route_for_codex_output(&state, &notification.method, thread_id, params).await;
             let Some(route) = route else {
                 return;
             };
+            if route.platform == ImPlatformKind::Telegram {
+                if item_type == "commandExecution" {
+                    let _ = update_telegram_command_progress(
+                        &state,
+                        &api_registry,
+                        thread_id,
+                        &route,
+                        params,
+                        item_id,
+                        item,
+                        false,
+                    )
+                    .await;
+                }
+                return;
+            }
+            if route.platform != ImPlatformKind::Feishu {
+                return;
+            }
             let Some(api) = api_registry.feishu_for_route(&route) else {
                 log_missing_api(&state, &route, "item_updated").await;
                 return;
@@ -769,10 +2190,99 @@ pub(crate) async fn handle_codex_notification(
             let Some(route) = route else {
                 return;
             };
+            if route.platform == ImPlatformKind::Telegram
+                && !matches!(
+                    telegram_command_turn(&state, thread_id, params).await,
+                    TelegramCommandTurn::Active(_)
+                )
+            {
+                return;
+            }
             if matches!(
                 route.platform,
                 ImPlatformKind::Telegram | ImPlatformKind::Wechat | ImPlatformKind::Wecom
             ) {
+                if route.platform == ImPlatformKind::Telegram
+                    && telegram_collab_progress::is_collab_item_type(item_type)
+                {
+                    let _ = update_telegram_collab_progress(
+                        &state,
+                        &api_registry,
+                        thread_id,
+                        &route,
+                        params,
+                        item_id,
+                        item,
+                    )
+                    .await;
+                    return;
+                }
+                if route.platform == ImPlatformKind::Telegram && item_type == "reasoning" {
+                    update_telegram_reasoning_progress(
+                        &state,
+                        &api_registry,
+                        thread_id,
+                        &route,
+                        params,
+                        item_id,
+                        item,
+                    )
+                    .await;
+                    return;
+                }
+                if route.platform == ImPlatformKind::Telegram && item_type == "fileChange" {
+                    update_telegram_file_change_progress(
+                        &state,
+                        &api_registry,
+                        thread_id,
+                        &route,
+                        params,
+                        item,
+                    )
+                    .await;
+                    return;
+                }
+                if route.platform == ImPlatformKind::Telegram && item_type == "plan" {
+                    let (explanation, plan) = telegram_progress::plan_from_item(item);
+                    let turn_id = telegram_command_turn(&state, thread_id, params).await;
+                    if let TelegramCommandTurn::Active(turn_id) = turn_id {
+                        let snapshot = state.runtime.lock().await.update_telegram_plan(
+                            thread_id,
+                            &turn_id,
+                            explanation,
+                            plan,
+                            true,
+                        );
+                        if let Some(snapshot) = snapshot {
+                            deliver_telegram_command_progress(
+                                &state,
+                                &api_registry,
+                                thread_id,
+                                &route,
+                                snapshot,
+                            )
+                            .await;
+                        }
+                    }
+                    return;
+                }
+                if route.platform == ImPlatformKind::Telegram && item_type == "commandExecution" {
+                    // Command executions belong to the aggregate progress
+                    // message.  Keep late events from falling through to the
+                    // ordinary item sender after the turn has been cleaned up.
+                    let _ = update_telegram_command_progress(
+                        &state,
+                        &api_registry,
+                        thread_id,
+                        &route,
+                        params,
+                        item_id,
+                        item,
+                        true,
+                    )
+                    .await;
+                    return;
+                }
                 if route.platform == ImPlatformKind::Wecom && item_type == "agentMessage" {
                     if let Some(text) = extract_agent_message_text(item) {
                         let Some(api) = api_registry.wecom_for_route(&route) else {
@@ -794,6 +2304,17 @@ pub(crate) async fn handle_codex_notification(
                 if item_type == "agentMessage"
                     && let Some(text) = extract_agent_message_text(item)
                 {
+                    if route.platform == ImPlatformKind::Telegram {
+                        finish_telegram_agent_draft(
+                            &state,
+                            &api_registry,
+                            thread_id,
+                            item_id,
+                            &route,
+                            &text,
+                        )
+                        .await;
+                    }
                     send_turn_reply(
                         &state,
                         &api_registry,
@@ -960,11 +2481,19 @@ pub(crate) async fn handle_codex_notification(
             let Some(thread_id) = params.get("threadId").and_then(|v| v.as_str()) else {
                 return;
             };
-            let turn_id = params
-                .get("turn")
-                .and_then(|turn| turn.get("id"))
-                .and_then(|v| v.as_str())
-                .or_else(|| params.get("turnId").and_then(|v| v.as_str()));
+            let effective_turn_id = effective_terminal_turn_id(&state, thread_id, params).await;
+            if terminal_turn_is_stale(&state, thread_id, effective_turn_id.as_deref()).await {
+                return;
+            }
+            if let Some(turn_id) = effective_turn_id.as_deref() {
+                state
+                    .runtime
+                    .lock()
+                    .await
+                    .cancel_terminal_status_fallback(thread_id, turn_id);
+            }
+            let failed = turn_is_failed(params);
+            let failure_summary = turn_failure_summary(params);
             let route =
                 route_for_codex_output(&state, &notification.method, thread_id, params).await;
             let Some(route) = route else {
@@ -972,9 +2501,28 @@ pub(crate) async fn handle_codex_notification(
                     .runtime
                     .lock()
                     .await
-                    .mark_turn_completed(thread_id, turn_id);
+                    .mark_turn_completed(thread_id, effective_turn_id.as_deref());
                 return;
             };
+            if route.platform == ImPlatformKind::Telegram {
+                finish_telegram_command_progress(
+                    &state,
+                    &api_registry,
+                    thread_id,
+                    &route,
+                    effective_turn_id.as_deref(),
+                    failed,
+                )
+                .await;
+                finish_telegram_collab_progress(
+                    &state,
+                    &api_registry,
+                    thread_id,
+                    &route,
+                    effective_turn_id.as_deref(),
+                )
+                .await;
+            }
             let wecom_stream_finished = if route.platform == ImPlatformKind::Wecom {
                 let stream = state
                     .runtime
@@ -1016,8 +2564,18 @@ pub(crate) async fn handle_codex_notification(
                 .runtime
                 .lock()
                 .await
-                .mark_turn_completed(thread_id, turn_id);
-            send_turn_completed_mark(&state, &api_registry, &outbound_tx, thread_id, &route).await;
+                .mark_turn_completed(thread_id, effective_turn_id.as_deref());
+            send_turn_terminal_mark_once(
+                &state,
+                &api_registry,
+                &outbound_tx,
+                thread_id,
+                &route,
+                effective_turn_id.as_deref(),
+                failed,
+                failure_summary.as_deref(),
+            )
+            .await;
         }
         _ => {}
     }
@@ -1845,6 +3403,7 @@ fn safe_file_stem(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use reqwest::StatusCode;
     use serde_json::json;
 
     use super::*;
@@ -1885,6 +3444,127 @@ mod tests {
             chat_id: "single:user".to_string(),
             remote_client_key: "remote".to_string(),
         }
+    }
+
+    #[test]
+    fn telegram_command_progress_retry_caps_server_retry_after() {
+        let error = anyhow::Error::from(TelegramApiError {
+            method: "editMessageText".to_string(),
+            status: StatusCode::TOO_MANY_REQUESTS,
+            error_code: Some(429),
+            description: "Too Many Requests".to_string(),
+            retry_after: Some(30),
+        });
+
+        assert_eq!(
+            telegram_command_progress_retry_delay_ms(&error, false, false),
+            Some(5_000)
+        );
+    }
+
+    #[test]
+    fn telegram_command_progress_only_retries_generic_errors_for_final_edits() {
+        let error = anyhow::anyhow!("temporary network failure");
+
+        assert_eq!(
+            telegram_command_progress_retry_delay_ms(&error, true, true),
+            Some(500)
+        );
+        assert_eq!(
+            telegram_command_progress_retry_delay_ms(&error, false, true),
+            None
+        );
+        assert_eq!(
+            telegram_command_progress_retry_delay_ms(&error, true, false),
+            None
+        );
+    }
+
+    #[test]
+    fn turn_failure_summary_keeps_503_and_removes_diagnostics() {
+        let params = json!({
+            "threadId": "thread",
+            "turnId": "turn",
+            "willRetry": false,
+            "error": {
+                "message": "unexpected status 503 Service Unavailable: Service temporarily unavailable, url: http://127.0.0.1:8090/responses, request id: secret-request-id",
+                "codexErrorInfo": "other"
+            }
+        });
+
+        assert!(turn_is_failed(&params));
+        let summary = turn_failure_summary(&params).expect("error summary");
+        assert!(summary.contains("503 Service Unavailable"));
+        assert!(!summary.contains("127.0.0.1"));
+        assert!(!summary.contains("secret-request-id"));
+    }
+
+    #[test]
+    fn turn_failure_summary_reads_nested_error_and_http_status_code() {
+        let params = json!({
+            "threadId": "thread",
+            "turn": {
+                "id": "turn",
+                "status": "failed",
+                "error": {
+                    "message": "provider unavailable",
+                    "codexErrorInfo": {
+                        "responseStreamConnectionFailed": {"httpStatusCode": 503}
+                    }
+                }
+            }
+        });
+
+        assert!(turn_is_failed(&params));
+        assert_eq!(
+            turn_failure_summary(&params).as_deref(),
+            Some("503 provider unavailable")
+        );
+    }
+
+    #[test]
+    fn failed_turn_without_error_body_still_has_a_failure_state() {
+        let params = json!({
+            "threadId": "thread",
+            "turn": {"id": "turn", "status": "failed", "error": null}
+        });
+
+        assert!(turn_is_failed(&params));
+        assert!(turn_failure_summary(&params).is_none());
+    }
+
+    #[test]
+    fn turn_failure_summary_accepts_string_and_additional_details_errors() {
+        let string_error = json!({
+            "threadId": "thread",
+            "error": "503 Service Unavailable"
+        });
+        assert_eq!(
+            turn_failure_summary(&string_error).as_deref(),
+            Some("503 Service Unavailable")
+        );
+
+        let details_error = json!({
+            "threadId": "thread",
+            "error": {"additionalDetails": "gateway unavailable"}
+        });
+        assert_eq!(
+            turn_failure_summary(&details_error).as_deref(),
+            Some("gateway unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_terminal_event_does_not_match_a_new_turn() {
+        let state = test_state();
+        state
+            .runtime
+            .lock()
+            .await
+            .mark_turn_started("thread", "new-turn");
+
+        assert!(terminal_turn_is_stale(&state, "thread", Some("old-turn")).await);
+        assert!(!terminal_turn_is_stale(&state, "thread", Some("new-turn")).await);
     }
 
     #[tokio::test]

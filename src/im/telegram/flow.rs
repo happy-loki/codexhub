@@ -32,12 +32,138 @@ use crate::{
         api::TelegramApi,
         types::TelegramSettings,
     },
-    im_runtime::{RouteTarget, ThreadRoutingRequestState, ThreadRoutingStage, TurnOrigin},
+    im_runtime::{ThreadRoutingRequestState, ThreadRoutingStage, TurnOrigin},
     remote_control_backend,
     types::{InboundAction, InboundMessage, ThreadRouteDirection},
 };
 
 const TELEGRAM_CREATE_OPTION_PAGE_SIZE: usize = 8;
+
+#[derive(Debug, PartialEq, Eq)]
+enum TelegramThreadRoutingResultDelivery {
+    Updated,
+    SentAsNew {
+        message_id: String,
+        update_error: String,
+    },
+    Undelivered {
+        update_error: String,
+        fallback_error: String,
+    },
+}
+
+#[async_trait::async_trait]
+trait TelegramThreadRoutingResultSender: Sync {
+    async fn send_thread_routing_result(
+        &self,
+        target: &str,
+        title: &str,
+        body: &str,
+        message_id: Option<&str>,
+    ) -> Result<String>;
+}
+
+#[async_trait::async_trait]
+impl TelegramThreadRoutingResultSender for TelegramAdapter {
+    async fn send_thread_routing_result(
+        &self,
+        target: &str,
+        title: &str,
+        body: &str,
+        message_id: Option<&str>,
+    ) -> Result<String> {
+        TelegramAdapter::send_thread_routing_result(self, target, title, body, message_id).await
+    }
+}
+
+async fn deliver_telegram_thread_routing_result(
+    sender: &(impl TelegramThreadRoutingResultSender + ?Sized),
+    target: &str,
+    title: &str,
+    body: &str,
+    progress_message_id: &str,
+) -> TelegramThreadRoutingResultDelivery {
+    let update_error = match sender
+        .send_thread_routing_result(target, title, body, Some(progress_message_id))
+        .await
+    {
+        Ok(_) => return TelegramThreadRoutingResultDelivery::Updated,
+        Err(error) => error.to_string(),
+    };
+
+    match sender
+        .send_thread_routing_result(target, title, body, None)
+        .await
+    {
+        Ok(message_id) => TelegramThreadRoutingResultDelivery::SentAsNew {
+            message_id,
+            update_error,
+        },
+        Err(error) => TelegramThreadRoutingResultDelivery::Undelivered {
+            update_error,
+            fallback_error: error.to_string(),
+        },
+    }
+}
+
+async fn publish_telegram_thread_routing_result(
+    state: &SharedState,
+    adapter: &TelegramAdapter,
+    chat_id: &str,
+    conversation_key: &str,
+    thread_id: &str,
+    title: &str,
+    body: &str,
+    progress_message_id: &str,
+    success_event_kind: &str,
+) {
+    let delivery =
+        deliver_telegram_thread_routing_result(adapter, chat_id, title, body, progress_message_id)
+            .await;
+    match delivery {
+        TelegramThreadRoutingResultDelivery::Updated => {}
+        TelegramThreadRoutingResultDelivery::SentAsNew {
+            message_id,
+            update_error,
+        } => {
+            let event_kind = format!("{success_event_kind}_status_update_failed");
+            state
+                .push_event(
+                    "warn",
+                    &event_kind,
+                    format!(
+                        "conversation={conversation_key} thread={thread_id} message={progress_message_id} fallback=sent_as_new fallback_message={message_id} update_err={update_error}"
+                    ),
+                )
+                .await;
+        }
+        TelegramThreadRoutingResultDelivery::Undelivered {
+            update_error,
+            fallback_error,
+        } => {
+            let update_event_kind = format!("{success_event_kind}_status_update_failed");
+            state
+                .push_event(
+                    "warn",
+                    &update_event_kind,
+                    format!(
+                        "conversation={conversation_key} thread={thread_id} message={progress_message_id} fallback=send_new_failed update_err={update_error}"
+                    ),
+                )
+                .await;
+            let fallback_event_kind = format!("{success_event_kind}_status_fallback_failed");
+            state
+                .push_event(
+                    "warn",
+                    &fallback_event_kind,
+                    format!(
+                        "conversation={conversation_key} thread={thread_id} fallback_err={fallback_error}"
+                    ),
+                )
+                .await;
+        }
+    }
+}
 
 pub(crate) async fn handle_inbound(
     state: SharedState,
@@ -66,7 +192,7 @@ pub(crate) async fn handle_inbound(
         .telegram_account(&message.account_id)
         .unwrap_or_else(|| config.telegram.clone());
     let api = TelegramApi::new(TelegramSettings::from_app_config(&telegram_config));
-    let adapter = TelegramAdapter::new(api);
+    let adapter = TelegramAdapter::new(api.clone());
     let trimmed = message.text.trim();
     let route = route_for_message(&message);
     let text = im_text_for_state(&state);
@@ -136,17 +262,44 @@ pub(crate) async fn handle_inbound(
             let remote_client_key = remote_client_key_for_thread(&state, &thread_id)
                 .await
                 .context("bound IM thread is missing remote client key")?;
-            remote_control_backend::interrupt_turn_for_client(
+            let claimed_terminal_notice = state
+                .runtime
+                .lock()
+                .await
+                .claim_terminal_notice(&turn_id, true);
+            if let Err(err) = remote_control_backend::interrupt_turn_for_client(
                 &state,
                 &remote_client_key,
                 &thread_id,
                 &turn_id,
             )
-            .await?;
+            .await
+            {
+                if claimed_terminal_notice {
+                    state.runtime.lock().await.release_terminal_notice(&turn_id);
+                }
+                return Err(err);
+            }
             remote_control_backend::clear_turn_for_client(
                 &state,
                 &remote_client_key,
                 Some(&turn_id),
+            )
+            .await;
+            events::finish_telegram_command_progress_with_api(
+                &state,
+                api.clone(),
+                &thread_id,
+                &route,
+                &turn_id,
+            )
+            .await;
+            events::finish_telegram_collab_progress_with_api(
+                &state,
+                api.clone(),
+                &thread_id,
+                &route,
+                &turn_id,
             )
             .await;
             state
@@ -161,6 +314,11 @@ pub(crate) async fn handle_inbound(
         }
         Some("/q") => {
             if let Some((thread_id, turn_id)) = active_turn_for_message(&state, &message).await {
+                state
+                    .runtime
+                    .lock()
+                    .await
+                    .claim_terminal_notice(&turn_id, true);
                 let remote_client_key = remote_client_key_for_thread(&state, &thread_id)
                     .await
                     .context("bound IM thread is missing remote client key")?;
@@ -175,6 +333,22 @@ pub(crate) async fn handle_inbound(
                     &state,
                     &remote_client_key,
                     Some(&thread_id),
+                )
+                .await;
+                events::finish_telegram_command_progress_with_api(
+                    &state,
+                    api.clone(),
+                    &thread_id,
+                    &route,
+                    &turn_id,
+                )
+                .await;
+                events::finish_telegram_collab_progress_with_api(
+                    &state,
+                    api.clone(),
+                    &thread_id,
+                    &route,
+                    &turn_id,
                 )
                 .await;
                 state
@@ -197,6 +371,20 @@ pub(crate) async fn handle_inbound(
     }
 
     if active_turn_for_message(&state, &message).await.is_some() {
+        if !message.attachments.is_empty() {
+            let attachment_count = state.runtime.lock().await.hold_pending_attachments(
+                &route.conversation_key,
+                message.attachments.clone(),
+                message.received_at_ms,
+            );
+            adapter
+                .send_text(
+                    &message.chat_id,
+                    &text.turn_busy_attachments_held(attachment_count),
+                )
+                .await?;
+            return Ok(());
+        }
         adapter
             .send_text(&message.chat_id, text.turn_busy_notice())
             .await?;
@@ -211,16 +399,71 @@ pub(crate) async fn handle_inbound(
         return Ok(());
     }
 
-    match start_turn_for_route(
+    let only_images = trimmed.is_empty()
+        && !message.attachments.is_empty()
+        && message
+            .attachments
+            .iter()
+            .all(|attachment| attachment.kind == "image");
+    if only_images {
+        let attachment_count = state.runtime.lock().await.hold_pending_attachments(
+            &route.conversation_key,
+            message.attachments.clone(),
+            message.received_at_ms,
+        );
+        adapter
+            .send_text(&message.chat_id, text.image_description_needed())
+            .await?;
+        state
+            .push_event(
+                "info",
+                "telegram_image_waiting_for_description",
+                format!(
+                    "chat={} pending_attachments={attachment_count}",
+                    message.chat_id
+                ),
+            )
+            .await;
+        return Ok(());
+    }
+
+    let pending_attachments = if trimmed.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .runtime
+            .lock()
+            .await
+            .take_pending_attachments(&route.conversation_key, message.received_at_ms)
+    };
+    let mut attachments = message.attachments.clone();
+    attachments.extend(pending_attachments.clone());
+
+    let outcome = start_turn_for_route(
         &state,
         &route,
         trimmed,
-        &message.attachments,
+        &attachments,
         message.received_at_ms,
         TurnOrigin::Telegram,
     )
-    .await
-    {
+    .await;
+    let attachments_to_restore = if matches!(&outcome, TurnStartOutcome::Started { .. }) {
+        Vec::new()
+    } else if matches!(&outcome, TurnStartOutcome::Expired { .. }) {
+        pending_attachments
+    } else {
+        attachments
+    };
+    if !attachments_to_restore.is_empty() {
+        state.runtime.lock().await.hold_pending_attachments(
+            &route.conversation_key,
+            attachments_to_restore,
+            message.received_at_ms,
+        );
+    }
+
+    match outcome {
         TurnStartOutcome::Started { thread_id, turn_id } => {
             state
                 .push_event(
@@ -288,25 +531,56 @@ pub(crate) async fn handle_inbound(
 async fn create_telegram_thread_for_route(
     state: &SharedState,
     adapter: &TelegramAdapter,
-    route: &RouteTarget,
+    message: &InboundMessage,
     options: remote_control_backend::ThreadStartOptions,
-    request_id: Option<&str>,
+    request: ThreadRoutingRequestState,
 ) -> Result<String> {
     let text = im_text_for_state(state);
-    adapter
-        .send_text(&route.chat_id, text.creating_new_thread())
-        .await?;
-    let thread_id = create_and_bind_thread(state, route, options.clone(), request_id).await?;
-    adapter
-        .send_thread_routing_result(
+    let route = route_for_message(message);
+    let progress_message_id = adapter
+        .send_or_update_text(
             &route.chat_id,
-            text.created_new_session_title(),
-            &text.created_new_session_body(
-                &thread_id,
-                &summarize_thread_start_options(&options, text),
-            ),
+            request.message_id.as_deref(),
+            text.creating_new_thread(),
         )
         .await?;
+    let mut retry_request = request;
+    retry_request.message_id = Some(progress_message_id.clone());
+    let thread_id = match create_and_bind_thread(
+        state,
+        &route,
+        options.clone(),
+        Some(&retry_request.request_id),
+    )
+    .await
+    {
+        Ok(thread_id) => thread_id,
+        Err(error) => {
+            if retry_request.stage == ThreadRoutingStage::Choice {
+                send_telegram_thread_routing_choice(state, adapter, message, Some(retry_request))
+                    .await?;
+            } else {
+                send_telegram_thread_create_settings(state, adapter, message, Some(retry_request))
+                    .await?;
+            }
+            adapter
+                .send_text(&route.chat_id, &text.app_message_failed(&error))
+                .await?;
+            return Err(error);
+        }
+    };
+    publish_telegram_thread_routing_result(
+        state,
+        adapter,
+        &route.chat_id,
+        &route.conversation_key,
+        &thread_id,
+        text.created_new_session_title(),
+        &text.created_new_session_body(&thread_id, &summarize_thread_start_options(&options, text)),
+        &progress_message_id,
+        "telegram_thread_route_created",
+    )
+    .await;
     state
         .push_event(
             "info",
@@ -382,24 +656,20 @@ pub(crate) async fn handle_inbound_action(
                     return Ok(());
                 }
             };
-            let _ = request;
-            create_telegram_thread_for_route(&state, &adapter, &route, options, Some(&request_id))
-                .await?;
+            create_telegram_thread_for_route(&state, &adapter, &message, options, request).await?;
             Ok(())
         }
         InboundAction::ThreadRouteCreateDefault { request_id } => {
-            let Some(_) =
+            let Some(request) =
                 checked_telegram_thread_routing_request(&state, &adapter, &message, &request_id)
                     .await?
             else {
                 return Ok(());
             };
-            let route = route_for_message(&message);
             let options = thread_start_options_with_current_provider(
                 remote_control_backend::ThreadStartOptions::default(),
             );
-            create_telegram_thread_for_route(&state, &adapter, &route, options, Some(&request_id))
-                .await?;
+            create_telegram_thread_for_route(&state, &adapter, &message, options, request).await?;
             Ok(())
         }
         InboundAction::ThreadRouteCreateConfigured { request_id } => {
@@ -427,8 +697,7 @@ pub(crate) async fn handle_inbound_action(
                     return Ok(());
                 }
             };
-            create_telegram_thread_for_route(&state, &adapter, &route, options, Some(&request_id))
-                .await?;
+            create_telegram_thread_for_route(&state, &adapter, &message, options, request).await?;
             Ok(())
         }
         InboundAction::ThreadRouteCreateEdit { request_id, field } => {
@@ -657,7 +926,32 @@ async fn checked_telegram_thread_routing_request(
             .await?;
         return Ok(None);
     }
+    if !callback_targets_current_message(
+        request.message_id.as_deref(),
+        message.card_message_id.as_deref(),
+    ) {
+        if let Some(callback_message_id) = message.card_message_id.as_deref() {
+            let _ = adapter
+                .clear_reply_markup(&message.chat_id, Some(callback_message_id))
+                .await;
+        }
+        let text = im_text_for_state(state);
+        adapter
+            .send_text(&message.chat_id, text.thread_choice_not_current())
+            .await?;
+        return Ok(None);
+    }
     Ok(Some(request))
+}
+
+fn callback_targets_current_message(
+    expected_message_id: Option<&str>,
+    callback_message_id: Option<&str>,
+) -> bool {
+    !matches!(
+        (expected_message_id, callback_message_id),
+        (Some(expected), Some(actual)) if expected != actual
+    )
 }
 
 async fn handle_telegram_thread_list_text_reply(
@@ -868,9 +1162,24 @@ async fn send_telegram_thread_create_custom_cwd_prompt(
     message: &InboundMessage,
 ) -> Result<()> {
     let text = im_text_for_state(state);
-    adapter
-        .send_text(&message.chat_id, text.custom_cwd_prompt_telegram())
+    let pending =
+        pending_telegram_thread_create_custom_cwd_request(state, &message.conversation_key()).await;
+    let prompt_message_id = adapter
+        .send_or_update_text(
+            &message.chat_id,
+            pending
+                .as_ref()
+                .and_then(|request| request.message_id.as_deref()),
+            text.custom_cwd_prompt_telegram(),
+        )
         .await?;
+    if let Some(request) = pending {
+        state
+            .runtime
+            .lock()
+            .await
+            .update_thread_routing_request_message_id(&request.request_id, prompt_message_id);
+    }
     Ok(())
 }
 
@@ -885,9 +1194,12 @@ async fn send_telegram_thread_routing_choice(
         .as_ref()
         .map(|request| request.request_id.clone())
         .unwrap_or_else(next_thread_routing_request_id);
+    let existing_message_id = existing_request
+        .as_ref()
+        .and_then(|request| request.message_id.as_deref());
     let text = im_text_for_state(state);
     let message_id = adapter
-        .send_thread_routing_choice(&route.chat_id, &request_id, text)
+        .send_thread_routing_choice(&route.chat_id, &request_id, existing_message_id, text)
         .await?;
     state
         .runtime
@@ -918,8 +1230,17 @@ async fn send_telegram_thread_create_settings(
     let defaults = load_thread_create_defaults_for_client(state, &remote_client_key).await;
     let im_text = im_text_for_state(state);
     let text = thread_create_help_text(&defaults, &create_draft, im_text);
+    let existing_message_id = existing_request
+        .as_ref()
+        .and_then(|request| request.message_id.as_deref());
     let message_id = adapter
-        .send_thread_create_settings(&route.chat_id, &request_id, &text, im_text)
+        .send_thread_create_settings(
+            &route.chat_id,
+            &request_id,
+            &text,
+            existing_message_id,
+            im_text,
+        )
         .await?;
     state
         .runtime
@@ -999,6 +1320,7 @@ async fn send_telegram_thread_create_options(
             page,
             page > 1,
             page < total_pages,
+            request.message_id.as_deref(),
             text,
         )
         .await?;
@@ -1032,6 +1354,9 @@ async fn send_telegram_thread_routing_list(
     page: usize,
 ) -> Result<()> {
     let route = route_for_message(message);
+    let existing_message_id = existing_request
+        .as_ref()
+        .and_then(|request| request.message_id.as_deref());
     let loaded_page =
         match load_thread_routing_page(state, &route, existing_request.as_ref(), cursor, page, 8)
             .await
@@ -1046,7 +1371,11 @@ async fn send_telegram_thread_routing_list(
                     )
                     .await;
                 adapter
-                    .send_text(&route.chat_id, im_text_for_state(state).list_load_failed())
+                    .send_or_update_text(
+                        &route.chat_id,
+                        existing_message_id,
+                        im_text_for_state(state).list_load_failed(),
+                    )
                     .await?;
                 return Ok(());
             }
@@ -1073,6 +1402,7 @@ async fn send_telegram_thread_routing_list(
             loaded_page.page,
             loaded_page.page > 1,
             loaded_page.next_cursor.is_some(),
+            existing_message_id,
             text,
         )
         .await?;
@@ -1128,26 +1458,51 @@ async fn handle_telegram_thread_route_resume_selected(
     request_id: &str,
     thread_id: &str,
 ) -> Result<()> {
-    let Some(_) =
+    let Some(request) =
         checked_telegram_thread_routing_request(&state, &adapter, &message, request_id).await?
     else {
         return Ok(());
     };
     let text = im_text_for_state(&state);
-    adapter
-        .send_text(&message.chat_id, &text.subscribing_thread(thread_id))
+    let progress_message_id = adapter
+        .send_or_update_text(
+            &message.chat_id,
+            request.message_id.as_deref(),
+            &text.subscribing_thread(thread_id),
+        )
         .await?;
     let route = route_for_message(&message);
-    let thread = resume_and_bind_thread(&state, &route, thread_id, Some(request_id)).await?;
+    let thread = match resume_and_bind_thread(&state, &route, thread_id, Some(request_id)).await {
+        Ok(thread) => thread,
+        Err(error) => {
+            let mut retry_request = request;
+            retry_request.message_id = Some(progress_message_id);
+            send_telegram_thread_routing_choice(&state, &adapter, &message, Some(retry_request))
+                .await?;
+            adapter
+                .send_text(&message.chat_id, &text.app_message_failed(&error))
+                .await?;
+            return Err(error);
+        }
+    };
     let body = text.subscribed_session_body(
         thread_id,
         &summarize_thread_title(&thread, text),
         &summarize_thread_cwd(&thread, text),
         &summarize_thread_status(&thread, text),
     );
-    adapter
-        .send_thread_routing_result(&route.chat_id, text.subscribed_session_title(), &body)
-        .await?;
+    publish_telegram_thread_routing_result(
+        &state,
+        &adapter,
+        &route.chat_id,
+        &route.conversation_key,
+        thread_id,
+        text.subscribed_session_title(),
+        &body,
+        &progress_message_id,
+        "telegram_thread_route_resumed",
+    )
+    .await;
     state
         .push_event(
             "info",
@@ -1207,13 +1562,48 @@ async fn handle_telegram_approval_outcome(
             option_index,
             decision,
         } => {
+            let approval_message_id = pending
+                .message_id
+                .clone()
+                .or_else(|| message.card_message_id.clone());
             let next = submit_approval_decision(state, &pending, &decision).await?;
-            adapter
-                .send_text(
+            let resolved = adapter
+                .update_resolved_approval(
                     &message.chat_id,
-                    &im_text_for_state(state).approval_decision_submitted_label(&decision.label),
+                    approval_message_id.as_deref(),
+                    &pending,
+                    option_index,
+                    &decision.label,
+                    im_text_for_state(state),
                 )
-                .await?;
+                .await;
+            let update_succeeded = match resolved {
+                Ok(updated) => updated,
+                Err(err) => {
+                    state
+                        .push_event(
+                            "warn",
+                            "telegram_approval_update_failed",
+                            format!(
+                                "conversation={} request_id={} message={} err={err}",
+                                conversation_key,
+                                pending.request_id,
+                                approval_message_id.as_deref().unwrap_or("")
+                            ),
+                        )
+                        .await;
+                    false
+                }
+            };
+            if !update_succeeded {
+                adapter
+                    .send_text(
+                        &message.chat_id,
+                        &im_text_for_state(state)
+                            .approval_decision_submitted_label(&decision.label),
+                    )
+                    .await?;
+            }
             state
                 .push_event(
                     "info",
@@ -1231,12 +1621,18 @@ async fn handle_telegram_approval_outcome(
         }
         ApprovalReplyOutcome::NoPending => {
             let text = im_text_for_state(state);
+            let _ = adapter
+                .clear_reply_markup(&message.chat_id, message.card_message_id.as_deref())
+                .await;
             adapter
                 .send_text(&message.chat_id, text.no_pending_approval())
                 .await?;
         }
         ApprovalReplyOutcome::NotCurrent => {
             let text = im_text_for_state(state);
+            let _ = adapter
+                .clear_reply_markup(&message.chat_id, message.card_message_id.as_deref())
+                .await;
             adapter
                 .send_text(&message.chat_id, text.approval_not_current())
                 .await?;
@@ -1267,4 +1663,117 @@ pub(crate) fn command(text: &str) -> Option<String> {
 pub(crate) fn numeric_command_index(command: &str) -> Option<usize> {
     let number = command.strip_prefix('/')?.parse::<usize>().ok()?;
     number.checked_sub(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::VecDeque, sync::Mutex};
+
+    use anyhow::{Result, anyhow};
+
+    use super::{
+        TelegramThreadRoutingResultDelivery, TelegramThreadRoutingResultSender,
+        callback_targets_current_message, deliver_telegram_thread_routing_result,
+    };
+
+    struct ScriptedThreadRoutingResultSender {
+        results: Mutex<VecDeque<Result<String>>>,
+        message_ids: Mutex<Vec<Option<String>>>,
+    }
+
+    impl ScriptedThreadRoutingResultSender {
+        fn new(results: Vec<Result<String>>) -> Self {
+            Self {
+                results: Mutex::new(results.into()),
+                message_ids: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn message_ids(&self) -> Vec<Option<String>> {
+            self.message_ids.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TelegramThreadRoutingResultSender for ScriptedThreadRoutingResultSender {
+        async fn send_thread_routing_result(
+            &self,
+            _target: &str,
+            _title: &str,
+            _body: &str,
+            message_id: Option<&str>,
+        ) -> Result<String> {
+            self.message_ids
+                .lock()
+                .unwrap()
+                .push(message_id.map(str::to_string));
+            self.results
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("missing scripted Telegram result")
+        }
+    }
+
+    #[test]
+    fn rejects_callback_from_replaced_routing_message() {
+        assert!(!callback_targets_current_message(Some("10"), Some("9")));
+    }
+
+    #[test]
+    fn accepts_current_callback_and_text_replies() {
+        assert!(callback_targets_current_message(Some("10"), Some("10")));
+        assert!(callback_targets_current_message(Some("10"), None));
+    }
+
+    #[tokio::test]
+    async fn final_routing_result_updates_progress_message_without_fallback() {
+        let sender = ScriptedThreadRoutingResultSender::new(vec![Ok("10".to_string())]);
+
+        let delivery =
+            deliver_telegram_thread_routing_result(&sender, "chat", "title", "body", "10").await;
+
+        assert_eq!(delivery, TelegramThreadRoutingResultDelivery::Updated);
+        assert_eq!(sender.message_ids(), vec![Some("10".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn final_routing_result_falls_back_to_new_message_after_update_failure() {
+        let sender = ScriptedThreadRoutingResultSender::new(vec![
+            Err(anyhow!("edit failed")),
+            Ok("11".to_string()),
+        ]);
+
+        let delivery =
+            deliver_telegram_thread_routing_result(&sender, "chat", "title", "body", "10").await;
+
+        assert_eq!(
+            delivery,
+            TelegramThreadRoutingResultDelivery::SentAsNew {
+                message_id: "11".to_string(),
+                update_error: "edit failed".to_string(),
+            }
+        );
+        assert_eq!(sender.message_ids(), vec![Some("10".to_string()), None]);
+    }
+
+    #[tokio::test]
+    async fn final_routing_result_swallows_both_delivery_failures() {
+        let sender = ScriptedThreadRoutingResultSender::new(vec![
+            Err(anyhow!("edit failed")),
+            Err(anyhow!("send failed")),
+        ]);
+
+        let delivery =
+            deliver_telegram_thread_routing_result(&sender, "chat", "title", "body", "10").await;
+
+        assert_eq!(
+            delivery,
+            TelegramThreadRoutingResultDelivery::Undelivered {
+                update_error: "edit failed".to_string(),
+                fallback_error: "send failed".to_string(),
+            }
+        );
+        assert_eq!(sender.message_ids(), vec![Some("10".to_string()), None]);
+    }
 }
