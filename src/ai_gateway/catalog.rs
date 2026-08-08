@@ -362,8 +362,8 @@ mod tests {
             assert_eq!(model["description"], description, "model {slug}");
             assert_eq!(model["prefer_websockets"], false, "model {slug}");
             assert_eq!(model["use_responses_lite"], false, "model {slug}");
-            assert_eq!(model["context_window"], 1_048_576, "model {slug}");
-            assert_eq!(model["max_context_window"], 1_048_576, "model {slug}");
+            assert_eq!(model["context_window"], 372_000, "model {slug}");
+            assert_eq!(model["max_context_window"], 372_000, "model {slug}");
             assert_eq!(
                 model["effective_context_window_percent"], 95,
                 "model {slug}"
