@@ -1,10 +1,12 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     fmt::Write as _,
+    sync::Arc,
 };
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::sync::Notify;
 
 use crate::{
     chain_log,
@@ -14,6 +16,12 @@ use crate::{
 
 const PENDING_ATTACHMENTS_MAX_AGE_MS: u128 = 10 * 60 * 1000;
 const PENDING_ATTACHMENTS_MAX_COUNT: usize = 8;
+const TELEGRAM_COMMAND_PROGRESS_MAX_ENTRIES: usize = 128;
+const TELEGRAM_COLLAB_PROGRESS_MAX_AGENTS: usize = 64;
+const TERMINAL_NOTICE_TURN_HISTORY_MAX: usize = 256;
+const TELEGRAM_REASONING_MAX_CHARS: usize = 12_000;
+const TELEGRAM_PLAN_MAX_STEPS: usize = 64;
+const TELEGRAM_DIFF_MAX_PATHS: usize = 128;
 
 #[derive(Debug, Clone)]
 struct PendingAttachments {
@@ -117,15 +125,185 @@ pub struct RuntimeState {
     pub turn_started_at_by_thread: HashMap<String, u128>,
     pub turn_finished_at_by_thread: HashMap<String, u128>,
     pub turn_origin_by_id: HashMap<String, TurnOrigin>,
+    terminal_notice_failed_by_turn: HashMap<String, bool>,
+    terminal_notice_turn_order: VecDeque<String>,
+    terminal_status_fallback_by_thread: HashMap<String, TerminalStatusFallbackState>,
+    next_terminal_status_fallback_token: u64,
     pub last_sent_text_by_route: HashMap<String, String>,
     pub route_by_thread: HashMap<String, RouteTarget>,
     pub last_route: Option<RouteTarget>,
     pub pending_approvals_by_conversation: HashMap<String, Vec<PendingApproval>>,
     pub pending_approval_request_keys: HashSet<String>,
     pub feishu_streaming_cards_by_item: HashMap<String, FeishuStreamingCardState>,
+    telegram_drafts_by_item: HashMap<String, TelegramDraftState>,
+    telegram_command_progress_by_thread: HashMap<String, TelegramCommandProgressState>,
+    telegram_collab_progress_by_thread: HashMap<String, TelegramCollabProgressState>,
+    next_telegram_draft_id: i64,
     pub wecom_streams_by_thread: HashMap<String, WecomStreamState>,
     pub thread_routing_requests: HashMap<String, ThreadRoutingRequestState>,
     pending_attachments_by_conversation: HashMap<String, PendingAttachments>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TerminalStatusFallbackState {
+    turn_id: String,
+    token: u64,
+    event_driver_started: bool,
+    server_driver_started: bool,
+}
+
+#[derive(Debug, Clone)]
+struct TelegramDraftState {
+    draft_id: i64,
+    content: String,
+    sending: bool,
+    dirty: bool,
+    finished: bool,
+    revision: u64,
+    last_attempt_at_ms: u128,
+    wake_driver: Arc<Notify>,
+    completed: Arc<Notify>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TelegramCommandProgressStatus {
+    Running,
+    Interrupted,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TelegramCommandProgressEntry {
+    pub item_id: String,
+    pub command: String,
+    pub status: TelegramCommandProgressStatus,
+    pub exit_code: Option<i64>,
+    pub duration_ms: Option<u64>,
+    pub failure_output: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TelegramCommandProgressSnapshot {
+    pub turn_id: String,
+    pub revision: u64,
+    pub message_id: Option<String>,
+    pub entries: Vec<TelegramCommandProgressEntry>,
+    pub dropped_entries: usize,
+    pub retry_count: usize,
+    pub retry_error: Option<String>,
+    pub reasoning_summary: Option<String>,
+    pub plan_explanation: Option<String>,
+    pub plan: Vec<TelegramPlanStep>,
+    pub diff_summary: Option<TelegramDiffSummary>,
+    pub completed: bool,
+    pub failed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TelegramPlanStep {
+    pub step: String,
+    pub status: TelegramPlanStepStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TelegramPlanStepStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TelegramDiffSummary {
+    pub file_count: usize,
+    pub additions: usize,
+    pub deletions: usize,
+    pub paths: Vec<String>,
+    pub omitted_paths: usize,
+}
+
+#[derive(Debug, Clone)]
+struct TelegramCommandProgressState {
+    turn_id: String,
+    revision: u64,
+    message_id: Option<String>,
+    entries: Vec<TelegramCommandProgressEntry>,
+    dropped_entries: usize,
+    retry_count: usize,
+    retry_error: Option<String>,
+    reasoning_item_id: Option<String>,
+    reasoning_summary_index: Option<i64>,
+    reasoning_summary: String,
+    reasoning_completed: bool,
+    plan_explanation: Option<String>,
+    plan: Vec<TelegramPlanStep>,
+    diff_summary: Option<TelegramDiffSummary>,
+    completed: bool,
+    failed: bool,
+    dirty: bool,
+    sending: bool,
+    in_flight_revision: Option<u64>,
+    cleanup_after_delivery: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TelegramCollabProgressStatus {
+    Running,
+    Responded,
+    Succeeded,
+    Failed,
+    Interrupted,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TelegramCollabProgressUpdate {
+    pub agent_id: String,
+    pub name: Option<String>,
+    pub status: Option<TelegramCollabProgressStatus>,
+    pub detail: Option<String>,
+    pub occurred_at_ms: u128,
+    pub create_if_missing: bool,
+    pub restart: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct TelegramCollabProgressEntry {
+    pub agent_id: String,
+    pub name: String,
+    pub status: TelegramCollabProgressStatus,
+    pub detail: Option<String>,
+    pub started_at_ms: u128,
+    pub updated_at_ms: u128,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TelegramCollabProgressSnapshot {
+    pub turn_id: String,
+    pub revision: u64,
+    pub message_id: Option<String>,
+    pub entries: Vec<TelegramCollabProgressEntry>,
+    pub dropped_entries: usize,
+    pub completed: bool,
+}
+
+#[derive(Debug, Clone)]
+struct TelegramCollabProgressState {
+    turn_id: String,
+    revision: u64,
+    message_id: Option<String>,
+    entries: Vec<TelegramCollabProgressEntry>,
+    dropped_entries: usize,
+    completed: bool,
+    dirty: bool,
+    sending: bool,
+    in_flight_revision: Option<u64>,
+    cleanup_after_delivery: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TelegramDraftSendAction {
+    Continue,
+    Stop,
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +324,12 @@ impl RuntimeState {
     pub fn start_bridge_generation(&mut self) -> u64 {
         self.bridge_generation = self.bridge_generation.saturating_add(1);
         self.feishu_streaming_cards_by_item.clear();
+        self.clear_all_telegram_drafts();
+        self.telegram_command_progress_by_thread.clear();
+        self.telegram_collab_progress_by_thread.clear();
+        self.terminal_notice_failed_by_turn.clear();
+        self.terminal_notice_turn_order.clear();
+        self.terminal_status_fallback_by_thread.clear();
         self.wecom_streams_by_thread.clear();
         self.pending_attachments_by_conversation.clear();
         self.bridge_generation
@@ -154,6 +338,12 @@ impl RuntimeState {
     pub fn invalidate_bridge_generation(&mut self) {
         self.bridge_generation = self.bridge_generation.saturating_add(1);
         self.feishu_streaming_cards_by_item.clear();
+        self.clear_all_telegram_drafts();
+        self.telegram_command_progress_by_thread.clear();
+        self.telegram_collab_progress_by_thread.clear();
+        self.terminal_notice_failed_by_turn.clear();
+        self.terminal_notice_turn_order.clear();
+        self.terminal_status_fallback_by_thread.clear();
         self.wecom_streams_by_thread.clear();
         self.pending_attachments_by_conversation.clear();
     }
@@ -181,6 +371,9 @@ impl RuntimeState {
         if let Some(route) = self.route_by_thread.remove(thread_id) {
             log_route_unbind("unbind_thread", "direct", thread_id, &route);
         }
+        self.telegram_command_progress_by_thread.remove(thread_id);
+        self.telegram_collab_progress_by_thread.remove(thread_id);
+        self.terminal_status_fallback_by_thread.remove(thread_id);
     }
 
     #[allow(dead_code)]
@@ -209,6 +402,10 @@ impl RuntimeState {
             self.starting_turn_by_thread.remove(thread_id);
             self.turn_started_at_by_thread.remove(thread_id);
             self.turn_finished_at_by_thread.remove(thread_id);
+            self.clear_telegram_drafts_for_thread(thread_id);
+            self.telegram_command_progress_by_thread.remove(thread_id);
+            self.telegram_collab_progress_by_thread.remove(thread_id);
+            self.terminal_status_fallback_by_thread.remove(thread_id);
             log_route_unbind("unbind_conversation", reason, thread_id, route);
         }
         entries
@@ -219,6 +416,21 @@ impl RuntimeState {
 
     pub fn mark_turn_started(&mut self, thread_id: &str, turn_id: &str) {
         self.starting_turn_by_thread.remove(thread_id);
+        self.terminal_status_fallback_by_thread.remove(thread_id);
+        if self
+            .telegram_command_progress_by_thread
+            .get(thread_id)
+            .is_some_and(|progress| progress.turn_id != turn_id)
+        {
+            self.telegram_command_progress_by_thread.remove(thread_id);
+        }
+        if self
+            .telegram_collab_progress_by_thread
+            .get(thread_id)
+            .is_some_and(|progress| progress.turn_id != turn_id)
+        {
+            self.telegram_collab_progress_by_thread.remove(thread_id);
+        }
         self.current_turn_by_thread
             .insert(thread_id.to_string(), turn_id.to_string());
         self.turn_started_at_by_thread
@@ -256,8 +468,173 @@ impl RuntimeState {
         self.turn_origin_by_id.insert(turn_id.to_string(), origin);
     }
 
+    pub(crate) fn claim_terminal_notice(&mut self, turn_id: &str, failed: bool) -> bool {
+        if let Some(previous_failed) = self.terminal_notice_failed_by_turn.get_mut(turn_id) {
+            // A late failure must still be visible after an optimistic success notice.
+            if failed && !*previous_failed {
+                *previous_failed = true;
+                return true;
+            }
+            return false;
+        }
+        self.terminal_notice_failed_by_turn
+            .insert(turn_id.to_string(), failed);
+        self.terminal_notice_turn_order
+            .push_back(turn_id.to_string());
+        while self.terminal_notice_turn_order.len() > TERMINAL_NOTICE_TURN_HISTORY_MAX {
+            if let Some(oldest) = self.terminal_notice_turn_order.pop_front() {
+                self.terminal_notice_failed_by_turn.remove(&oldest);
+            }
+        }
+        true
+    }
+
+    pub(crate) fn release_terminal_notice(&mut self, turn_id: &str) {
+        if self
+            .terminal_notice_failed_by_turn
+            .remove(turn_id)
+            .is_none()
+        {
+            return;
+        }
+        self.terminal_notice_turn_order
+            .retain(|current| current != turn_id);
+    }
+
     pub fn turn_origin(&self, turn_id: &str) -> Option<TurnOrigin> {
         self.turn_origin_by_id.get(turn_id).copied()
+    }
+
+    pub(crate) fn current_turn_id(&self, thread_id: &str) -> Option<&str> {
+        self.current_turn_by_thread
+            .get(thread_id)
+            .map(String::as_str)
+    }
+
+    pub(crate) fn register_terminal_status_fallback(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> bool {
+        self.register_terminal_status_fallback_token(thread_id, turn_id)
+            .is_some_and(|(_, should_start_server_driver)| should_start_server_driver)
+    }
+
+    /// Register the long-lived server-side safety timer for a turn.
+    ///
+    /// A repeated status notification reuses the existing token instead of
+    /// creating another latch. The boolean identifies whether the caller is
+    /// responsible for spawning the server-side timer.
+    pub(crate) fn register_terminal_status_fallback_token(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Option<(u64, bool)> {
+        if self.current_turn_id(thread_id) != Some(turn_id) {
+            return None;
+        }
+        if let Some(existing) = self.terminal_status_fallback_by_thread.get_mut(thread_id) {
+            if existing.turn_id == turn_id {
+                let should_start_server_driver = !existing.server_driver_started;
+                existing.server_driver_started = true;
+                return Some((existing.token, should_start_server_driver));
+            }
+        }
+        let token = self.next_terminal_status_fallback_token();
+        self.terminal_status_fallback_by_thread.insert(
+            thread_id.to_string(),
+            TerminalStatusFallbackState {
+                turn_id: turn_id.to_string(),
+                token,
+                event_driver_started: false,
+                server_driver_started: true,
+            },
+        );
+        Some((token, true))
+    }
+
+    /// Start the IM-side timer using the same latch as the server safety timer.
+    ///
+    /// When the server registered the latch first, this marks the existing
+    /// entry as owned by the IM driver.  If the IM path is the first observer,
+    /// it creates the entry itself.  Only one IM driver can be started.
+    pub(crate) fn start_terminal_status_fallback(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Option<u64> {
+        if self.current_turn_id(thread_id) != Some(turn_id) {
+            return None;
+        }
+        if let Some(existing) = self.terminal_status_fallback_by_thread.get_mut(thread_id) {
+            if existing.turn_id != turn_id || existing.event_driver_started {
+                return None;
+            }
+            existing.event_driver_started = true;
+            return Some(existing.token);
+        }
+        let token = self.next_terminal_status_fallback_token();
+        self.terminal_status_fallback_by_thread.insert(
+            thread_id.to_string(),
+            TerminalStatusFallbackState {
+                turn_id: turn_id.to_string(),
+                token,
+                event_driver_started: true,
+                server_driver_started: false,
+            },
+        );
+        Some(token)
+    }
+
+    fn next_terminal_status_fallback_token(&mut self) -> u64 {
+        self.next_terminal_status_fallback_token = self
+            .next_terminal_status_fallback_token
+            .wrapping_add(1)
+            .max(1);
+        self.next_terminal_status_fallback_token
+    }
+
+    pub(crate) fn cancel_terminal_status_fallback(&mut self, thread_id: &str, turn_id: &str) {
+        if self
+            .terminal_status_fallback_by_thread
+            .get(thread_id)
+            .is_some_and(|current| current.turn_id == turn_id)
+        {
+            self.terminal_status_fallback_by_thread.remove(thread_id);
+        }
+    }
+
+    pub(crate) fn terminal_status_fallback_matches(&self, thread_id: &str, turn_id: &str) -> bool {
+        self.terminal_status_fallback_by_thread
+            .get(thread_id)
+            .is_some_and(|current| current.turn_id == turn_id)
+    }
+
+    pub(crate) fn terminal_status_fallback_matches_token(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        token: u64,
+    ) -> bool {
+        self.terminal_status_fallback_by_thread
+            .get(thread_id)
+            .is_some_and(|current| current.turn_id == turn_id && current.token == token)
+    }
+
+    /// Atomically consume a fallback latch for the matching current turn.
+    pub(crate) fn claim_terminal_status_fallback(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        token: u64,
+    ) -> bool {
+        if self.current_turn_id(thread_id) != Some(turn_id)
+            || !self.terminal_status_fallback_matches_token(thread_id, turn_id, token)
+        {
+            return false;
+        }
+        self.terminal_status_fallback_by_thread.remove(thread_id);
+        true
     }
 
     pub fn should_skip_duplicate_text(&self, route_key: &str, text: &str) -> bool {
@@ -270,6 +647,918 @@ impl RuntimeState {
     pub fn remember_sent_text(&mut self, route_key: &str, text: &str) {
         self.last_sent_text_by_route
             .insert(route_key.to_string(), text.to_string());
+    }
+
+    pub fn append_telegram_draft_delta(
+        &mut self,
+        thread_id: &str,
+        item_id: &str,
+        delta: &str,
+    ) -> Option<i64> {
+        let key = telegram_draft_key(thread_id, item_id);
+        if !self.telegram_drafts_by_item.contains_key(&key) {
+            self.next_telegram_draft_id = self.next_telegram_draft_id.saturating_add(1);
+            if self.next_telegram_draft_id <= 0 {
+                self.next_telegram_draft_id = 1;
+            }
+            self.telegram_drafts_by_item.insert(
+                key.clone(),
+                TelegramDraftState {
+                    draft_id: self.next_telegram_draft_id,
+                    content: String::new(),
+                    sending: false,
+                    dirty: false,
+                    finished: false,
+                    revision: 0,
+                    last_attempt_at_ms: 0,
+                    wake_driver: Arc::new(Notify::new()),
+                    completed: Arc::new(Notify::new()),
+                },
+            );
+        }
+        let draft = self.telegram_drafts_by_item.get_mut(&key)?;
+        draft.content.push_str(delta);
+        draft.dirty = true;
+        draft.revision = draft.revision.saturating_add(1);
+        draft.wake_driver.notify_one();
+        if draft.sending {
+            return None;
+        }
+        draft.sending = true;
+        Some(draft.draft_id)
+    }
+
+    pub fn finish_telegram_draft(
+        &mut self,
+        thread_id: &str,
+        item_id: &str,
+        final_text: &str,
+    ) -> Option<(i64, bool, Arc<Notify>)> {
+        let draft = self
+            .telegram_drafts_by_item
+            .get_mut(&telegram_draft_key(thread_id, item_id))?;
+        draft.content = final_text.to_string();
+        draft.dirty = true;
+        draft.finished = true;
+        draft.revision = draft.revision.saturating_add(1);
+        draft.wake_driver.notify_one();
+        let should_start = !draft.sending;
+        draft.sending = true;
+        Some((draft.draft_id, should_start, draft.completed.clone()))
+    }
+
+    pub fn take_telegram_draft_snapshot(
+        &mut self,
+        thread_id: &str,
+        item_id: &str,
+        draft_id: i64,
+        attempted_at_ms: u128,
+    ) -> Option<(String, bool, u64)> {
+        let draft = self
+            .telegram_drafts_by_item
+            .get_mut(&telegram_draft_key(thread_id, item_id))?;
+        if draft.draft_id != draft_id {
+            return None;
+        }
+        if !draft.sending || !draft.dirty {
+            draft.sending = false;
+            return None;
+        }
+        draft.dirty = false;
+        draft.last_attempt_at_ms = attempted_at_ms.max(1);
+        Some((draft.content.clone(), draft.finished, draft.revision))
+    }
+
+    pub fn telegram_draft_send_delay_ms(
+        &self,
+        thread_id: &str,
+        item_id: &str,
+        draft_id: i64,
+        now_ms: u128,
+        throttle_ms: u128,
+    ) -> Option<u64> {
+        let draft = self
+            .telegram_drafts_by_item
+            .get(&telegram_draft_key(thread_id, item_id))?;
+        if draft.draft_id != draft_id || !draft.sending || !draft.dirty {
+            return None;
+        }
+        if draft.last_attempt_at_ms == 0 {
+            return Some(0);
+        }
+        let remaining = throttle_ms
+            .saturating_sub(now_ms.saturating_sub(draft.last_attempt_at_ms))
+            .min(u128::from(u64::MAX));
+        Some(remaining as u64)
+    }
+
+    pub fn telegram_draft_wait_for_update(
+        &self,
+        thread_id: &str,
+        item_id: &str,
+        draft_id: i64,
+        now_ms: u128,
+        heartbeat_ms: u128,
+    ) -> Option<(Arc<Notify>, u64)> {
+        let draft = self
+            .telegram_drafts_by_item
+            .get(&telegram_draft_key(thread_id, item_id))?;
+        if draft.draft_id != draft_id || !draft.sending || draft.dirty || draft.finished {
+            return None;
+        }
+        let delay_ms = if draft.last_attempt_at_ms == 0 {
+            heartbeat_ms
+        } else {
+            heartbeat_ms.saturating_sub(now_ms.saturating_sub(draft.last_attempt_at_ms))
+        }
+        .min(u128::from(u64::MAX));
+        Some((draft.wake_driver.clone(), delay_ms as u64))
+    }
+
+    pub fn mark_telegram_draft_heartbeat_due(
+        &mut self,
+        thread_id: &str,
+        item_id: &str,
+        draft_id: i64,
+    ) -> bool {
+        let Some(draft) = self
+            .telegram_drafts_by_item
+            .get_mut(&telegram_draft_key(thread_id, item_id))
+        else {
+            return false;
+        };
+        if draft.draft_id != draft_id || !draft.sending || draft.finished {
+            return false;
+        }
+        if !draft.dirty {
+            draft.dirty = true;
+            draft.revision = draft.revision.saturating_add(1);
+        }
+        true
+    }
+
+    pub fn complete_telegram_draft_send(
+        &mut self,
+        thread_id: &str,
+        item_id: &str,
+        draft_id: i64,
+        revision: u64,
+        succeeded: bool,
+    ) -> TelegramDraftSendAction {
+        let key = telegram_draft_key(thread_id, item_id);
+        let Some(draft) = self.telegram_drafts_by_item.get_mut(&key) else {
+            return TelegramDraftSendAction::Stop;
+        };
+        if draft.draft_id != draft_id {
+            return TelegramDraftSendAction::Stop;
+        }
+        if !succeeded {
+            if draft.finished {
+                if let Some(draft) = self.telegram_drafts_by_item.remove(&key) {
+                    draft.completed.notify_one();
+                }
+            } else {
+                draft.sending = false;
+                draft.dirty = true;
+            }
+            return TelegramDraftSendAction::Stop;
+        }
+        if draft.dirty || draft.revision != revision {
+            return TelegramDraftSendAction::Continue;
+        }
+        if draft.finished {
+            if let Some(draft) = self.telegram_drafts_by_item.remove(&key) {
+                draft.completed.notify_one();
+            }
+            return TelegramDraftSendAction::Stop;
+        }
+        TelegramDraftSendAction::Continue
+    }
+
+    pub fn clear_telegram_drafts_for_thread(&mut self, thread_id: &str) {
+        let prefix = telegram_draft_thread_prefix(thread_id);
+        let keys = self
+            .telegram_drafts_by_item
+            .keys()
+            .filter(|key| key.starts_with(&prefix))
+            .cloned()
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.remove_telegram_draft(&key);
+        }
+    }
+
+    fn clear_all_telegram_drafts(&mut self) {
+        for (_, draft) in self.telegram_drafts_by_item.drain() {
+            draft.wake_driver.notify_one();
+            draft.completed.notify_one();
+        }
+    }
+
+    fn remove_telegram_draft(&mut self, key: &str) {
+        if let Some(draft) = self.telegram_drafts_by_item.remove(key) {
+            draft.wake_driver.notify_one();
+            draft.completed.notify_one();
+        }
+    }
+
+    pub(crate) fn upsert_telegram_command_progress(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        entry: TelegramCommandProgressEntry,
+        deliver_update: bool,
+    ) -> Option<TelegramCommandProgressSnapshot> {
+        let progress = self
+            .telegram_command_progress_by_thread
+            .entry(thread_id.to_string())
+            .or_insert_with(|| telegram_command_progress_state(turn_id));
+        if progress.turn_id != turn_id {
+            *progress = telegram_command_progress_state(turn_id);
+        }
+        if progress.completed {
+            return None;
+        }
+
+        let (changed, new_entry) = match progress
+            .entries
+            .iter_mut()
+            .find(|current| current.item_id == entry.item_id)
+        {
+            Some(current) if *current == entry => (false, false),
+            Some(current) => {
+                *current = entry;
+                (true, false)
+            }
+            None => {
+                progress.entries.push(entry);
+                if progress.entries.len() > TELEGRAM_COMMAND_PROGRESS_MAX_ENTRIES {
+                    let excess = progress.entries.len() - TELEGRAM_COMMAND_PROGRESS_MAX_ENTRIES;
+                    progress.entries.drain(..excess);
+                    progress.dropped_entries = progress.dropped_entries.saturating_add(excess);
+                }
+                (true, true)
+            }
+        };
+        if !changed {
+            return None;
+        }
+        progress.revision = progress.revision.saturating_add(1);
+        progress.dirty = true;
+        // A newly discovered command must be visible immediately even after
+        // the aggregate message has already been created.  Existing entries
+        // remain coalesced until completion (or an explicit final flush).
+        if deliver_update || new_entry || progress.message_id.is_none() {
+            Some(telegram_command_progress_snapshot(progress))
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn record_telegram_retry(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        error: Option<String>,
+    ) -> Option<TelegramCommandProgressSnapshot> {
+        if self.current_turn_id(thread_id) != Some(turn_id) {
+            return None;
+        }
+        let progress = self
+            .telegram_command_progress_by_thread
+            .entry(thread_id.to_string())
+            .or_insert_with(|| telegram_command_progress_state(turn_id));
+        if progress.turn_id != turn_id {
+            *progress = telegram_command_progress_state(turn_id);
+        }
+        if progress.completed {
+            return None;
+        }
+
+        progress.retry_count = progress.retry_count.saturating_add(1);
+        if let Some(error) = error.filter(|value| !value.trim().is_empty()) {
+            progress.retry_error = Some(error);
+        }
+        progress.revision = progress.revision.saturating_add(1);
+        progress.dirty = true;
+        Some(telegram_command_progress_snapshot(progress))
+    }
+
+    /// Cache reasoning deltas without touching Telegram for every token-sized
+    /// notification. The completed reasoning item flushes this buffer into the
+    /// aggregate progress message.
+    pub(crate) fn append_telegram_reasoning_delta(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        item_id: &str,
+        summary_index: i64,
+        delta: &str,
+    ) {
+        if delta.is_empty() || self.current_turn_id(thread_id) != Some(turn_id) {
+            return;
+        }
+        let progress = self
+            .telegram_command_progress_by_thread
+            .entry(thread_id.to_string())
+            .or_insert_with(|| telegram_command_progress_state(turn_id));
+        if progress.turn_id != turn_id || progress.completed {
+            return;
+        }
+        if progress.reasoning_item_id.as_deref() != Some(item_id) {
+            progress.reasoning_item_id = Some(item_id.to_string());
+            progress.reasoning_summary_index = Some(summary_index);
+            progress.reasoning_summary.clear();
+            progress.reasoning_completed = false;
+        } else if progress.reasoning_summary_index != Some(summary_index) {
+            if !progress.reasoning_summary.trim().is_empty() {
+                progress.reasoning_summary.push_str("\n\n");
+            }
+            progress.reasoning_summary_index = Some(summary_index);
+        }
+        append_bounded_text(
+            &mut progress.reasoning_summary,
+            delta,
+            TELEGRAM_REASONING_MAX_CHARS,
+        );
+        progress.revision = progress.revision.saturating_add(1);
+        progress.dirty = true;
+    }
+
+    pub(crate) fn complete_telegram_reasoning(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        item_id: &str,
+        summary: Option<String>,
+    ) -> Option<TelegramCommandProgressSnapshot> {
+        if self.current_turn_id(thread_id) != Some(turn_id) {
+            return None;
+        }
+        let progress = self
+            .telegram_command_progress_by_thread
+            .get_mut(thread_id)?;
+        if progress.turn_id != turn_id || progress.completed {
+            return None;
+        }
+        let mut content_changed = false;
+        if let Some(summary) = summary.filter(|value| !value.trim().is_empty()) {
+            content_changed = progress.reasoning_item_id.as_deref() != Some(item_id)
+                || progress.reasoning_summary != summary;
+            progress.reasoning_item_id = Some(item_id.to_string());
+            progress.reasoning_summary_index = None;
+            progress.reasoning_summary = summary;
+        } else if progress.reasoning_item_id.as_deref() != Some(item_id) {
+            return None;
+        }
+        if progress.reasoning_summary.trim().is_empty() {
+            return None;
+        }
+        let completion_changed = !progress.reasoning_completed;
+        if !content_changed && !completion_changed {
+            return None;
+        }
+        progress.reasoning_completed = true;
+        progress.revision = progress.revision.saturating_add(1);
+        progress.dirty = true;
+        Some(telegram_command_progress_snapshot(progress))
+    }
+
+    pub(crate) fn update_telegram_plan(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        explanation: Option<String>,
+        plan: Vec<TelegramPlanStep>,
+        deliver_update: bool,
+    ) -> Option<TelegramCommandProgressSnapshot> {
+        if self.current_turn_id(thread_id) != Some(turn_id) {
+            return None;
+        }
+        let progress = self
+            .telegram_command_progress_by_thread
+            .entry(thread_id.to_string())
+            .or_insert_with(|| telegram_command_progress_state(turn_id));
+        if progress.turn_id != turn_id || progress.completed {
+            return None;
+        }
+        let explanation = explanation.filter(|value| !value.trim().is_empty());
+        let plan = plan
+            .into_iter()
+            .take(TELEGRAM_PLAN_MAX_STEPS)
+            .collect::<Vec<_>>();
+        if progress.plan_explanation == explanation && progress.plan == plan {
+            return None;
+        }
+        progress.plan_explanation = explanation;
+        progress.plan = plan;
+        if progress.message_id.is_none() && !telegram_command_progress_has_content(progress) {
+            progress.dirty = false;
+            return None;
+        }
+        progress.revision = progress.revision.saturating_add(1);
+        progress.dirty = true;
+        deliver_update.then(|| telegram_command_progress_snapshot(progress))
+    }
+
+    pub(crate) fn update_telegram_diff(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        diff_summary: Option<TelegramDiffSummary>,
+        deliver_update: bool,
+    ) -> Option<TelegramCommandProgressSnapshot> {
+        if self.current_turn_id(thread_id) != Some(turn_id) {
+            return None;
+        }
+        let progress = self
+            .telegram_command_progress_by_thread
+            .entry(thread_id.to_string())
+            .or_insert_with(|| telegram_command_progress_state(turn_id));
+        if progress.turn_id != turn_id || progress.completed {
+            return None;
+        }
+        let Some(diff_summary) = diff_summary else {
+            if progress.diff_summary.take().is_some() {
+                progress.revision = progress.revision.saturating_add(1);
+                progress.dirty = true;
+                return deliver_update.then(|| telegram_command_progress_snapshot(progress));
+            }
+            return None;
+        };
+        let diff_summary = limit_telegram_diff_summary(diff_summary);
+        if progress.diff_summary.as_ref() == Some(&diff_summary) {
+            return None;
+        }
+        progress.diff_summary = Some(diff_summary);
+        progress.revision = progress.revision.saturating_add(1);
+        progress.dirty = true;
+        deliver_update.then(|| telegram_command_progress_snapshot(progress))
+    }
+
+    /// Flush a file-change completion into the aggregate message. Turn-level
+    /// diff notifications are cached first; the item fallback is only used
+    /// when no aggregate diff has arrived yet.
+    pub(crate) fn complete_telegram_file_change(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        fallback: Option<TelegramDiffSummary>,
+    ) -> Option<TelegramCommandProgressSnapshot> {
+        if self.current_turn_id(thread_id) != Some(turn_id) {
+            return None;
+        }
+        let progress = self
+            .telegram_command_progress_by_thread
+            .entry(thread_id.to_string())
+            .or_insert_with(|| telegram_command_progress_state(turn_id));
+        if progress.turn_id != turn_id || progress.completed {
+            return None;
+        }
+        if progress.diff_summary.is_none() {
+            if let Some(fallback) = fallback {
+                progress.diff_summary = Some(limit_telegram_diff_summary(fallback));
+                progress.revision = progress.revision.saturating_add(1);
+                progress.dirty = true;
+            }
+        }
+        progress
+            .dirty
+            .then(|| telegram_command_progress_snapshot(progress))
+    }
+
+    pub(crate) fn finish_telegram_command_progress(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Option<TelegramCommandProgressSnapshot> {
+        self.finish_telegram_command_progress_with_outcome(thread_id, turn_id, false)
+    }
+
+    pub(crate) fn finish_telegram_command_progress_with_outcome(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        failed: bool,
+    ) -> Option<TelegramCommandProgressSnapshot> {
+        let progress = self
+            .telegram_command_progress_by_thread
+            .get_mut(thread_id)?;
+        if progress.turn_id != turn_id || !telegram_command_progress_has_content(progress) {
+            return None;
+        }
+        let interrupted = progress
+            .entries
+            .iter_mut()
+            .filter(|entry| entry.status == TelegramCommandProgressStatus::Running)
+            .map(|entry| {
+                entry.status = TelegramCommandProgressStatus::Interrupted;
+            })
+            .count();
+        if failed {
+            progress.failed = true;
+        }
+        if !progress.completed || interrupted > 0 || failed {
+            progress.completed = true;
+            progress.revision = progress.revision.saturating_add(1);
+            progress.dirty = true;
+        }
+        progress
+            .dirty
+            .then(|| telegram_command_progress_snapshot(progress))
+    }
+
+    pub(crate) fn claim_telegram_command_progress_delivery(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Option<TelegramCommandProgressSnapshot> {
+        let current_turn_id = self.current_turn_id(thread_id).map(str::to_string);
+        let progress = self
+            .telegram_command_progress_by_thread
+            .get_mut(thread_id)?;
+        if progress.turn_id != turn_id
+            || progress.sending
+            || !progress.dirty
+            || (current_turn_id.as_deref() != Some(turn_id) && !progress.cleanup_after_delivery)
+        {
+            return None;
+        }
+        progress.sending = true;
+        claim_next_telegram_command_progress_snapshot(progress)
+    }
+
+    pub(crate) fn telegram_command_progress_delivery_is_current(
+        &self,
+        thread_id: &str,
+        turn_id: &str,
+        revision: u64,
+    ) -> bool {
+        let Some(progress) = self.telegram_command_progress_by_thread.get(thread_id) else {
+            return false;
+        };
+        progress.turn_id == turn_id
+            && progress.sending
+            && progress.in_flight_revision == Some(revision)
+            && (self.current_turn_id(thread_id) == Some(turn_id) || progress.cleanup_after_delivery)
+    }
+
+    pub(crate) fn complete_telegram_command_progress_delivery(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        revision: u64,
+        message_id: String,
+    ) -> Option<TelegramCommandProgressSnapshot> {
+        let mut cleanup = false;
+        let next = {
+            let progress = self
+                .telegram_command_progress_by_thread
+                .get_mut(thread_id)?;
+            if progress.turn_id != turn_id
+                || !progress.sending
+                || progress.in_flight_revision != Some(revision)
+            {
+                return None;
+            }
+            progress.message_id = Some(message_id);
+            progress.in_flight_revision = None;
+            if progress.dirty {
+                claim_next_telegram_command_progress_snapshot(progress)
+            } else {
+                progress.sending = false;
+                cleanup = progress.completed && progress.cleanup_after_delivery;
+                None
+            }
+        };
+        if cleanup {
+            self.telegram_command_progress_by_thread.remove(thread_id);
+        }
+        next
+    }
+
+    pub(crate) fn fail_telegram_command_progress_delivery(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        revision: u64,
+    ) -> bool {
+        let Some(progress) = self.telegram_command_progress_by_thread.get_mut(thread_id) else {
+            return false;
+        };
+        if progress.turn_id != turn_id
+            || !progress.sending
+            || progress.in_flight_revision != Some(revision)
+        {
+            return false;
+        }
+        progress.in_flight_revision = None;
+        progress.dirty = true;
+        if progress.completed {
+            true
+        } else {
+            progress.sending = false;
+            false
+        }
+    }
+
+    pub(crate) fn retry_telegram_command_progress_delivery(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Option<TelegramCommandProgressSnapshot> {
+        let progress = self
+            .telegram_command_progress_by_thread
+            .get_mut(thread_id)?;
+        if progress.turn_id != turn_id
+            || !progress.sending
+            || progress.in_flight_revision.is_some()
+            || !progress.dirty
+        {
+            return None;
+        }
+        claim_next_telegram_command_progress_snapshot(progress)
+    }
+
+    pub(crate) fn remember_telegram_command_progress_delivery(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        revision: u64,
+        message_id: String,
+    ) {
+        let Some(progress) = self.telegram_command_progress_by_thread.get_mut(thread_id) else {
+            return;
+        };
+        if progress.turn_id != turn_id {
+            return;
+        }
+        progress.message_id = Some(message_id);
+        if progress.revision == revision {
+            progress.dirty = false;
+        }
+    }
+
+    pub(crate) fn clear_telegram_command_progress_for_thread(&mut self, thread_id: &str) {
+        self.telegram_command_progress_by_thread.remove(thread_id);
+    }
+
+    pub(crate) fn apply_telegram_collab_progress_updates(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        updates: Vec<TelegramCollabProgressUpdate>,
+    ) -> Option<TelegramCollabProgressSnapshot> {
+        if updates.is_empty() || self.current_turn_id(thread_id) != Some(turn_id) {
+            return None;
+        }
+        let progress = self
+            .telegram_collab_progress_by_thread
+            .entry(thread_id.to_string())
+            .or_insert_with(|| TelegramCollabProgressState {
+                turn_id: turn_id.to_string(),
+                revision: 0,
+                message_id: None,
+                entries: Vec::new(),
+                dropped_entries: 0,
+                completed: false,
+                dirty: false,
+                sending: false,
+                in_flight_revision: None,
+                cleanup_after_delivery: false,
+            });
+        if progress.turn_id != turn_id {
+            *progress = TelegramCollabProgressState {
+                turn_id: turn_id.to_string(),
+                revision: 0,
+                message_id: None,
+                entries: Vec::new(),
+                dropped_entries: 0,
+                completed: false,
+                dirty: false,
+                sending: false,
+                in_flight_revision: None,
+                cleanup_after_delivery: false,
+            };
+        }
+        if progress.completed {
+            return None;
+        }
+
+        let mut changed = false;
+        for update in updates {
+            let timestamp = update.occurred_at_ms.max(1);
+            if let Some(entry) = progress
+                .entries
+                .iter_mut()
+                .find(|entry| entry.agent_id == update.agent_id)
+            {
+                if timestamp < entry.updated_at_ms {
+                    continue;
+                }
+                let mut entry_changed = false;
+                let mut clear_stale_detail = false;
+                if let Some(name) = update.name.filter(|name| !name.trim().is_empty())
+                    && entry.name != name
+                {
+                    entry.name = name;
+                    entry_changed = true;
+                }
+                if let Some(status) = update.status {
+                    let should_change = if entry.status == status {
+                        false
+                    } else if update.restart && status == TelegramCollabProgressStatus::Running {
+                        true
+                    } else {
+                        match entry.status {
+                            TelegramCollabProgressStatus::Running => true,
+                            TelegramCollabProgressStatus::Responded => matches!(
+                                status,
+                                TelegramCollabProgressStatus::Succeeded
+                                    | TelegramCollabProgressStatus::Failed
+                            ),
+                            TelegramCollabProgressStatus::Succeeded
+                            | TelegramCollabProgressStatus::Interrupted => {
+                                status == TelegramCollabProgressStatus::Failed
+                            }
+                            TelegramCollabProgressStatus::Failed => false,
+                        }
+                    };
+                    clear_stale_detail = (entry.status == status || should_change)
+                        && (status == TelegramCollabProgressStatus::Succeeded
+                            || (update.restart && status == TelegramCollabProgressStatus::Running));
+                    if should_change {
+                        if status == TelegramCollabProgressStatus::Running {
+                            entry.started_at_ms = timestamp;
+                        }
+                        entry.status = status;
+                        entry_changed = true;
+                    }
+                }
+                if let Some(detail) = update.detail.filter(|detail| !detail.trim().is_empty()) {
+                    if entry.detail.as_deref() != Some(detail.as_str()) {
+                        entry.detail = Some(detail);
+                        entry_changed = true;
+                    }
+                } else if clear_stale_detail && entry.detail.take().is_some() {
+                    entry_changed = true;
+                }
+                if entry_changed {
+                    entry.updated_at_ms =
+                        entry.updated_at_ms.max(timestamp).max(entry.started_at_ms);
+                    changed = true;
+                }
+                continue;
+            }
+
+            if !update.create_if_missing {
+                continue;
+            }
+            let Some(name) = update.name.filter(|name| !name.trim().is_empty()) else {
+                continue;
+            };
+            progress.entries.push(TelegramCollabProgressEntry {
+                agent_id: update.agent_id,
+                name,
+                status: update
+                    .status
+                    .unwrap_or(TelegramCollabProgressStatus::Running),
+                detail: update.detail.filter(|detail| !detail.trim().is_empty()),
+                started_at_ms: timestamp,
+                updated_at_ms: timestamp,
+            });
+            if progress.entries.len() > TELEGRAM_COLLAB_PROGRESS_MAX_AGENTS {
+                let excess = progress.entries.len() - TELEGRAM_COLLAB_PROGRESS_MAX_AGENTS;
+                progress.entries.drain(..excess);
+                progress.dropped_entries = progress.dropped_entries.saturating_add(excess);
+            }
+            changed = true;
+        }
+
+        if !changed {
+            return None;
+        }
+        progress.revision = progress.revision.saturating_add(1);
+        progress.dirty = true;
+        claim_telegram_collab_progress_snapshot(progress)
+    }
+
+    pub(crate) fn finish_telegram_collab_progress(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Option<TelegramCollabProgressSnapshot> {
+        let progress = self.telegram_collab_progress_by_thread.get_mut(thread_id)?;
+        if progress.turn_id != turn_id || progress.entries.is_empty() {
+            return None;
+        }
+        let now_ms = crate::types::now_ms();
+        let interrupted = progress
+            .entries
+            .iter_mut()
+            .filter(|entry| entry.status == TelegramCollabProgressStatus::Running)
+            .map(|entry| {
+                entry.status = TelegramCollabProgressStatus::Interrupted;
+                entry.updated_at_ms = entry.updated_at_ms.max(now_ms).max(entry.started_at_ms);
+            })
+            .count();
+        if !progress.completed || interrupted > 0 {
+            progress.completed = true;
+            progress.revision = progress.revision.saturating_add(1);
+            progress.dirty = true;
+        }
+        claim_telegram_collab_progress_snapshot(progress)
+    }
+
+    pub(crate) fn complete_telegram_collab_progress_delivery(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        revision: u64,
+        message_id: String,
+    ) -> Option<TelegramCollabProgressSnapshot> {
+        let mut cleanup = false;
+        let next = {
+            let progress = self.telegram_collab_progress_by_thread.get_mut(thread_id)?;
+            if progress.turn_id != turn_id
+                || !progress.sending
+                || progress.in_flight_revision != Some(revision)
+            {
+                return None;
+            }
+            progress.message_id = Some(message_id);
+            progress.in_flight_revision = None;
+            if progress.dirty {
+                claim_next_telegram_collab_progress_snapshot(progress)
+            } else {
+                progress.sending = false;
+                cleanup = progress.completed && progress.cleanup_after_delivery;
+                None
+            }
+        };
+        if cleanup {
+            self.telegram_collab_progress_by_thread.remove(thread_id);
+        }
+        next
+    }
+
+    pub(crate) fn fail_telegram_collab_progress_delivery(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+        revision: u64,
+    ) -> bool {
+        let Some(progress) = self.telegram_collab_progress_by_thread.get_mut(thread_id) else {
+            return false;
+        };
+        if progress.turn_id != turn_id
+            || !progress.sending
+            || progress.in_flight_revision != Some(revision)
+        {
+            return false;
+        }
+        progress.in_flight_revision = None;
+        progress.dirty = true;
+        if progress.completed {
+            true
+        } else {
+            progress.sending = false;
+            false
+        }
+    }
+
+    pub(crate) fn retry_telegram_collab_progress_delivery(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+    ) -> Option<TelegramCollabProgressSnapshot> {
+        let progress = self.telegram_collab_progress_by_thread.get_mut(thread_id)?;
+        if progress.turn_id != turn_id
+            || !progress.sending
+            || progress.in_flight_revision.is_some()
+            || !progress.dirty
+        {
+            return None;
+        }
+        claim_next_telegram_collab_progress_snapshot(progress)
+    }
+
+    pub(crate) fn clear_telegram_collab_progress_for_turn(
+        &mut self,
+        thread_id: &str,
+        turn_id: &str,
+    ) {
+        if self
+            .telegram_collab_progress_by_thread
+            .get(thread_id)
+            .is_some_and(|progress| progress.turn_id == turn_id)
+        {
+            self.telegram_collab_progress_by_thread.remove(thread_id);
+        }
+    }
+
+    pub(crate) fn clear_telegram_collab_progress_for_thread(&mut self, thread_id: &str) {
+        self.telegram_collab_progress_by_thread.remove(thread_id);
     }
 
     pub fn hold_pending_attachments(
@@ -312,14 +1601,55 @@ impl RuntimeState {
             .unwrap_or_default()
     }
 
-    pub fn mark_turn_completed(&mut self, thread_id: &str, _turn_id: Option<&str>) {
+    pub fn mark_turn_completed(&mut self, thread_id: &str, turn_id: Option<&str>) -> bool {
+        let current_turn_id = self
+            .current_turn_by_thread
+            .get(thread_id)
+            .map(String::as_str);
+        if let Some(turn_id) = turn_id
+            && current_turn_id != Some(turn_id)
+        {
+            self.turn_origin_by_id.remove(turn_id);
+            return false;
+        }
+        self.terminal_status_fallback_by_thread.remove(thread_id);
         self.starting_turn_by_thread.remove(thread_id);
         let completed_turn_id = self.current_turn_by_thread.remove(thread_id);
-        if let Some(turn_id) = _turn_id.or(completed_turn_id.as_deref()) {
+        if let Some(turn_id) = turn_id.or(completed_turn_id.as_deref()) {
             self.turn_origin_by_id.remove(turn_id);
+        }
+        self.clear_telegram_drafts_for_thread(thread_id);
+        let retain_command_progress =
+            if let Some(progress) = self.telegram_command_progress_by_thread.get_mut(thread_id) {
+                if progress.completed && progress.sending {
+                    progress.cleanup_after_delivery = true;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+        if !retain_command_progress {
+            self.clear_telegram_command_progress_for_thread(thread_id);
+        }
+        let retain_collab_progress =
+            if let Some(progress) = self.telegram_collab_progress_by_thread.get_mut(thread_id) {
+                if progress.completed && (progress.sending || progress.dirty) {
+                    progress.cleanup_after_delivery = true;
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+        if !retain_collab_progress {
+            self.clear_telegram_collab_progress_for_thread(thread_id);
         }
         self.turn_finished_at_by_thread
             .insert(thread_id.to_string(), crate::types::now_ms());
+        true
     }
 
     pub fn route_for_thread(&self, thread_id: &str) -> Option<RouteTarget> {
@@ -491,6 +1821,134 @@ impl RuntimeState {
     }
 }
 
+fn telegram_command_progress_snapshot(
+    progress: &TelegramCommandProgressState,
+) -> TelegramCommandProgressSnapshot {
+    TelegramCommandProgressSnapshot {
+        turn_id: progress.turn_id.clone(),
+        revision: progress.revision,
+        message_id: progress.message_id.clone(),
+        entries: progress.entries.clone(),
+        dropped_entries: progress.dropped_entries,
+        retry_count: progress.retry_count,
+        retry_error: progress.retry_error.clone(),
+        reasoning_summary: progress
+            .reasoning_completed
+            .then(|| progress.reasoning_summary.clone())
+            .filter(|value| !value.trim().is_empty()),
+        plan_explanation: progress.plan_explanation.clone(),
+        plan: progress.plan.clone(),
+        diff_summary: progress.diff_summary.clone(),
+        completed: progress.completed,
+        failed: progress.failed,
+    }
+}
+
+fn telegram_command_progress_state(turn_id: &str) -> TelegramCommandProgressState {
+    TelegramCommandProgressState {
+        turn_id: turn_id.to_string(),
+        revision: 0,
+        message_id: None,
+        entries: Vec::new(),
+        dropped_entries: 0,
+        retry_count: 0,
+        retry_error: None,
+        reasoning_item_id: None,
+        reasoning_summary_index: None,
+        reasoning_summary: String::new(),
+        reasoning_completed: false,
+        plan_explanation: None,
+        plan: Vec::new(),
+        diff_summary: None,
+        completed: false,
+        failed: false,
+        dirty: false,
+        sending: false,
+        in_flight_revision: None,
+        cleanup_after_delivery: false,
+    }
+}
+
+fn telegram_command_progress_has_content(progress: &TelegramCommandProgressState) -> bool {
+    !progress.entries.is_empty()
+        || progress.retry_count > 0
+        || (progress.reasoning_completed && !progress.reasoning_summary.trim().is_empty())
+        || progress.plan_explanation.is_some()
+        || !progress.plan.is_empty()
+        || progress.diff_summary.is_some()
+}
+
+fn claim_next_telegram_command_progress_snapshot(
+    progress: &mut TelegramCommandProgressState,
+) -> Option<TelegramCommandProgressSnapshot> {
+    if !progress.sending || progress.in_flight_revision.is_some() || !progress.dirty {
+        return None;
+    }
+    progress.dirty = false;
+    progress.in_flight_revision = Some(progress.revision);
+    Some(telegram_command_progress_snapshot(progress))
+}
+
+fn append_bounded_text(target: &mut String, delta: &str, max_chars: usize) {
+    target.push_str(delta);
+    let overflow = target.chars().count().saturating_sub(max_chars);
+    if overflow == 0 {
+        return;
+    }
+    *target = target.chars().skip(overflow).collect();
+}
+
+fn limit_telegram_diff_summary(mut summary: TelegramDiffSummary) -> TelegramDiffSummary {
+    if summary.paths.len() > TELEGRAM_DIFF_MAX_PATHS {
+        let omitted = summary.paths.len() - TELEGRAM_DIFF_MAX_PATHS;
+        summary.paths.truncate(TELEGRAM_DIFF_MAX_PATHS);
+        summary.omitted_paths = summary.omitted_paths.saturating_add(omitted);
+    }
+    summary
+}
+
+fn telegram_collab_progress_snapshot(
+    progress: &TelegramCollabProgressState,
+) -> TelegramCollabProgressSnapshot {
+    TelegramCollabProgressSnapshot {
+        turn_id: progress.turn_id.clone(),
+        revision: progress.revision,
+        message_id: progress.message_id.clone(),
+        entries: progress.entries.clone(),
+        dropped_entries: progress.dropped_entries,
+        completed: progress.completed,
+    }
+}
+
+fn claim_telegram_collab_progress_snapshot(
+    progress: &mut TelegramCollabProgressState,
+) -> Option<TelegramCollabProgressSnapshot> {
+    if progress.sending || !progress.dirty {
+        return None;
+    }
+    progress.sending = true;
+    claim_next_telegram_collab_progress_snapshot(progress)
+}
+
+fn claim_next_telegram_collab_progress_snapshot(
+    progress: &mut TelegramCollabProgressState,
+) -> Option<TelegramCollabProgressSnapshot> {
+    if !progress.sending || progress.in_flight_revision.is_some() || !progress.dirty {
+        return None;
+    }
+    progress.dirty = false;
+    progress.in_flight_revision = Some(progress.revision);
+    Some(telegram_collab_progress_snapshot(progress))
+}
+
+fn telegram_draft_key(thread_id: &str, item_id: &str) -> String {
+    format!("{}{item_id}", telegram_draft_thread_prefix(thread_id))
+}
+
+fn telegram_draft_thread_prefix(thread_id: &str) -> String {
+    format!("{thread_id}\u{1f}")
+}
+
 impl RouteTarget {
     pub fn deterministic_remote_client_key_for(
         platform: ImPlatformKind,
@@ -616,7 +2074,10 @@ mod tests {
 
     use super::{
         PENDING_ATTACHMENTS_MAX_AGE_MS, PendingApproval, RouteTarget, RuntimeState,
-        ThreadTurnState, TurnOrigin, route_from_conversation_key,
+        TelegramCollabProgressStatus, TelegramCollabProgressUpdate, TelegramCommandProgressEntry,
+        TelegramCommandProgressStatus, TelegramDiffSummary, TelegramDraftSendAction,
+        TelegramPlanStep, TelegramPlanStepStatus, ThreadTurnState, TurnOrigin,
+        route_from_conversation_key,
     };
 
     fn approval(id: i64) -> PendingApproval {
@@ -645,6 +2106,38 @@ mod tests {
             mime_type: Some("image/png".to_string()),
             text_hint: None,
             local_path: Some(format!("C:\\temp\\image-{index}.png")),
+        }
+    }
+
+    fn command_progress_entry(
+        item_id: &str,
+        command: &str,
+        status: TelegramCommandProgressStatus,
+    ) -> TelegramCommandProgressEntry {
+        TelegramCommandProgressEntry {
+            item_id: item_id.to_string(),
+            command: command.to_string(),
+            status,
+            exit_code: None,
+            duration_ms: None,
+            failure_output: None,
+        }
+    }
+
+    fn collab_progress_update(
+        agent_id: &str,
+        name: Option<&str>,
+        status: Option<TelegramCollabProgressStatus>,
+        occurred_at_ms: u128,
+    ) -> TelegramCollabProgressUpdate {
+        TelegramCollabProgressUpdate {
+            agent_id: agent_id.to_string(),
+            name: name.map(str::to_string),
+            status,
+            detail: None,
+            occurred_at_ms,
+            create_if_missing: name.is_some(),
+            restart: false,
         }
     }
 
@@ -697,6 +2190,1500 @@ mod tests {
                 .take_pending_attachments(route, 1_000 + PENDING_ATTACHMENTS_MAX_AGE_MS + 1)
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn telegram_command_progress_reuses_one_message_and_deduplicates_items() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+
+        let first = runtime
+            .upsert_telegram_command_progress(
+                "thread",
+                "turn",
+                command_progress_entry(
+                    "item-1",
+                    "cargo check",
+                    TelegramCommandProgressStatus::Running,
+                ),
+                false,
+            )
+            .expect("first command should create a message");
+        assert_eq!(first.message_id, None);
+        runtime.remember_telegram_command_progress_delivery(
+            "thread",
+            "turn",
+            first.revision,
+            "77".to_string(),
+        );
+
+        let second = runtime
+            .upsert_telegram_command_progress(
+                "thread",
+                "turn",
+                command_progress_entry(
+                    "item-2",
+                    "cargo test",
+                    TelegramCommandProgressStatus::Running,
+                ),
+                false,
+            )
+            .expect("new running command should edit the aggregate immediately");
+        assert_eq!(second.message_id.as_deref(), Some("77"));
+        assert_eq!(second.entries.len(), 2);
+        runtime.remember_telegram_command_progress_delivery(
+            "thread",
+            "turn",
+            second.revision,
+            "77".to_string(),
+        );
+        let completed = runtime
+            .upsert_telegram_command_progress(
+                "thread",
+                "turn",
+                command_progress_entry(
+                    "item-2",
+                    "cargo test",
+                    TelegramCommandProgressStatus::Succeeded,
+                ),
+                true,
+            )
+            .expect("completion should edit the aggregate");
+        assert_eq!(completed.message_id.as_deref(), Some("77"));
+        assert_eq!(completed.entries.len(), 2);
+
+        runtime.remember_telegram_command_progress_delivery(
+            "thread",
+            "turn",
+            completed.revision,
+            "77".to_string(),
+        );
+        assert!(
+            runtime
+                .upsert_telegram_command_progress(
+                    "thread",
+                    "turn",
+                    command_progress_entry(
+                        "item-2",
+                        "cargo test",
+                        TelegramCommandProgressStatus::Succeeded,
+                    ),
+                    true,
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn telegram_command_progress_allows_only_one_in_flight_snapshot() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+
+        let created = runtime
+            .upsert_telegram_command_progress(
+                "thread",
+                "turn",
+                command_progress_entry(
+                    "item",
+                    "cargo check",
+                    TelegramCommandProgressStatus::Running,
+                ),
+                true,
+            )
+            .expect("initial progress should be dirty");
+        let claimed = runtime
+            .claim_telegram_command_progress_delivery("thread", "turn")
+            .expect("initial progress should be claimed");
+        assert_eq!(claimed.revision, created.revision);
+        assert!(
+            runtime
+                .claim_telegram_command_progress_delivery("thread", "turn")
+                .is_none()
+        );
+        assert!(runtime.telegram_command_progress_delivery_is_current(
+            "thread",
+            "turn",
+            claimed.revision
+        ));
+        assert!(!runtime.telegram_command_progress_delivery_is_current(
+            "thread",
+            "turn",
+            claimed.revision.saturating_add(1)
+        ));
+    }
+
+    #[test]
+    fn telegram_command_progress_queues_latest_revision_behind_delivery() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+
+        let first = runtime
+            .upsert_telegram_command_progress(
+                "thread",
+                "turn",
+                command_progress_entry(
+                    "item",
+                    "cargo check",
+                    TelegramCommandProgressStatus::Running,
+                ),
+                true,
+            )
+            .expect("initial progress should be dirty");
+        let claimed = runtime
+            .claim_telegram_command_progress_delivery("thread", "turn")
+            .expect("initial progress should be claimed");
+
+        let updated = runtime
+            .upsert_telegram_command_progress(
+                "thread",
+                "turn",
+                command_progress_entry(
+                    "item",
+                    "cargo check",
+                    TelegramCommandProgressStatus::Succeeded,
+                ),
+                true,
+            )
+            .expect("new state should remain dirty while the first send is in flight");
+        assert!(updated.revision > first.revision);
+        assert!(runtime.telegram_command_progress_delivery_is_current(
+            "thread",
+            "turn",
+            claimed.revision
+        ));
+
+        let next = runtime
+            .complete_telegram_command_progress_delivery(
+                "thread",
+                "turn",
+                claimed.revision,
+                "42".to_string(),
+            )
+            .expect("latest revision should be claimed after the first send");
+        assert_eq!(next.revision, updated.revision);
+        assert_eq!(next.message_id.as_deref(), Some("42"));
+        assert!(
+            runtime
+                .complete_telegram_command_progress_delivery(
+                    "thread",
+                    "turn",
+                    claimed.revision,
+                    "stale".to_string(),
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn telegram_command_progress_rejects_old_delivery_after_turn_replacement() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "old-turn");
+        let first = runtime
+            .upsert_telegram_command_progress(
+                "thread",
+                "old-turn",
+                command_progress_entry(
+                    "item",
+                    "cargo check",
+                    TelegramCommandProgressStatus::Running,
+                ),
+                true,
+            )
+            .expect("initial progress should be dirty");
+        let claimed = runtime
+            .claim_telegram_command_progress_delivery("thread", "old-turn")
+            .expect("initial progress should be claimed");
+        assert_eq!(claimed.revision, first.revision);
+
+        runtime.mark_turn_completed("thread", Some("old-turn"));
+        runtime.mark_turn_started("thread", "new-turn");
+        assert!(!runtime.telegram_command_progress_delivery_is_current(
+            "thread",
+            "old-turn",
+            claimed.revision
+        ));
+        assert!(
+            runtime
+                .complete_telegram_command_progress_delivery(
+                    "thread",
+                    "old-turn",
+                    claimed.revision,
+                    "stale".to_string(),
+                )
+                .is_none()
+        );
+        assert!(runtime.telegram_command_progress_by_thread.is_empty());
+    }
+
+    #[test]
+    fn telegram_command_progress_cleans_terminal_state_after_final_delivery() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+        runtime
+            .upsert_telegram_command_progress(
+                "thread",
+                "turn",
+                command_progress_entry(
+                    "item",
+                    "cargo check",
+                    TelegramCommandProgressStatus::Running,
+                ),
+                true,
+            )
+            .expect("initial progress should be dirty");
+        let first = runtime
+            .claim_telegram_command_progress_delivery("thread", "turn")
+            .expect("initial progress should be claimed");
+        let final_snapshot = runtime
+            .finish_telegram_command_progress("thread", "turn")
+            .expect("terminal progress should be dirty");
+        assert!(final_snapshot.completed);
+        assert!(runtime.mark_turn_completed("thread", Some("turn")));
+        assert!(
+            runtime
+                .telegram_command_progress_by_thread
+                .contains_key("thread")
+        );
+
+        let queued = runtime
+            .complete_telegram_command_progress_delivery(
+                "thread",
+                "turn",
+                first.revision,
+                "42".to_string(),
+            )
+            .expect("terminal revision should follow the initial delivery");
+        assert!(queued.completed);
+        assert_eq!(queued.message_id.as_deref(), Some("42"));
+        assert!(
+            runtime
+                .telegram_command_progress_by_thread
+                .contains_key("thread")
+        );
+        assert!(
+            runtime
+                .complete_telegram_command_progress_delivery(
+                    "thread",
+                    "turn",
+                    queued.revision,
+                    "42".to_string(),
+                )
+                .is_none()
+        );
+        assert!(runtime.telegram_command_progress_by_thread.is_empty());
+    }
+
+    #[test]
+    fn telegram_command_progress_keeps_terminal_failure_retryable_before_cleanup() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+        runtime
+            .upsert_telegram_command_progress(
+                "thread",
+                "turn",
+                command_progress_entry(
+                    "item",
+                    "cargo test",
+                    TelegramCommandProgressStatus::Running,
+                ),
+                true,
+            )
+            .expect("initial progress should be dirty");
+        let first = runtime
+            .claim_telegram_command_progress_delivery("thread", "turn")
+            .expect("initial progress should be claimed");
+        runtime
+            .finish_telegram_command_progress("thread", "turn")
+            .expect("terminal progress should be queued");
+
+        assert!(runtime.fail_telegram_command_progress_delivery("thread", "turn", first.revision));
+        assert!(runtime.mark_turn_completed("thread", Some("turn")));
+        let retry = runtime
+            .retry_telegram_command_progress_delivery("thread", "turn")
+            .expect("terminal progress should remain retryable");
+        assert!(retry.completed);
+        assert!(
+            runtime
+                .complete_telegram_command_progress_delivery(
+                    "thread",
+                    "turn",
+                    retry.revision,
+                    "43".to_string(),
+                )
+                .is_none()
+        );
+        assert!(runtime.telegram_command_progress_by_thread.is_empty());
+    }
+
+    #[test]
+    fn telegram_command_progress_can_reclaim_retryable_active_failure() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+        runtime
+            .upsert_telegram_command_progress(
+                "thread",
+                "turn",
+                command_progress_entry(
+                    "item",
+                    "cargo test",
+                    TelegramCommandProgressStatus::Running,
+                ),
+                true,
+            )
+            .expect("initial progress should be dirty");
+        let first = runtime
+            .claim_telegram_command_progress_delivery("thread", "turn")
+            .expect("initial progress should be claimed");
+
+        assert!(!runtime.fail_telegram_command_progress_delivery("thread", "turn", first.revision));
+        let retry = runtime
+            .claim_telegram_command_progress_delivery("thread", "turn")
+            .expect("retryable API failures should be able to reclaim the snapshot");
+        assert_eq!(retry.revision, first.revision);
+    }
+
+    #[test]
+    fn telegram_command_progress_ignores_duplicate_detail_events() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+
+        runtime.append_telegram_reasoning_delta("thread", "turn", "reasoning", 0, "Review");
+        let reasoning = runtime
+            .complete_telegram_reasoning("thread", "turn", "reasoning", None)
+            .expect("reasoning should be flushed");
+        assert!(
+            runtime
+                .complete_telegram_reasoning(
+                    "thread",
+                    "turn",
+                    "reasoning",
+                    Some("Review".to_string()),
+                )
+                .is_none()
+        );
+
+        let plan = vec![TelegramPlanStep {
+            step: "Inspect".to_string(),
+            status: TelegramPlanStepStatus::InProgress,
+        }];
+        let planned = runtime
+            .update_telegram_plan("thread", "turn", None, plan.clone(), true)
+            .expect("plan should be dirty");
+        assert!(planned.revision > reasoning.revision);
+        assert!(
+            runtime
+                .update_telegram_plan("thread", "turn", None, plan, true)
+                .is_none()
+        );
+
+        let diff = TelegramDiffSummary {
+            file_count: 1,
+            additions: 2,
+            deletions: 1,
+            paths: vec!["src/lib.rs".to_string()],
+            omitted_paths: 0,
+        };
+        let diff_snapshot = runtime
+            .update_telegram_diff("thread", "turn", Some(diff.clone()), true)
+            .expect("diff should be dirty");
+        assert!(diff_snapshot.revision > planned.revision);
+        assert!(
+            runtime
+                .update_telegram_diff("thread", "turn", Some(diff), true)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn telegram_command_progress_final_flush_and_turn_cleanup() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn-1");
+        let started = runtime
+            .upsert_telegram_command_progress(
+                "thread",
+                "turn-1",
+                command_progress_entry(
+                    "item",
+                    "cargo test",
+                    TelegramCommandProgressStatus::Running,
+                ),
+                false,
+            )
+            .expect("started command");
+        runtime.remember_telegram_command_progress_delivery(
+            "thread",
+            "turn-1",
+            started.revision,
+            "42".to_string(),
+        );
+
+        let final_snapshot = runtime
+            .finish_telegram_command_progress("thread", "turn-1")
+            .expect("final progress update");
+        assert!(final_snapshot.completed);
+        assert_eq!(final_snapshot.message_id.as_deref(), Some("42"));
+        assert_eq!(
+            final_snapshot.entries[0].status,
+            TelegramCommandProgressStatus::Interrupted
+        );
+        assert!(
+            runtime
+                .finish_telegram_command_progress("thread", "turn-2")
+                .is_none()
+        );
+
+        runtime.mark_turn_completed("thread", Some("turn-1"));
+        assert!(runtime.telegram_command_progress_by_thread.is_empty());
+    }
+
+    #[test]
+    fn telegram_turn_details_share_the_command_progress_message() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+
+        runtime.append_telegram_reasoning_delta("thread", "turn", "reasoning-1", 0, "first");
+        runtime.append_telegram_reasoning_delta("thread", "turn", "reasoning-1", 0, " second");
+        assert!(
+            runtime
+                .complete_telegram_reasoning("thread", "turn", "reasoning-1", None)
+                .is_some()
+        );
+        let plan_snapshot = runtime
+            .update_telegram_plan(
+                "thread",
+                "turn",
+                Some("Implement and verify".to_string()),
+                vec![TelegramPlanStep {
+                    step: "Implement".to_string(),
+                    status: TelegramPlanStepStatus::InProgress,
+                }],
+                true,
+            )
+            .expect("plan should create the aggregate");
+        assert_eq!(
+            plan_snapshot.reasoning_summary.as_deref(),
+            Some("first second")
+        );
+        runtime.remember_telegram_command_progress_delivery(
+            "thread",
+            "turn",
+            plan_snapshot.revision,
+            "99".to_string(),
+        );
+
+        let diff = TelegramDiffSummary {
+            file_count: 2,
+            additions: 3,
+            deletions: 1,
+            paths: vec!["src/a.rs".to_string(), "src/b.rs".to_string()],
+            omitted_paths: 0,
+        };
+        assert!(
+            runtime
+                .update_telegram_diff("thread", "turn", Some(diff.clone()), false)
+                .is_none()
+        );
+        let file_snapshot = runtime
+            .complete_telegram_file_change("thread", "turn", None)
+            .expect("file change should flush cached diff");
+        assert_eq!(file_snapshot.message_id.as_deref(), Some("99"));
+        assert_eq!(file_snapshot.diff_summary, Some(diff));
+
+        let duplicate_revision = file_snapshot.revision;
+        assert!(
+            runtime
+                .update_telegram_diff("thread", "turn", file_snapshot.diff_summary.clone(), false,)
+                .is_none()
+        );
+        let final_snapshot = runtime
+            .finish_telegram_command_progress("thread", "turn")
+            .expect("details-only turn should flush at completion");
+        assert!(final_snapshot.completed);
+        assert!(final_snapshot.revision > duplicate_revision);
+    }
+
+    #[test]
+    fn telegram_turn_details_ignore_stale_turns_and_empty_diff() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "current");
+        assert!(
+            runtime
+                .update_telegram_plan("thread", "old", None, Vec::new(), true,)
+                .is_none()
+        );
+        assert!(
+            runtime
+                .update_telegram_diff("thread", "current", None, true)
+                .is_none()
+        );
+        assert!(
+            runtime
+                .complete_telegram_file_change(
+                    "thread",
+                    "old",
+                    Some(TelegramDiffSummary {
+                        file_count: 1,
+                        additions: 1,
+                        deletions: 0,
+                        paths: vec!["old.rs".to_string()],
+                        omitted_paths: 0,
+                    }),
+                )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn telegram_collab_progress_reuses_message_and_merges_by_agent() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+
+        let started = runtime
+            .apply_telegram_collab_progress_updates(
+                "thread",
+                "turn",
+                vec![collab_progress_update(
+                    "agent-secret",
+                    Some("api_review"),
+                    Some(TelegramCollabProgressStatus::Running),
+                    1_000,
+                )],
+            )
+            .expect("first agent should create progress");
+        assert_eq!(started.entries.len(), 1);
+        assert_eq!(started.message_id, None);
+        assert!(
+            runtime
+                .complete_telegram_collab_progress_delivery(
+                    "thread",
+                    "turn",
+                    started.revision,
+                    "88".to_string(),
+                )
+                .is_none()
+        );
+
+        let completed = runtime
+            .apply_telegram_collab_progress_updates(
+                "thread",
+                "turn",
+                vec![collab_progress_update(
+                    "agent-secret",
+                    None,
+                    Some(TelegramCollabProgressStatus::Succeeded),
+                    43_000,
+                )],
+            )
+            .expect("agent completion should edit progress");
+        assert_eq!(completed.entries.len(), 1);
+        assert_eq!(completed.message_id.as_deref(), Some("88"));
+        assert_eq!(
+            completed.entries[0].status,
+            TelegramCollabProgressStatus::Succeeded
+        );
+        assert_eq!(completed.entries[0].updated_at_ms, 43_000);
+    }
+
+    #[test]
+    fn telegram_collab_progress_serializes_updates_and_rejects_stale_ack() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+
+        let first = runtime
+            .apply_telegram_collab_progress_updates(
+                "thread",
+                "turn",
+                vec![collab_progress_update(
+                    "agent-a",
+                    Some("review"),
+                    Some(TelegramCollabProgressStatus::Running),
+                    1_000,
+                )],
+            )
+            .expect("first update should claim the delivery driver");
+        assert!(
+            runtime
+                .apply_telegram_collab_progress_updates(
+                    "thread",
+                    "turn",
+                    vec![collab_progress_update(
+                        "agent-a",
+                        None,
+                        Some(TelegramCollabProgressStatus::Succeeded),
+                        2_000,
+                    )],
+                )
+                .is_none()
+        );
+        assert!(
+            runtime
+                .finish_telegram_collab_progress("thread", "turn")
+                .is_none()
+        );
+
+        let final_snapshot = runtime
+            .complete_telegram_collab_progress_delivery(
+                "thread",
+                "turn",
+                first.revision,
+                "100".to_string(),
+            )
+            .expect("queued terminal state should follow the first delivery");
+        assert!(final_snapshot.completed);
+        assert_eq!(final_snapshot.message_id.as_deref(), Some("100"));
+        assert!(
+            runtime
+                .complete_telegram_collab_progress_delivery(
+                    "thread",
+                    "turn",
+                    first.revision,
+                    "stale".to_string(),
+                )
+                .is_none()
+        );
+        assert_eq!(
+            runtime
+                .telegram_collab_progress_by_thread
+                .get("thread")
+                .and_then(|progress| progress.message_id.as_deref()),
+            Some("100")
+        );
+
+        assert!(runtime.mark_turn_completed("thread", Some("turn")));
+        assert!(
+            runtime
+                .telegram_collab_progress_by_thread
+                .contains_key("thread")
+        );
+        assert!(
+            runtime
+                .complete_telegram_collab_progress_delivery(
+                    "thread",
+                    "turn",
+                    final_snapshot.revision,
+                    "100".to_string(),
+                )
+                .is_none()
+        );
+        assert!(runtime.telegram_collab_progress_by_thread.is_empty());
+    }
+
+    #[test]
+    fn telegram_collab_progress_retries_failed_terminal_delivery_after_turn_cleanup() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+        let first = runtime
+            .apply_telegram_collab_progress_updates(
+                "thread",
+                "turn",
+                vec![collab_progress_update(
+                    "agent-a",
+                    Some("review"),
+                    Some(TelegramCollabProgressStatus::Running),
+                    1_000,
+                )],
+            )
+            .expect("first update should start delivery");
+        assert!(
+            runtime
+                .finish_telegram_collab_progress("thread", "turn")
+                .is_none()
+        );
+        assert!(runtime.mark_turn_completed("thread", Some("turn")));
+
+        assert!(runtime.fail_telegram_collab_progress_delivery("thread", "turn", first.revision,));
+        let retry = runtime
+            .retry_telegram_collab_progress_delivery("thread", "turn")
+            .expect("terminal state should remain retryable");
+        assert!(retry.completed);
+        assert_eq!(
+            retry.entries[0].status,
+            TelegramCollabProgressStatus::Interrupted
+        );
+        assert!(
+            runtime
+                .complete_telegram_collab_progress_delivery(
+                    "thread",
+                    "turn",
+                    retry.revision,
+                    "101".to_string(),
+                )
+                .is_none()
+        );
+        assert!(runtime.telegram_collab_progress_by_thread.is_empty());
+    }
+
+    #[test]
+    fn telegram_collab_progress_nonterminal_failure_releases_the_driver() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+        let first = runtime
+            .apply_telegram_collab_progress_updates(
+                "thread",
+                "turn",
+                vec![collab_progress_update(
+                    "agent-a",
+                    Some("review"),
+                    Some(TelegramCollabProgressStatus::Running),
+                    1_000,
+                )],
+            )
+            .expect("first update should start delivery");
+        assert!(!runtime.fail_telegram_collab_progress_delivery("thread", "turn", first.revision,));
+
+        let completed = runtime
+            .apply_telegram_collab_progress_updates(
+                "thread",
+                "turn",
+                vec![collab_progress_update(
+                    "agent-a",
+                    None,
+                    Some(TelegramCollabProgressStatus::Succeeded),
+                    2_000,
+                )],
+            )
+            .expect("a later update should restart delivery");
+        assert_eq!(
+            completed.entries[0].status,
+            TelegramCollabProgressStatus::Succeeded
+        );
+    }
+
+    #[test]
+    fn telegram_collab_progress_ignores_updates_older_than_the_entry() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+        let initial = runtime
+            .apply_telegram_collab_progress_updates(
+                "thread",
+                "turn",
+                vec![collab_progress_update(
+                    "agent-a",
+                    Some("initial_name"),
+                    Some(TelegramCollabProgressStatus::Running),
+                    1_000,
+                )],
+            )
+            .expect("agent should create progress");
+        assert!(
+            runtime
+                .complete_telegram_collab_progress_delivery(
+                    "thread",
+                    "turn",
+                    initial.revision,
+                    "90".to_string(),
+                )
+                .is_none()
+        );
+
+        let mut newest = collab_progress_update(
+            "agent-a",
+            Some("current_name"),
+            Some(TelegramCollabProgressStatus::Succeeded),
+            3_000,
+        );
+        newest.detail = Some("current detail".to_string());
+        let newest = runtime
+            .apply_telegram_collab_progress_updates("thread", "turn", vec![newest])
+            .expect("newer event should update progress");
+
+        let mut stale = collab_progress_update(
+            "agent-a",
+            Some("stale_name"),
+            Some(TelegramCollabProgressStatus::Failed),
+            2_000,
+        );
+        stale.detail = Some("stale detail".to_string());
+        assert!(
+            runtime
+                .apply_telegram_collab_progress_updates("thread", "turn", vec![stale])
+                .is_none()
+        );
+
+        let retained = runtime
+            .telegram_collab_progress_by_thread
+            .get("thread")
+            .expect("collaboration progress should remain");
+        assert_eq!(retained.revision, newest.revision);
+        assert_eq!(retained.entries, newest.entries);
+        assert_eq!(retained.entries[0].name, "current_name");
+        assert_eq!(
+            retained.entries[0].status,
+            TelegramCollabProgressStatus::Succeeded
+        );
+        assert_eq!(
+            retained.entries[0].detail.as_deref(),
+            Some("current detail")
+        );
+        assert_eq!(retained.entries[0].updated_at_ms, 3_000);
+    }
+
+    #[test]
+    fn telegram_collab_progress_restart_requires_a_current_event() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+        let initial = runtime
+            .apply_telegram_collab_progress_updates(
+                "thread",
+                "turn",
+                vec![collab_progress_update(
+                    "agent-a",
+                    Some("review"),
+                    Some(TelegramCollabProgressStatus::Succeeded),
+                    3_000,
+                )],
+            )
+            .expect("agent should create terminal progress");
+        assert!(
+            runtime
+                .complete_telegram_collab_progress_delivery(
+                    "thread",
+                    "turn",
+                    initial.revision,
+                    "91".to_string(),
+                )
+                .is_none()
+        );
+
+        let mut stale_restart = collab_progress_update(
+            "agent-a",
+            None,
+            Some(TelegramCollabProgressStatus::Running),
+            2_000,
+        );
+        stale_restart.restart = true;
+        assert!(
+            runtime
+                .apply_telegram_collab_progress_updates("thread", "turn", vec![stale_restart])
+                .is_none()
+        );
+
+        let mut current_restart = collab_progress_update(
+            "agent-a",
+            None,
+            Some(TelegramCollabProgressStatus::Running),
+            4_000,
+        );
+        current_restart.restart = true;
+        let restarted = runtime
+            .apply_telegram_collab_progress_updates("thread", "turn", vec![current_restart])
+            .expect("newer restart should reopen the agent");
+        assert_eq!(
+            restarted.entries[0].status,
+            TelegramCollabProgressStatus::Running
+        );
+        assert_eq!(restarted.entries[0].started_at_ms, 4_000);
+        assert_eq!(restarted.entries[0].updated_at_ms, 4_000);
+    }
+
+    #[test]
+    fn telegram_collab_progress_success_and_restart_clear_stale_detail() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+        let mut started = collab_progress_update(
+            "agent-a",
+            Some("review"),
+            Some(TelegramCollabProgressStatus::Running),
+            1_000,
+        );
+        started.detail = Some("temporary error".to_string());
+        let initial = runtime
+            .apply_telegram_collab_progress_updates("thread", "turn", vec![started])
+            .expect("agent should create progress");
+        assert!(
+            runtime
+                .complete_telegram_collab_progress_delivery(
+                    "thread",
+                    "turn",
+                    initial.revision,
+                    "92".to_string(),
+                )
+                .is_none()
+        );
+
+        let succeeded = runtime
+            .apply_telegram_collab_progress_updates(
+                "thread",
+                "turn",
+                vec![collab_progress_update(
+                    "agent-a",
+                    None,
+                    Some(TelegramCollabProgressStatus::Succeeded),
+                    2_000,
+                )],
+            )
+            .expect("success should clear the old detail");
+        assert_eq!(succeeded.entries[0].detail, None);
+        assert!(
+            runtime
+                .complete_telegram_collab_progress_delivery(
+                    "thread",
+                    "turn",
+                    succeeded.revision,
+                    "92".to_string(),
+                )
+                .is_none()
+        );
+
+        let mut failed = collab_progress_update(
+            "agent-a",
+            None,
+            Some(TelegramCollabProgressStatus::Failed),
+            3_000,
+        );
+        failed.detail = Some("retry failed".to_string());
+        let failed = runtime
+            .apply_telegram_collab_progress_updates("thread", "turn", vec![failed])
+            .expect("failure should attach its detail");
+        assert!(
+            runtime
+                .complete_telegram_collab_progress_delivery(
+                    "thread",
+                    "turn",
+                    failed.revision,
+                    "92".to_string(),
+                )
+                .is_none()
+        );
+
+        let mut restarted = collab_progress_update(
+            "agent-a",
+            None,
+            Some(TelegramCollabProgressStatus::Running),
+            4_000,
+        );
+        restarted.restart = true;
+        let restarted = runtime
+            .apply_telegram_collab_progress_updates("thread", "turn", vec![restarted])
+            .expect("restart should clear the old detail");
+        assert_eq!(
+            restarted.entries[0].status,
+            TelegramCollabProgressStatus::Running
+        );
+        assert_eq!(restarted.entries[0].detail, None);
+    }
+
+    #[test]
+    fn telegram_collab_progress_terminal_state_is_monotonic_and_finish_interrupts_running() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+        let initial = runtime
+            .apply_telegram_collab_progress_updates(
+                "thread",
+                "turn",
+                vec![
+                    collab_progress_update(
+                        "agent-a",
+                        Some("completed_agent"),
+                        Some(TelegramCollabProgressStatus::Succeeded),
+                        1_000,
+                    ),
+                    collab_progress_update(
+                        "agent-b",
+                        Some("running_agent"),
+                        Some(TelegramCollabProgressStatus::Running),
+                        2_000,
+                    ),
+                    collab_progress_update(
+                        "agent-c",
+                        Some("failed_agent"),
+                        Some(TelegramCollabProgressStatus::Failed),
+                        2_000,
+                    ),
+                ],
+            )
+            .expect("agents should create progress");
+        assert!(
+            runtime
+                .complete_telegram_collab_progress_delivery(
+                    "thread",
+                    "turn",
+                    initial.revision,
+                    "93".to_string(),
+                )
+                .is_none()
+        );
+
+        assert!(
+            runtime
+                .apply_telegram_collab_progress_updates(
+                    "thread",
+                    "turn",
+                    vec![
+                        collab_progress_update(
+                            "agent-a",
+                            None,
+                            Some(TelegramCollabProgressStatus::Running),
+                            3_000,
+                        ),
+                        collab_progress_update(
+                            "agent-c",
+                            None,
+                            Some(TelegramCollabProgressStatus::Succeeded),
+                            3_000,
+                        ),
+                    ],
+                )
+                .is_none()
+        );
+        let final_snapshot = runtime
+            .finish_telegram_collab_progress("thread", "turn")
+            .expect("turn finish should edit collaboration progress");
+        assert!(final_snapshot.completed);
+        assert_eq!(
+            final_snapshot.entries[0].status,
+            TelegramCollabProgressStatus::Succeeded
+        );
+        assert_eq!(
+            final_snapshot.entries[1].status,
+            TelegramCollabProgressStatus::Interrupted
+        );
+        assert_eq!(
+            final_snapshot.entries[2].status,
+            TelegramCollabProgressStatus::Failed
+        );
+    }
+
+    #[test]
+    fn telegram_collab_progress_does_not_reappear_after_turn_cleanup() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+        runtime
+            .apply_telegram_collab_progress_updates(
+                "thread",
+                "turn",
+                vec![collab_progress_update(
+                    "agent-a",
+                    Some("review"),
+                    Some(TelegramCollabProgressStatus::Running),
+                    1_000,
+                )],
+            )
+            .expect("agent should create progress");
+        assert!(runtime.mark_turn_completed("thread", Some("turn")));
+        assert!(runtime.telegram_collab_progress_by_thread.is_empty());
+        assert!(
+            runtime
+                .apply_telegram_collab_progress_updates(
+                    "thread",
+                    "turn",
+                    vec![collab_progress_update(
+                        "agent-a",
+                        None,
+                        Some(TelegramCollabProgressStatus::Succeeded),
+                        2_000,
+                    )],
+                )
+                .is_none()
+        );
+        assert!(runtime.telegram_collab_progress_by_thread.is_empty());
+    }
+
+    #[test]
+    fn telegram_retry_progress_counts_attempts_and_reuses_delivery() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+
+        let first = runtime
+            .record_telegram_retry(
+                "thread",
+                "turn",
+                Some("503 Service Unavailable".to_string()),
+            )
+            .expect("first retry should create progress");
+        assert_eq!(first.retry_count, 1);
+        assert_eq!(first.message_id, None);
+        runtime.remember_telegram_command_progress_delivery(
+            "thread",
+            "turn",
+            first.revision,
+            "77".to_string(),
+        );
+
+        let second = runtime
+            .record_telegram_retry(
+                "thread",
+                "turn",
+                Some("503 Service Unavailable".to_string()),
+            )
+            .expect("second retry should update progress");
+        assert_eq!(second.retry_count, 2);
+        assert_eq!(second.message_id.as_deref(), Some("77"));
+
+        runtime.remember_telegram_command_progress_delivery(
+            "thread",
+            "turn",
+            second.revision,
+            "77".to_string(),
+        );
+        let final_snapshot = runtime
+            .finish_telegram_command_progress_with_outcome("thread", "turn", true)
+            .expect("retry-only progress must receive a terminal update");
+        assert!(final_snapshot.completed);
+        assert!(final_snapshot.failed);
+        assert_eq!(final_snapshot.retry_count, 2);
+        assert_eq!(final_snapshot.message_id.as_deref(), Some("77"));
+    }
+
+    #[test]
+    fn telegram_retry_after_turn_completion_does_not_recreate_progress() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+        assert!(
+            runtime
+                .record_telegram_retry("thread", "turn", None)
+                .is_some()
+        );
+
+        assert!(runtime.mark_turn_completed("thread", Some("turn")));
+        assert!(runtime.telegram_command_progress_by_thread.is_empty());
+
+        assert!(
+            runtime
+                .record_telegram_retry(
+                    "thread",
+                    "turn",
+                    Some("503 Service Unavailable".to_string()),
+                )
+                .is_none()
+        );
+        assert!(runtime.telegram_command_progress_by_thread.is_empty());
+    }
+
+    #[test]
+    fn terminal_notice_deduplicates_equal_outcomes_and_prioritizes_failure() {
+        let mut runtime = RuntimeState::default();
+
+        assert!(runtime.claim_terminal_notice("turn-1", false));
+        assert!(!runtime.claim_terminal_notice("turn-1", false));
+        assert!(runtime.claim_terminal_notice("turn-1", true));
+        assert!(!runtime.claim_terminal_notice("turn-1", true));
+        assert!(!runtime.claim_terminal_notice("turn-1", false));
+
+        assert!(runtime.claim_terminal_notice("turn-2", true));
+        assert!(!runtime.claim_terminal_notice("turn-2", false));
+
+        runtime.release_terminal_notice("turn-2");
+        assert!(runtime.claim_terminal_notice("turn-2", false));
+    }
+
+    #[test]
+    fn stale_turn_completion_does_not_clear_the_new_turn() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "old-turn");
+        runtime.mark_turn_started("thread", "new-turn");
+
+        assert!(!runtime.mark_turn_completed("thread", Some("old-turn")));
+        assert_eq!(runtime.current_turn_id("thread"), Some("new-turn"));
+
+        assert!(runtime.mark_turn_completed("thread", Some("new-turn")));
+        assert_eq!(runtime.current_turn_id("thread"), None);
+    }
+
+    #[test]
+    fn terminal_status_fallback_is_scoped_to_one_turn() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn-1");
+
+        assert!(runtime.register_terminal_status_fallback("thread", "turn-1"));
+        assert!(runtime.terminal_status_fallback_matches("thread", "turn-1"));
+        runtime.cancel_terminal_status_fallback("thread", "other-turn");
+        assert!(runtime.terminal_status_fallback_matches("thread", "turn-1"));
+        runtime.cancel_terminal_status_fallback("thread", "turn-1");
+        assert!(!runtime.terminal_status_fallback_matches("thread", "turn-1"));
+
+        assert!(runtime.register_terminal_status_fallback("thread", "turn-1"));
+        runtime.mark_turn_started("thread", "turn-2");
+        assert!(!runtime.terminal_status_fallback_matches("thread", "turn-1"));
+        assert!(!runtime.register_terminal_status_fallback("thread", "turn-1"));
+    }
+
+    #[test]
+    fn terminal_status_fallback_token_is_single_owner_across_drivers() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn-1");
+
+        let (server_token, inserted) = runtime
+            .register_terminal_status_fallback_token("thread", "turn-1")
+            .expect("server registration");
+        assert!(inserted);
+        let (same_token, inserted_again) = runtime
+            .register_terminal_status_fallback_token("thread", "turn-1")
+            .expect("duplicate registration should reuse latch");
+        assert_eq!(same_token, server_token);
+        assert!(!inserted_again);
+
+        assert_eq!(
+            runtime.start_terminal_status_fallback("thread", "turn-1"),
+            Some(server_token)
+        );
+        assert_eq!(
+            runtime.start_terminal_status_fallback("thread", "turn-1"),
+            None
+        );
+        assert!(runtime.terminal_status_fallback_matches_token("thread", "turn-1", server_token));
+
+        assert!(runtime.claim_terminal_status_fallback("thread", "turn-1", server_token));
+        assert!(!runtime.claim_terminal_status_fallback("thread", "turn-1", server_token));
+    }
+
+    #[test]
+    fn server_driver_starts_after_im_created_the_shared_latch() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn-1");
+
+        let token = runtime
+            .start_terminal_status_fallback("thread", "turn-1")
+            .expect("IM driver should create latch");
+        let (same_token, should_start_server) = runtime
+            .register_terminal_status_fallback_token("thread", "turn-1")
+            .expect("server driver should reuse latch");
+        assert_eq!(same_token, token);
+        assert!(should_start_server);
+        let (_, should_start_server_again) = runtime
+            .register_terminal_status_fallback_token("thread", "turn-1")
+            .expect("server driver registration");
+        assert!(!should_start_server_again);
+    }
+
+    #[test]
+    fn failed_command_progress_snapshot_is_marked_failed() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn");
+        runtime
+            .upsert_telegram_command_progress(
+                "thread",
+                "turn",
+                command_progress_entry(
+                    "item",
+                    "cargo test",
+                    TelegramCommandProgressStatus::Succeeded,
+                ),
+                true,
+            )
+            .expect("command progress");
+
+        let snapshot = runtime
+            .finish_telegram_command_progress_with_outcome("thread", "turn", true)
+            .expect("failed terminal snapshot");
+        assert!(snapshot.failed);
+        assert!(snapshot.completed);
+    }
+
+    #[test]
+    fn starting_a_new_turn_discards_stale_command_progress() {
+        let mut runtime = RuntimeState::default();
+        runtime.mark_turn_started("thread", "turn-1");
+        runtime
+            .upsert_telegram_command_progress(
+                "thread",
+                "turn-1",
+                command_progress_entry(
+                    "old-item",
+                    "old command",
+                    TelegramCommandProgressStatus::Succeeded,
+                ),
+                true,
+            )
+            .expect("old command");
+
+        runtime.mark_turn_started("thread", "turn-2");
+
+        assert!(runtime.telegram_command_progress_by_thread.is_empty());
+        let next = runtime
+            .upsert_telegram_command_progress(
+                "thread",
+                "turn-2",
+                command_progress_entry(
+                    "new-item",
+                    "new command",
+                    TelegramCommandProgressStatus::Succeeded,
+                ),
+                true,
+            )
+            .expect("new command");
+        assert_eq!(next.turn_id, "turn-2");
+        assert_eq!(next.entries.len(), 1);
+        assert_eq!(next.entries[0].command, "new command");
+    }
+
+    #[test]
+    fn telegram_draft_coalesces_updates_while_the_sender_is_active() {
+        let mut runtime = RuntimeState::default();
+
+        let first = runtime
+            .append_telegram_draft_delta("thread", "item", "hello")
+            .expect("first draft update");
+        let (content, finished, revision) = runtime
+            .take_telegram_draft_snapshot("thread", "item", first, 1_000)
+            .expect("first draft snapshot");
+        assert_eq!(content, "hello");
+        assert!(!finished);
+        assert!(
+            runtime
+                .append_telegram_draft_delta("thread", "item", " world")
+                .is_none()
+        );
+        assert_eq!(
+            runtime.complete_telegram_draft_send("thread", "item", first, revision, true),
+            TelegramDraftSendAction::Continue
+        );
+        assert_eq!(
+            runtime.telegram_draft_send_delay_ms("thread", "item", first, 1_100, 300),
+            Some(200)
+        );
+        let (content, finished, revision) = runtime
+            .take_telegram_draft_snapshot("thread", "item", first, 1_300)
+            .expect("coalesced draft snapshot");
+        assert_eq!(content, "hello world");
+        assert!(!finished);
+        assert_eq!(
+            runtime.complete_telegram_draft_send("thread", "item", first, revision, true),
+            TelegramDraftSendAction::Continue
+        );
+
+        assert!(
+            runtime
+                .append_telegram_draft_delta("thread", "item", "!")
+                .is_none()
+        );
+        assert_eq!(
+            runtime.telegram_draft_send_delay_ms("thread", "item", first, 1_400, 300),
+            Some(200)
+        );
+        assert_eq!(
+            runtime
+                .take_telegram_draft_snapshot("thread", "item", first, 1_600)
+                .expect("next draft snapshot")
+                .0,
+            "hello world!"
+        );
+    }
+
+    #[test]
+    fn telegram_draft_heartbeat_reuses_the_latest_content() {
+        let mut runtime = RuntimeState::default();
+        let draft_id = runtime
+            .append_telegram_draft_delta("thread", "item", "working")
+            .expect("draft update");
+        let (_, _, revision) = runtime
+            .take_telegram_draft_snapshot("thread", "item", draft_id, 1_000)
+            .expect("initial snapshot");
+        assert_eq!(
+            runtime.complete_telegram_draft_send("thread", "item", draft_id, revision, true),
+            TelegramDraftSendAction::Continue
+        );
+
+        let (_, delay_ms) = runtime
+            .telegram_draft_wait_for_update("thread", "item", draft_id, 1_100, 20_000)
+            .expect("idle draft should wait for an update or heartbeat");
+        assert_eq!(delay_ms, 19_900);
+        assert!(runtime.mark_telegram_draft_heartbeat_due("thread", "item", draft_id));
+        assert_eq!(
+            runtime.telegram_draft_send_delay_ms("thread", "item", draft_id, 21_000, 300),
+            Some(0)
+        );
+        assert_eq!(
+            runtime
+                .take_telegram_draft_snapshot("thread", "item", draft_id, 21_000)
+                .expect("heartbeat snapshot")
+                .0,
+            "working"
+        );
+    }
+
+    #[test]
+    fn telegram_draft_is_removed_after_the_final_snapshot_is_delivered() {
+        let mut runtime = RuntimeState::default();
+        let draft_id = runtime
+            .append_telegram_draft_delta("thread", "item", "hello")
+            .expect("draft update");
+        let (_, _, first_revision) = runtime
+            .take_telegram_draft_snapshot("thread", "item", draft_id, 1_000)
+            .expect("initial snapshot");
+        assert_eq!(
+            runtime.complete_telegram_draft_send("thread", "item", draft_id, first_revision, true,),
+            TelegramDraftSendAction::Continue
+        );
+
+        let (finished_draft_id, should_start, _completed) = runtime
+            .finish_telegram_draft("thread", "item", "final answer")
+            .expect("final draft");
+        assert_eq!(finished_draft_id, draft_id);
+        assert!(!should_start);
+        let (content, finished, final_revision) = runtime
+            .take_telegram_draft_snapshot("thread", "item", draft_id, 1_300)
+            .expect("final snapshot");
+        assert_eq!(content, "final answer");
+        assert!(finished);
+        assert_eq!(
+            runtime.complete_telegram_draft_send("thread", "item", draft_id, final_revision, true,),
+            TelegramDraftSendAction::Stop
+        );
+        assert!(
+            runtime
+                .finish_telegram_draft("thread", "item", "again")
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_final_draft_notifies_the_persistent_message_waiter() {
+        let mut runtime = RuntimeState::default();
+        let draft_id = runtime
+            .append_telegram_draft_delta("thread", "item", "partial")
+            .expect("draft update");
+        let (_, _, first_revision) = runtime
+            .take_telegram_draft_snapshot("thread", "item", draft_id, 1_000)
+            .expect("initial snapshot");
+        assert_eq!(
+            runtime.complete_telegram_draft_send("thread", "item", draft_id, first_revision, true),
+            TelegramDraftSendAction::Continue
+        );
+        let (_, should_start, completed) = runtime
+            .finish_telegram_draft("thread", "item", "final")
+            .expect("final draft");
+        assert!(!should_start);
+        let (_, finished, final_revision) = runtime
+            .take_telegram_draft_snapshot("thread", "item", draft_id, 1_300)
+            .expect("final snapshot");
+        assert!(finished);
+        assert_eq!(
+            runtime.complete_telegram_draft_send("thread", "item", draft_id, final_revision, true),
+            TelegramDraftSendAction::Stop
+        );
+
+        tokio::time::timeout(std::time::Duration::from_millis(50), completed.notified())
+            .await
+            .expect("final draft completion should wake the persistent message sender");
+    }
+
+    #[test]
+    fn completing_a_turn_clears_all_of_its_telegram_drafts() {
+        let mut runtime = RuntimeState::default();
+        let first = runtime
+            .append_telegram_draft_delta("thread", "item-1", "one")
+            .expect("first draft");
+        let second = runtime
+            .append_telegram_draft_delta("thread", "item-2", "two")
+            .expect("second draft");
+        runtime
+            .append_telegram_draft_delta("other-thread", "item", "other")
+            .expect("other draft");
+
+        runtime.mark_turn_completed("thread", None);
+
+        assert!(
+            runtime
+                .take_telegram_draft_snapshot("thread", "item-1", first, 1_000)
+                .is_none()
+        );
+        assert!(
+            runtime
+                .take_telegram_draft_snapshot("thread", "item-2", second, 1_000)
+                .is_none()
+        );
+        assert_eq!(runtime.telegram_drafts_by_item.len(), 1);
     }
 
     #[test]

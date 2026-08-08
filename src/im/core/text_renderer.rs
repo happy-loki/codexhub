@@ -1,4 +1,4 @@
-﻿use std::path::PathBuf;
+use std::path::PathBuf;
 
 use std::collections::HashMap;
 
@@ -8,7 +8,6 @@ use crate::codex::extract_agent_message_text;
 
 const SUMMARY_CHAR_LIMIT: usize = 2400;
 const JSON_CHAR_LIMIT: usize = 1800;
-const DIFF_LINE_LIMIT: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MarkdownImageRef {
@@ -69,6 +68,7 @@ pub(crate) fn render_item_text(item: &Value) -> Option<String> {
         "plan" => render_plain_text_item(item, "plan"),
         "commandExecution" => render_command_execution(item),
         "fileChange" => render_file_change(item),
+        "contextCompaction" => Some(render_context_compaction()),
         "mcpToolCall" => render_mcp_tool_call(item),
         "dynamicToolCall" => render_dynamic_tool_call(item),
         "functionToolCall" => render_function_tool_call(item),
@@ -307,12 +307,19 @@ fn render_command_execution(item: &Value) -> Option<String> {
     ))
 }
 
+fn render_context_compaction() -> String {
+    "🧠 上下文已压缩\n\n任务将继续执行。".to_string()
+}
+
 fn render_file_change(item: &Value) -> Option<String> {
     let changes = item.get("changes").and_then(|v| v.as_array())?;
     if changes.is_empty() {
-        return Some(format!("{}\n\nchanges: []", type_header("fileChange")));
+        return Some("📝 文件修改\n\n没有文件变化。".to_string());
     }
-    let sections = changes
+
+    let mut additions = 0usize;
+    let mut deletions = 0usize;
+    let paths = changes
         .iter()
         .take(8)
         .filter_map(|change| {
@@ -325,31 +332,48 @@ fn render_file_change(item: &Value) -> Option<String> {
                 .or_else(|| change.get("type"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("change");
-            let additions = change
-                .get("additions")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            let deletions = change
-                .get("deletions")
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
-            let mut section = format!(
-                "- kind: `{kind}`\n  path: `{}`\n  stats: `+{} -{}`",
-                truncate_middle(path, 240),
-                additions,
-                deletions
-            );
             if let Some(diff) = change.get("diff").and_then(|v| v.as_str()) {
-                let preview = summarize_lines(diff, DIFF_LINE_LIMIT, 0);
-                if !preview.trim().is_empty() {
-                    section.push_str(&format!("\n  diff:\n```diff\n{preview}\n```"));
-                }
+                let (change_additions, change_deletions) = diff_line_stats(diff);
+                additions = additions.saturating_add(change_additions);
+                deletions = deletions.saturating_add(change_deletions);
             }
-            Some(section)
+            let icon = match kind.trim().to_ascii_lowercase().as_str() {
+                "add" | "added" | "create" | "created" => "➕",
+                "delete" | "deleted" | "remove" | "removed" => "🗑",
+                _ => "✏️",
+            };
+            Some(format!("{icon} `{}`", truncate_middle(path, 240)))
         })
         .collect::<Vec<_>>();
-    (!sections.is_empty())
-        .then(|| format!("{}\n\n{}", type_header("fileChange"), sections.join("\n\n")))
+    if paths.is_empty() {
+        return None;
+    }
+
+    let total = changes.len();
+    let mut title = format!("📝 文件修改 · {total} 个文件");
+    if additions > 0 || deletions > 0 {
+        title.push_str(&format!(" · +{additions} -{deletions}"));
+    }
+    let mut sections = vec![title, paths.join("\n")];
+    if total > paths.len() {
+        sections.push(format!("… 另外 {} 个文件", total - paths.len()));
+    }
+    Some(sections.join("\n\n"))
+}
+
+fn diff_line_stats(diff: &str) -> (usize, usize) {
+    diff.lines()
+        .fold((0usize, 0usize), |(additions, deletions), line| {
+            if line.starts_with("+++") || line.starts_with("---") {
+                (additions, deletions)
+            } else if line.starts_with('+') {
+                (additions.saturating_add(1), deletions)
+            } else if line.starts_with('-') {
+                (additions, deletions.saturating_add(1))
+            } else {
+                (additions, deletions)
+            }
+        })
 }
 
 fn render_mcp_tool_call(item: &Value) -> Option<String> {
@@ -547,7 +571,8 @@ fn type_header(item_type: &str) -> String {
         "reasoning" => "🧠 思考".to_string(),
         "plan" => "📋 计划".to_string(),
         "commandExecution" => "💻 命令".to_string(),
-        "fileChange" => "📝 文件".to_string(),
+        "fileChange" => "📝 文件修改".to_string(),
+        "contextCompaction" => "🧠 上下文已压缩".to_string(),
         "mcpToolCall" => "🧩 MCP 工具".to_string(),
         "dynamicToolCall" | "functionToolCall" => "🛠 工具".to_string(),
         "collabAgentToolCall" => "🤝 协作".to_string(),
@@ -704,30 +729,6 @@ fn truncate_middle(text: &str, max_chars: usize) -> String {
     format!("{head}...{tail}")
 }
 
-fn summarize_lines(text: &str, head_lines: usize, tail_lines: usize) -> String {
-    let lines = text.lines().collect::<Vec<_>>();
-    let limit = head_lines + tail_lines;
-    if lines.len() <= limit || tail_lines == 0 && lines.len() <= head_lines {
-        return truncate_text(text, SUMMARY_CHAR_LIMIT);
-    }
-    let mut output = Vec::new();
-    output.extend(lines.iter().take(head_lines).copied());
-    output.push("...[truncated]...");
-    if tail_lines > 0 {
-        output.extend(
-            lines
-                .iter()
-                .rev()
-                .take(tail_lines)
-                .copied()
-                .collect::<Vec<_>>()
-                .into_iter()
-                .rev(),
-        );
-    }
-    truncate_text(&output.join("\n"), SUMMARY_CHAR_LIMIT)
-}
-
 fn looks_like_image_payload(value: &str) -> bool {
     let trimmed = value.trim();
     trimmed.starts_with("data:image/")
@@ -845,6 +846,44 @@ mod tests {
 
         assert_eq!(rendered, "💻 Ran: `git diff --stat` ❌");
         assert!(!rendered.contains("large output"));
+    }
+
+    #[test]
+    fn context_compaction_is_rendered_without_internal_json() {
+        let item = json!({
+            "id": "019fdf21-e9ff-7112-a9e0-b7e05cdc069e",
+            "type": "contextCompaction"
+        });
+
+        let rendered = render_item_text(&item).expect("context compaction");
+
+        assert_eq!(rendered, "🧠 上下文已压缩\n\n任务将继续执行。");
+        assert!(!rendered.contains("019fdf21"));
+        assert!(!rendered.contains("json"));
+        assert!(!rendered.contains("contextCompaction"));
+    }
+
+    #[test]
+    fn file_change_computes_stats_and_omits_raw_diff() {
+        let item = json!({
+            "id": "change-1",
+            "type": "fileChange",
+            "status": "completed",
+            "changes": [{
+                "kind": "change",
+                "path": "/Users/miaopasi/codexhub/src/im/telegram/collab_progress.rs",
+                "diff": "--- a/src/im/telegram/collab_progress.rs\n+++ b/src/im/telegram/collab_progress.rs\n@@ -1,2 +1,3 @@\n-old\n+new\n+another\n context"
+            }]
+        });
+
+        let rendered = render_item_text(&item).expect("file change");
+
+        assert!(rendered.starts_with("📝 文件修改 · 1 个文件 · +2 -1"));
+        assert!(rendered.contains("collab_progress.rs`"));
+        assert!(!rendered.contains("kind:"));
+        assert!(!rendered.contains("diff:"));
+        assert!(!rendered.contains("@@ -1,2"));
+        assert!(!rendered.contains("+0 -0"));
     }
 
     #[test]
