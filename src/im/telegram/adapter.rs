@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::json;
 use std::path::Path;
 use tokio::time::{Duration, sleep};
@@ -9,7 +9,7 @@ use crate::{
     im_runtime::{PendingApproval, approval_request_fingerprint},
 };
 
-use super::api::{TelegramApi, TelegramParseMode};
+use super::api::{TelegramApi, TelegramApiError, TelegramInputRichMessage, TelegramParseMode};
 
 const TELEGRAM_MAX_MESSAGE_CHARS: usize = 4096;
 const TELEGRAM_CONTINUATION_OVERHEAD: usize = 30;
@@ -119,6 +119,32 @@ impl TelegramAdapter {
 
     pub async fn send_turn_completed(&self, target: &str, reply_text: &str) -> Result<String> {
         self.send_text(target, reply_text).await
+    }
+
+    pub async fn send_turn_draft(
+        &self,
+        target: &str,
+        draft_id: i64,
+        reply_text: &str,
+    ) -> Result<()> {
+        let rendered = crate::im::core::text_renderer::render_agent_message_text(reply_text);
+        let preview = telegram_draft_preview(&rendered);
+        log_adapter(
+            "send_turn_draft",
+            format!(
+                "chat={} draft={} chars={}",
+                target,
+                draft_id,
+                preview.chars().count()
+            ),
+        );
+        let chat_id = target
+            .trim()
+            .parse::<i64>()
+            .with_context(|| format!("invalid Telegram private chat id: {target}"))?;
+        self.api
+            .send_message_draft(chat_id, draft_id, &preview)
+            .await
     }
 
     pub async fn send_image_path(
@@ -301,10 +327,327 @@ impl TelegramAdapter {
         Ok(())
     }
 
+    /// Update an existing Telegram message and remove its inline keyboard.
+    /// Returns `false` when no usable message id was supplied or Telegram no
+    /// longer allows editing that message.
+    pub async fn update_resolved_approval(
+        &self,
+        target: &str,
+        message_id: Option<&str>,
+        approval: &PendingApproval,
+        option_index: usize,
+        decision_label: &str,
+        text: ImText,
+    ) -> Result<bool> {
+        let Some(message_id) = message_id else {
+            return Ok(false);
+        };
+        let resolved = resolved_approval_text(approval, option_index, decision_label, text);
+        let resolved_html = telegram_markdown_to_html(&resolved);
+        match self
+            .try_edit_message_text(
+                target,
+                message_id,
+                &resolved_html,
+                Some(TelegramParseMode::Html),
+                Some(empty_inline_keyboard()),
+            )
+            .await
+        {
+            Ok(Some(_)) => Ok(true),
+            Ok(None) => {
+                let _ = self.clear_reply_markup(target, Some(message_id)).await;
+                Ok(false)
+            }
+            Err(err) => {
+                let _ = self.clear_reply_markup(target, Some(message_id)).await;
+                Err(err)
+            }
+        }
+    }
+
+    pub async fn clear_reply_markup(&self, target: &str, message_id: Option<&str>) -> Result<bool> {
+        let Some(message_id) = message_id else {
+            return Ok(false);
+        };
+        let Ok(message_id_number) = message_id.trim().parse::<i64>() else {
+            return Ok(false);
+        };
+        match self
+            .api
+            .edit_message_reply_markup(target, message_id_number, empty_inline_keyboard())
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(err) => {
+                let api_error = err.downcast_ref::<TelegramApiError>();
+                if api_error.is_some_and(TelegramApiError::is_message_not_modified) {
+                    return Ok(true);
+                }
+                if api_error.is_some_and(TelegramApiError::is_edit_target_unavailable) {
+                    return Ok(false);
+                }
+                Err(err).with_context(|| {
+                    format!(
+                        "failed to clear telegram message {} reply markup in chat {}",
+                        message_id, target
+                    )
+                })
+            }
+        }
+    }
+
+    pub async fn send_or_update_text_with_reply_markup(
+        &self,
+        target: &str,
+        message_id: Option<&str>,
+        text: &str,
+        reply_markup: serde_json::Value,
+    ) -> Result<String> {
+        let updated = self
+            .try_edit_message_text(
+                target,
+                message_id.unwrap_or_default(),
+                text,
+                None,
+                Some(reply_markup.clone()),
+            )
+            .await?;
+        if let Some(message_id) = updated {
+            return Ok(message_id.to_string());
+        }
+        let _ = self.clear_reply_markup(target, message_id).await;
+        Ok(self
+            .api
+            .send_text_with_reply_markup(target, text, reply_markup)
+            .await?
+            .to_string())
+    }
+
+    pub async fn send_or_update_text_with_reply_markup_parse_mode(
+        &self,
+        target: &str,
+        message_id: Option<&str>,
+        text: &str,
+        reply_markup: serde_json::Value,
+        parse_mode: TelegramParseMode,
+    ) -> Result<String> {
+        let updated = self
+            .try_edit_message_text(
+                target,
+                message_id.unwrap_or_default(),
+                text,
+                Some(parse_mode),
+                Some(reply_markup.clone()),
+            )
+            .await?;
+        if let Some(message_id) = updated {
+            return Ok(message_id.to_string());
+        }
+        let _ = self.clear_reply_markup(target, message_id).await;
+        Ok(self
+            .api
+            .send_text_with_reply_markup_parse_mode(target, text, reply_markup, parse_mode)
+            .await?
+            .to_string())
+    }
+
+    pub async fn send_or_update_text(
+        &self,
+        target: &str,
+        message_id: Option<&str>,
+        text: &str,
+    ) -> Result<String> {
+        let updated = self
+            .try_edit_message_text(
+                target,
+                message_id.unwrap_or_default(),
+                &telegram_markdown_to_html(text),
+                Some(TelegramParseMode::Html),
+                Some(empty_inline_keyboard()),
+            )
+            .await?;
+        if let Some(message_id) = updated {
+            return Ok(message_id.to_string());
+        }
+        let _ = self.clear_reply_markup(target, message_id).await;
+        self.send_text(target, text).await
+    }
+
+    pub async fn send_or_update_rich_markdown(
+        &self,
+        target: &str,
+        message_id: Option<&str>,
+        markdown: &str,
+    ) -> Result<String> {
+        let markdown = telegram_cleanup_text(markdown);
+        let rich_message = TelegramInputRichMessage::markdown(markdown.clone());
+        match self
+            .try_edit_rich_message(
+                target,
+                message_id.unwrap_or_default(),
+                &rich_message,
+                Some(empty_inline_keyboard()),
+            )
+            .await
+        {
+            Ok(Some(updated_id)) => return Ok(updated_id.to_string()),
+            Ok(None) => {}
+            Err(err) if should_fallback_from_rich_message(&err) => {
+                log_adapter(
+                    "edit_rich_message_fallback",
+                    format!(
+                        "chat={} message={} fallback=text err={}",
+                        target,
+                        message_id.unwrap_or_default(),
+                        err
+                    ),
+                );
+                return self
+                    .send_or_update_text(target, message_id, &markdown)
+                    .await;
+            }
+            Err(err) => return Err(err),
+        }
+
+        match self.api.send_rich_message(target, &rich_message).await {
+            Ok(message_id) => {
+                log_adapter(
+                    "send_rich_message_done",
+                    format!("chat={} message={}", target, message_id),
+                );
+                Ok(message_id.to_string())
+            }
+            Err(err) if should_fallback_from_rich_message(&err) => {
+                log_adapter(
+                    "send_rich_message_fallback",
+                    format!("chat={} fallback=text err={}", target, err),
+                );
+                self.send_or_update_text(target, message_id, &markdown)
+                    .await
+            }
+            Err(err) => Err(err)
+                .with_context(|| format!("failed to send telegram rich message in chat {target}")),
+        }
+    }
+
+    async fn try_edit_rich_message(
+        &self,
+        target: &str,
+        message_id: &str,
+        rich_message: &TelegramInputRichMessage,
+        reply_markup: Option<serde_json::Value>,
+    ) -> Result<Option<i64>> {
+        let Ok(message_id_number) = message_id.trim().parse::<i64>() else {
+            if !message_id.trim().is_empty() {
+                log_adapter(
+                    "edit_rich_message_invalid_id",
+                    format!("chat={} message={}", target, message_id),
+                );
+            }
+            return Ok(None);
+        };
+        match self
+            .api
+            .edit_rich_message(target, message_id_number, rich_message, reply_markup)
+            .await
+        {
+            Ok(updated_id) => {
+                log_adapter(
+                    "edit_rich_message_done",
+                    format!("chat={} message={}", target, updated_id),
+                );
+                Ok(Some(updated_id))
+            }
+            Err(err) => {
+                let api_error = err.downcast_ref::<TelegramApiError>();
+                if api_error.is_some_and(TelegramApiError::is_message_not_modified) {
+                    return Ok(Some(message_id_number));
+                }
+                if api_error.is_some_and(TelegramApiError::is_edit_target_unavailable) {
+                    log_adapter(
+                        "edit_rich_message_unavailable",
+                        format!(
+                            "chat={} message={} fallback=send err={}",
+                            target, message_id, err
+                        ),
+                    );
+                    return Ok(None);
+                }
+                Err(err).with_context(|| {
+                    format!(
+                        "failed to edit telegram rich message {} in chat {}",
+                        message_id, target
+                    )
+                })
+            }
+        }
+    }
+
+    async fn try_edit_message_text(
+        &self,
+        target: &str,
+        message_id: &str,
+        text: &str,
+        parse_mode: Option<TelegramParseMode>,
+        reply_markup: Option<serde_json::Value>,
+    ) -> Result<Option<i64>> {
+        let Ok(message_id_number) = message_id.trim().parse::<i64>() else {
+            if !message_id.trim().is_empty() {
+                log_adapter(
+                    "edit_message_invalid_id",
+                    format!("chat={} message={}", target, message_id),
+                );
+            }
+            return Ok(None);
+        };
+        match self
+            .api
+            .edit_message_text(target, message_id_number, text, parse_mode, reply_markup)
+            .await
+        {
+            Ok(updated_id) => {
+                log_adapter(
+                    "edit_message_done",
+                    format!("chat={} message={}", target, updated_id),
+                );
+                Ok(Some(updated_id))
+            }
+            Err(err) => {
+                let unavailable = err
+                    .downcast_ref::<TelegramApiError>()
+                    .is_some_and(TelegramApiError::is_edit_target_unavailable);
+                let unchanged = err
+                    .downcast_ref::<TelegramApiError>()
+                    .is_some_and(TelegramApiError::is_message_not_modified);
+                if unchanged {
+                    return Ok(Some(message_id_number));
+                }
+                if unavailable {
+                    log_adapter(
+                        "edit_message_unavailable",
+                        format!(
+                            "chat={} message={} fallback=send err={}",
+                            target, message_id, err
+                        ),
+                    );
+                    return Ok(None);
+                }
+                Err(err).with_context(|| {
+                    format!(
+                        "failed to edit telegram message {} in chat {}",
+                        message_id, target
+                    )
+                })
+            }
+        }
+    }
+
     pub async fn send_thread_routing_choice(
         &self,
         target: &str,
         request_id: &str,
+        message_id: Option<&str>,
         text: ImText,
     ) -> Result<String> {
         let keyboard = inline_keyboard(vec![
@@ -323,8 +666,7 @@ impl TelegramAdapter {
             format!("chat={} request={}", target, request_id),
         );
         let message_id = self
-            .api
-            .send_text_with_reply_markup(target, body, keyboard)
+            .send_or_update_text_with_reply_markup(target, message_id, body, keyboard)
             .await?;
         log_adapter(
             "send_thread_routing_choice_done",
@@ -341,6 +683,7 @@ impl TelegramAdapter {
         target: &str,
         request_id: &str,
         text: &str,
+        message_id: Option<&str>,
         im_text: ImText,
     ) -> Result<String> {
         let keyboard = inline_keyboard(vec![
@@ -374,8 +717,7 @@ impl TelegramAdapter {
             ),
         );
         let message_id = self
-            .api
-            .send_text_with_reply_markup(target, text, keyboard)
+            .send_or_update_text_with_reply_markup(target, message_id, text, keyboard)
             .await?;
         log_adapter(
             "send_thread_create_settings_done",
@@ -398,6 +740,7 @@ impl TelegramAdapter {
         page: usize,
         has_prev: bool,
         has_next: bool,
+        message_id: Option<&str>,
         text: ImText,
     ) -> Result<String> {
         let mut rows = Vec::new();
@@ -444,9 +787,9 @@ impl TelegramAdapter {
             ),
         );
         let message_id = self
-            .api
-            .send_text_with_reply_markup_parse_mode(
+            .send_or_update_text_with_reply_markup_parse_mode(
                 target,
+                message_id,
                 &text_html,
                 inline_keyboard(rows),
                 TelegramParseMode::Html,
@@ -472,6 +815,7 @@ impl TelegramAdapter {
         page: usize,
         has_prev: bool,
         has_next: bool,
+        message_id: Option<&str>,
         text: ImText,
     ) -> Result<String> {
         let mut rows = Vec::new();
@@ -514,9 +858,9 @@ impl TelegramAdapter {
             ),
         );
         let message_id = self
-            .api
-            .send_text_with_reply_markup_parse_mode(
+            .send_or_update_text_with_reply_markup_parse_mode(
                 target,
+                message_id,
                 &text_html,
                 inline_keyboard(rows),
                 TelegramParseMode::Html,
@@ -541,8 +885,10 @@ impl TelegramAdapter {
         target: &str,
         title: &str,
         body: &str,
+        message_id: Option<&str>,
     ) -> Result<String> {
-        self.send_text(target, &format!("{title}\n\n{body}")).await
+        self.send_or_update_text(target, message_id, &format!("{title}\n\n{body}"))
+            .await
     }
 }
 
@@ -572,6 +918,27 @@ fn approval_text(approval: &PendingApproval, text: ImText) -> String {
     lines.join("\n")
 }
 
+fn resolved_approval_text(
+    approval: &PendingApproval,
+    option_index: usize,
+    decision_label: &str,
+    text: ImText,
+) -> String {
+    vec![
+        text.approval_resolved_title().to_string(),
+        format!(
+            "{}: `{}`",
+            text.approval_request_heading(),
+            approval.request_kind
+        ),
+        String::new(),
+        approval.summary.trim().to_string(),
+        String::new(),
+        text.approval_selected_label(option_index, decision_label.trim()),
+    ]
+    .join("\n")
+}
+
 fn approval_keyboard(approval: &PendingApproval) -> Option<serde_json::Value> {
     let fingerprint = approval_request_fingerprint(&approval.request_key());
     let rows = approval
@@ -590,6 +957,15 @@ fn approval_keyboard(approval: &PendingApproval) -> Option<serde_json::Value> {
 
 fn inline_keyboard(rows: Vec<Vec<serde_json::Value>>) -> serde_json::Value {
     json!({ "inline_keyboard": rows })
+}
+
+fn empty_inline_keyboard() -> serde_json::Value {
+    inline_keyboard(Vec::new())
+}
+
+fn should_fallback_from_rich_message(err: &anyhow::Error) -> bool {
+    err.downcast_ref::<TelegramApiError>()
+        .is_some_and(TelegramApiError::should_fallback_from_rich_message)
 }
 
 fn log_adapter(event: &str, message: impl AsRef<str>) {
@@ -914,6 +1290,23 @@ fn truncate_button_text(text: &str) -> String {
     output
 }
 
+fn telegram_draft_preview(text: &str) -> String {
+    const PREFIX: &str = "(continued)\n\n";
+    if text.chars().count() <= TELEGRAM_MAX_MESSAGE_CHARS {
+        return text.to_string();
+    }
+    let tail_chars = TELEGRAM_MAX_MESSAGE_CHARS.saturating_sub(PREFIX.chars().count());
+    let tail = text
+        .chars()
+        .rev()
+        .take(tail_chars)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("{PREFIX}{tail}")
+}
+
 fn telegram_text_chunks(text: &str) -> Vec<String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
@@ -980,7 +1373,17 @@ fn best_split_point(search_area: &str, hard_split: usize, content_limit: usize) 
 
 #[cfg(test)]
 mod tests {
-    use super::{TELEGRAM_MAX_MESSAGE_CHARS, telegram_text_chunks};
+    use serde_json::json;
+
+    use crate::{
+        im::core::i18n::ImText,
+        im_runtime::{ApprovalDecisionOption, PendingApproval},
+    };
+
+    use super::{
+        TELEGRAM_MAX_MESSAGE_CHARS, empty_inline_keyboard, resolved_approval_text,
+        telegram_draft_preview, telegram_text_chunks,
+    };
 
     #[test]
     fn chunks_long_text_on_char_boundaries() {
@@ -1021,5 +1424,44 @@ mod tests {
         assert!(chunks[0].contains('\n'));
         assert!(chunks[0].trim_start().starts_with('a'));
         assert!(chunks[1].contains('b'));
+    }
+
+    #[test]
+    fn draft_preview_keeps_the_latest_telegram_sized_window() {
+        let text = format!("{}tail", "a".repeat(TELEGRAM_MAX_MESSAGE_CHARS));
+        let preview = telegram_draft_preview(&text);
+
+        assert_eq!(preview.chars().count(), TELEGRAM_MAX_MESSAGE_CHARS);
+        assert!(preview.starts_with("(continued)\n\n"));
+        assert!(preview.ends_with("tail"));
+    }
+
+    #[test]
+    fn resolved_approval_text_replaces_pending_instructions() {
+        let approval = PendingApproval {
+            request_id: json!("request-1"),
+            request_kind: "commandExecution".to_string(),
+            method: "item/commandExecution/requestApproval".to_string(),
+            params: json!({}),
+            summary: "Run `cargo test`".to_string(),
+            decisions: vec![ApprovalDecisionOption {
+                label: "Allow".to_string(),
+                decision: json!("approved"),
+            }],
+            message_id: Some("77".to_string()),
+            remote_client_key: Some("client".to_string()),
+        };
+
+        let text = resolved_approval_text(&approval, 1, "Allow", ImText::zh_cn());
+
+        assert!(text.contains("审批已处理"));
+        assert!(text.contains("已选择 /1：Allow"));
+        assert!(text.contains("Run `cargo test`"));
+        assert!(!text.contains("回复 /1 处理"));
+    }
+
+    #[test]
+    fn empty_keyboard_removes_all_inline_buttons() {
+        assert_eq!(empty_inline_keyboard(), json!({ "inline_keyboard": [] }));
     }
 }

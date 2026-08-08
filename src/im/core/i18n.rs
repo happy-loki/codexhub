@@ -1,4 +1,4 @@
-﻿use serde::Deserialize;
+use serde::Deserialize;
 
 use crate::{app_state::SharedState, im_runtime::PendingApproval};
 
@@ -99,8 +99,272 @@ impl ImText {
         )
     }
 
+    pub(crate) fn turn_busy_attachments_held(self, count: usize) -> String {
+        match self.locale {
+            ImLocale::ZhCn => {
+                format!("任务还在进行中，已暂存 {count} 个附件；任务完成后发送文字说明即可继续。")
+            }
+            ImLocale::EnUs => format!(
+                "A task is still running. {count} attachment(s) were saved; send a text description after it finishes to continue."
+            ),
+        }
+    }
+
+    pub(crate) fn inbound_queue_busy_notice(self) -> &'static str {
+        self.choose(
+            "消息处理队列已满，这条消息未提交，请稍后重试。",
+            "The message queue is full. This message was not submitted; please try again shortly.",
+        )
+    }
+
     pub(crate) fn turn_completed_notice(self) -> &'static str {
         self.choose("✅ 已完成", "✅ Completed")
+    }
+
+    pub(crate) fn turn_failed_notice(self, summary: Option<&str>) -> String {
+        let summary = summary
+            .map(str::trim)
+            .filter(|summary| !summary.is_empty())
+            .unwrap_or_else(|| self.choose("系统错误", "System error"));
+        match self.locale {
+            ImLocale::ZhCn => format!("❌ 任务失败\n\n错误：{summary}"),
+            ImLocale::EnUs => format!("❌ Task failed\n\nError: {summary}"),
+        }
+    }
+
+    pub(crate) fn telegram_command_progress_title(
+        self,
+        completed: bool,
+        failed_task: bool,
+        total: usize,
+        failed: usize,
+        running: usize,
+        interrupted: usize,
+    ) -> String {
+        let title = match (self.locale, completed, failed_task) {
+            (ImLocale::ZhCn, true, true) => format!("❌ 执行失败 · {total} 步"),
+            (ImLocale::EnUs, true, true) => format!("❌ Execution failed · {total} steps"),
+            (ImLocale::ZhCn, true, false) if interrupted > 0 => {
+                format!("⚠️ 执行结束 · {total} 步")
+            }
+            (ImLocale::ZhCn, true, false) => format!("✅ 执行完成 · {total} 步"),
+            (ImLocale::EnUs, true, false) if interrupted > 0 => {
+                format!("⚠️ Execution stopped · {total} steps")
+            }
+            (ImLocale::EnUs, true, false) => format!("✅ Execution complete · {total} steps"),
+            (ImLocale::ZhCn, false, _) => format!("🛠 执行中 · {total} 步"),
+            (ImLocale::EnUs, false, _) => format!("🛠 Running · {total} steps"),
+        };
+        let failed = match (self.locale, failed) {
+            (_, 0) => String::new(),
+            (ImLocale::ZhCn, count) => format!(" · {count} 个失败"),
+            (ImLocale::EnUs, count) => format!(" · {count} failed"),
+        };
+        let running = match (self.locale, running, completed) {
+            (_, 0, _) | (_, _, true) => String::new(),
+            (ImLocale::ZhCn, count, false) => format!(" · {count} 个进行中"),
+            (ImLocale::EnUs, count, false) => format!(" · {count} running"),
+        };
+        let interrupted = match (self.locale, interrupted) {
+            (_, 0) => String::new(),
+            (ImLocale::ZhCn, count) => format!(" · {count} 个中断"),
+            (ImLocale::EnUs, count) => format!(" · {count} interrupted"),
+        };
+        format!("{title}{failed}{running}{interrupted}")
+    }
+
+    pub(crate) fn telegram_command_progress_omitted(self, count: usize) -> String {
+        match self.locale {
+            ImLocale::ZhCn => format!("… 另外 {count} 个较早步骤"),
+            ImLocale::EnUs => format!("… {count} earlier steps"),
+        }
+    }
+
+    pub(crate) fn telegram_command_progress_error_summary(self) -> &'static str {
+        self.choose("错误摘要：", "Error summary:")
+    }
+
+    pub(crate) fn telegram_task_progress_title(
+        self,
+        completed: bool,
+        failed: bool,
+    ) -> &'static str {
+        match (self.locale, completed, failed) {
+            (ImLocale::ZhCn, true, true) => "❌ 任务失败",
+            (ImLocale::EnUs, true, true) => "❌ Task failed",
+            (ImLocale::ZhCn, true, false) => "✅ 任务完成",
+            (ImLocale::EnUs, true, false) => "✅ Task complete",
+            (ImLocale::ZhCn, false, _) => "🛠 任务进行中",
+            (ImLocale::EnUs, false, _) => "🛠 Task in progress",
+        }
+    }
+
+    pub(crate) fn telegram_reasoning_heading(self) -> &'static str {
+        self.choose("🧠 思考摘要", "🧠 Reasoning summary")
+    }
+
+    pub(crate) fn telegram_plan_heading(self, completed: usize, total: usize) -> String {
+        match self.locale {
+            ImLocale::ZhCn => format!("📋 计划 · {completed}/{total}"),
+            ImLocale::EnUs => format!("📋 Plan · {completed}/{total}"),
+        }
+    }
+
+    pub(crate) fn telegram_plan_step_icon(self, status: &str) -> &'static str {
+        match status {
+            "completed" => "✅",
+            "in_progress" => "🔄",
+            "pending" => "○",
+            _ => "•",
+        }
+    }
+
+    pub(crate) fn telegram_plan_omitted(self, count: usize) -> String {
+        match self.locale {
+            ImLocale::ZhCn => format!("… 另外 {count} 个计划步骤"),
+            ImLocale::EnUs => format!("… {count} more plan steps"),
+        }
+    }
+
+    pub(crate) fn telegram_diff_heading(
+        self,
+        files: usize,
+        additions: usize,
+        deletions: usize,
+    ) -> String {
+        match self.locale {
+            ImLocale::ZhCn => {
+                format!("📝 文件修改 · {files} 个文件 · +{additions} -{deletions}")
+            }
+            ImLocale::EnUs => {
+                format!("📝 File changes · {files} files · +{additions} -{deletions}")
+            }
+        }
+    }
+
+    pub(crate) fn telegram_diff_omitted(self, count: usize) -> String {
+        match self.locale {
+            ImLocale::ZhCn => format!("… 另外 {count} 个文件"),
+            ImLocale::EnUs => format!("… {count} more files"),
+        }
+    }
+
+    pub(crate) fn telegram_collab_progress_title(
+        self,
+        completed: bool,
+        total: usize,
+        failed: usize,
+        running: usize,
+        interrupted: usize,
+    ) -> String {
+        let mut title = match (self.locale, completed, failed + interrupted + running) {
+            (ImLocale::ZhCn, false, _) => format!("🤝 协作中 · {total} 个子代理"),
+            (ImLocale::EnUs, false, _) => format!("🤝 Collaborating · {total} agents"),
+            (ImLocale::ZhCn, true, 0) => format!("✅ 协作完成 · {total} 个子代理"),
+            (ImLocale::EnUs, true, 0) => {
+                format!("✅ Collaboration complete · {total} agents")
+            }
+            (ImLocale::ZhCn, true, _) => format!("⚠️ 协作结束 · {total} 个子代理"),
+            (ImLocale::EnUs, true, _) => format!("⚠️ Collaboration ended · {total} agents"),
+        };
+        match self.locale {
+            ImLocale::ZhCn => {
+                if running > 0 && !completed {
+                    title.push_str(&format!(" · {running} 个进行中"));
+                }
+                if failed > 0 {
+                    title.push_str(&format!(" · {failed} 个失败"));
+                }
+                if interrupted > 0 {
+                    title.push_str(&format!(" · {interrupted} 个未完成"));
+                }
+            }
+            ImLocale::EnUs => {
+                if running > 0 && !completed {
+                    title.push_str(&format!(" · {running} running"));
+                }
+                if failed > 0 {
+                    title.push_str(&format!(" · {failed} failed"));
+                }
+                if interrupted > 0 {
+                    title.push_str(&format!(" · {interrupted} unfinished"));
+                }
+            }
+        }
+        title
+    }
+
+    pub(crate) fn telegram_collab_progress_omitted(self, count: usize) -> String {
+        match self.locale {
+            ImLocale::ZhCn => format!("… 另外 {count} 个子代理"),
+            ImLocale::EnUs => format!("… {count} more agents"),
+        }
+    }
+
+    pub(crate) fn telegram_collab_duration(self, duration_ms: u128) -> String {
+        if duration_ms < 1_000 {
+            return match self.locale {
+                ImLocale::ZhCn => format!("{duration_ms}毫秒"),
+                ImLocale::EnUs => format!("{duration_ms}ms"),
+            };
+        }
+        let seconds = duration_ms / 1_000;
+        if seconds < 60 {
+            return match self.locale {
+                ImLocale::ZhCn => format!("{seconds}秒"),
+                ImLocale::EnUs => format!("{seconds}s"),
+            };
+        }
+        let minutes = seconds / 60;
+        let remaining_seconds = seconds % 60;
+        match self.locale {
+            ImLocale::ZhCn => format!("{minutes}分{remaining_seconds}秒"),
+            ImLocale::EnUs => format!("{minutes}m {remaining_seconds}s"),
+        }
+    }
+
+    pub(crate) fn telegram_retry_progress_title(
+        self,
+        completed: bool,
+        failed: bool,
+        count: usize,
+    ) -> String {
+        match (self.locale, completed, failed, count) {
+            (ImLocale::ZhCn, true, true, count) => {
+                format!("❌ 模型请求失败 · 已重试 {count} 次")
+            }
+            (ImLocale::ZhCn, true, false, count) => {
+                format!("✅ 模型请求已恢复 · 共重试 {count} 次")
+            }
+            (ImLocale::ZhCn, false, _, count) => {
+                format!("🔄 模型请求重试中 · 第 {count} 次")
+            }
+            (ImLocale::EnUs, true, true, 1) => "❌ Model request failed · retried once".to_string(),
+            (ImLocale::EnUs, true, true, count) => {
+                format!("❌ Model request failed · retried {count} times")
+            }
+            (ImLocale::EnUs, true, false, 1) => {
+                "✅ Model request recovered · retried once".to_string()
+            }
+            (ImLocale::EnUs, true, false, count) => {
+                format!("✅ Model request recovered · retried {count} times")
+            }
+            (ImLocale::EnUs, false, _, count) => {
+                format!("🔄 Retrying model request · attempt {count}")
+            }
+        }
+    }
+
+    pub(crate) fn telegram_retry_progress_summary(self, count: usize) -> String {
+        match (self.locale, count) {
+            (ImLocale::ZhCn, count) => format!("🔄 模型请求重试：{count} 次"),
+            (ImLocale::EnUs, 1) => "🔄 Model request retried once".to_string(),
+            (ImLocale::EnUs, count) => format!("🔄 Model request retried {count} times"),
+        }
+    }
+
+    pub(crate) fn telegram_retry_error_summary(self) -> &'static str {
+        self.choose("最近错误：", "Latest error:")
     }
 
     pub(crate) fn image_description_needed(self) -> &'static str {

@@ -1,6 +1,10 @@
 use anyhow::Result;
-use std::path::PathBuf;
-use tokio::{sync::mpsc, task::JoinSet};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use tokio::{
+    sync::{Mutex, mpsc},
+    task::JoinSet,
+    time::{Duration, timeout},
+};
 
 use crate::{
     app_state::SharedState,
@@ -26,6 +30,17 @@ use crate::{
     remote_control_backend,
     types::{ImPlatformKind, InboundMessage},
 };
+
+const TELEGRAM_INBOUND_QUEUE_CAPACITY: usize = 32;
+const TELEGRAM_INBOUND_WORKER_IDLE: Duration = Duration::from_secs(60);
+
+#[derive(Clone)]
+struct TelegramInboundWorker {
+    id: u64,
+    tx: mpsc::Sender<InboundMessage>,
+}
+
+type TelegramInboundWorkers = Arc<Mutex<HashMap<String, TelegramInboundWorker>>>;
 
 pub async fn start_bridge(state: SharedState) {
     let config = state.config.lock().await.clone();
@@ -198,6 +213,7 @@ pub async fn start_bridge(state: SharedState) {
         });
     }
 
+    let telegram_attachment_root = attachment_root(&config.state_path);
     for account in telegram_accounts {
         let Some(telegram_api) = api_registry.telegram.get(&account.account_id).cloned() else {
             continue;
@@ -205,6 +221,7 @@ pub async fn start_bridge(state: SharedState) {
         let account_id = account.account_id.clone();
         let telegram_state = state.clone();
         let telegram_tx = tx.clone();
+        let telegram_attachment_root = telegram_attachment_root.clone();
         tasks.spawn(async move {
             loop {
                 if !is_current_generation(&telegram_state, generation).await {
@@ -220,6 +237,7 @@ pub async fn start_bridge(state: SharedState) {
                 match listen_polling(
                     telegram_state.clone(),
                     telegram_api.clone(),
+                    telegram_attachment_root.clone(),
                     telegram_tx.clone(),
                 )
                 .await
@@ -358,6 +376,8 @@ pub async fn start_bridge(state: SharedState) {
             ),
         )
         .await;
+    let inbound_workers = TelegramInboundWorkers::default();
+    let mut next_inbound_worker_id = 0_u64;
     loop {
         tokio::select! {
             message = rx.recv() => {
@@ -365,19 +385,118 @@ pub async fn start_bridge(state: SharedState) {
                 if !is_current_generation(&state, generation).await {
                     break;
                 }
-                let state = state.clone();
-                let api_registry = api_registry.clone();
-                let outbound_tx = outbound_tx.clone();
-                tasks.spawn(async move {
-                    if let Err(err) =
-                        handle_inbound(state.clone(), api_registry, outbound_tx.clone(), message)
-                            .await
-                    {
-                        state
-                            .push_event("error", "inbound_failed", err.to_string())
-                            .await;
+                if message.platform != ImPlatformKind::Telegram {
+                    let task_state = state.clone();
+                    let task_api_registry = api_registry.clone();
+                    let task_outbound_tx = outbound_tx.clone();
+                    tasks.spawn(async move {
+                        if let Err(err) = handle_inbound(
+                            task_state.clone(),
+                            task_api_registry,
+                            task_outbound_tx,
+                            message,
+                        )
+                        .await
+                        {
+                            task_state
+                                .push_event("error", "inbound_failed", err.to_string())
+                                .await;
+                        }
+                    });
+                    continue;
+                }
+                // A Telegram image and its following description are separate updates.
+                // Keep each private chat ordered while allowing different chats to run concurrently.
+                let conversation_key = message.conversation_key();
+                let mut pending_message = Some(message);
+                for attempt in 0..2 {
+                    let Some(message) = pending_message.take() else {
+                        break;
+                    };
+                    let (worker, worker_rx, send_result) = {
+                        let mut workers = inbound_workers.lock().await;
+                        let (worker, worker_rx) = if let Some(worker) = workers.get(&conversation_key) {
+                            (worker.clone(), None)
+                        } else {
+                            next_inbound_worker_id = next_inbound_worker_id.saturating_add(1).max(1);
+                            let (worker_tx, worker_rx) =
+                                mpsc::channel::<InboundMessage>(TELEGRAM_INBOUND_QUEUE_CAPACITY);
+                            let worker = TelegramInboundWorker {
+                                id: next_inbound_worker_id,
+                                tx: worker_tx,
+                            };
+                            workers.insert(conversation_key.clone(), worker.clone());
+                            (worker, Some(worker_rx))
+                        };
+                        let send_result = worker.tx.try_send(message);
+                        (worker, worker_rx, send_result)
+                    };
+
+                    if let Some(worker_rx) = worker_rx {
+                        tasks.spawn(run_telegram_inbound_worker(
+                            inbound_workers.clone(),
+                            conversation_key.clone(),
+                            worker.id,
+                            worker_rx,
+                            state.clone(),
+                            api_registry.clone(),
+                            outbound_tx.clone(),
+                        ));
                     }
-                });
+
+                    match send_result {
+                        Ok(()) => break,
+                        Err(mpsc::error::TrySendError::Full(message)) => {
+                            state
+                                .push_event(
+                                    "warn",
+                                    "telegram_inbound_queue_full",
+                                    format!(
+                                        "conversation={conversation_key} capacity={TELEGRAM_INBOUND_QUEUE_CAPACITY}"
+                                    ),
+                                )
+                                .await;
+                            if let Some(api) = api_registry.telegram.get(&message.account_id)
+                                && let Err(err) = api
+                                    .send_text(
+                                        &message.chat_id,
+                                        crate::im::core::i18n::im_text_for_state(&state)
+                                            .inbound_queue_busy_notice(),
+                                    )
+                                    .await
+                            {
+                                state
+                                    .push_event(
+                                        "warn",
+                                        "telegram_inbound_queue_notice_failed",
+                                        format!("conversation={conversation_key} err={err}"),
+                                    )
+                                    .await;
+                            }
+                            break;
+                        }
+                        Err(mpsc::error::TrySendError::Closed(message)) => {
+                            let mut workers = inbound_workers.lock().await;
+                            if workers
+                                .get(&conversation_key)
+                                .is_some_and(|current| current.id == worker.id)
+                            {
+                                workers.remove(&conversation_key);
+                            }
+                            drop(workers);
+                            pending_message = Some(message);
+                            if attempt == 1 {
+                                state
+                                    .push_event(
+                                        "error",
+                                        "telegram_inbound_worker_closed",
+                                        format!("conversation={conversation_key}"),
+                                    )
+                                    .await;
+                            }
+                        }
+                    }
+                }
             }
             task = tasks.join_next() => {
                 if let Some(Err(err)) = task {
@@ -390,6 +509,64 @@ pub async fn start_bridge(state: SharedState) {
     }
     tasks.abort_all();
     state.runtime.lock().await.invalidate_bridge_generation();
+}
+
+async fn run_telegram_inbound_worker(
+    workers: TelegramInboundWorkers,
+    conversation_key: String,
+    worker_id: u64,
+    mut rx: mpsc::Receiver<InboundMessage>,
+    state: SharedState,
+    api_registry: ImApiRegistry,
+    outbound_tx: outbound::ImOutboundSender,
+) {
+    loop {
+        let message = match timeout(TELEGRAM_INBOUND_WORKER_IDLE, rx.recv()).await {
+            Ok(Some(message)) => message,
+            Ok(None) => break,
+            Err(_) => {
+                let mut workers_guard = workers.lock().await;
+                if !workers_guard
+                    .get(&conversation_key)
+                    .is_some_and(|worker| worker.id == worker_id)
+                {
+                    return;
+                }
+                match rx.try_recv() {
+                    Ok(message) => message,
+                    Err(mpsc::error::TryRecvError::Empty) => {
+                        workers_guard.remove(&conversation_key);
+                        return;
+                    }
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        workers_guard.remove(&conversation_key);
+                        return;
+                    }
+                }
+            }
+        };
+
+        if let Err(err) = handle_inbound(
+            state.clone(),
+            api_registry.clone(),
+            outbound_tx.clone(),
+            message,
+        )
+        .await
+        {
+            state
+                .push_event("error", "inbound_failed", err.to_string())
+                .await;
+        }
+    }
+
+    let mut workers_guard = workers.lock().await;
+    if workers_guard
+        .get(&conversation_key)
+        .is_some_and(|worker| worker.id == worker_id)
+    {
+        workers_guard.remove(&conversation_key);
+    }
 }
 
 async fn is_current_generation(state: &SharedState, generation: u64) -> bool {

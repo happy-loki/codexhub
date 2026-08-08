@@ -5,6 +5,7 @@ use base64::Engine;
 use serde_json::{Value, json};
 
 use super::outbound::ack_server_envelope;
+use super::server_messages::observe_thread_status_changed;
 use super::*;
 use crate::{
     app_state::{AppState, PendingRemoteRequest},
@@ -186,6 +187,165 @@ async fn setup_connected_default_client(
         stream_id,
         connection_epoch,
     )
+}
+
+#[tokio::test]
+async fn system_error_status_keeps_im_turn_until_terminal_notification() {
+    let state = test_state();
+    let (_outbound_tx, _outbound_rx, _client_id, _stream_id, _connection_epoch) =
+        setup_connected_default_client(&state).await;
+    {
+        state
+            .runtime
+            .lock()
+            .await
+            .mark_turn_started("thread-1", "turn-1");
+        let mut remote = state.remote_control.inner.lock().await;
+        let client = remote
+            .clients
+            .get_mut(DEFAULT_REMOTE_CLIENT_KEY)
+            .expect("default client");
+        client.current_thread_id = Some("thread-1".to_string());
+        client.current_turn_id = Some("turn-1".to_string());
+        sync_default_client_legacy_locked(&mut remote);
+    }
+
+    observe_thread_status_changed(
+        &state,
+        Some(DEFAULT_REMOTE_CLIENT_KEY),
+        "thread-1",
+        "systemError",
+    )
+    .await;
+
+    assert_eq!(
+        state.runtime.lock().await.current_turn_id("thread-1"),
+        Some("turn-1")
+    );
+    assert!(
+        state
+            .runtime
+            .lock()
+            .await
+            .terminal_status_fallback_matches("thread-1", "turn-1")
+    );
+    let remote = state.remote_control.inner.lock().await;
+    let client = remote
+        .clients
+        .get(DEFAULT_REMOTE_CLIENT_KEY)
+        .expect("default client");
+    assert_eq!(client.current_turn_id, None);
+}
+
+#[tokio::test]
+async fn terminal_server_notification_cancels_shared_status_fallback_before_im_dispatch() {
+    let state = test_state();
+    let (_outbound_tx, _outbound_rx, client_id, stream_id, connection_epoch) =
+        setup_connected_default_client(&state).await;
+    {
+        state
+            .runtime
+            .lock()
+            .await
+            .mark_turn_started("thread-1", "turn-1");
+        let mut remote = state.remote_control.inner.lock().await;
+        let client = remote
+            .clients
+            .get_mut(DEFAULT_REMOTE_CLIENT_KEY)
+            .expect("default client");
+        client.current_thread_id = Some("thread-1".to_string());
+        client.current_turn_id = Some("turn-1".to_string());
+        sync_default_client_legacy_locked(&mut remote);
+    }
+
+    observe_thread_status_changed(
+        &state,
+        Some(DEFAULT_REMOTE_CLIENT_KEY),
+        "thread-1",
+        "systemError",
+    )
+    .await;
+    assert!(
+        state
+            .runtime
+            .lock()
+            .await
+            .terminal_status_fallback_matches("thread-1", "turn-1")
+    );
+
+    observe_app_server_message(
+        &state,
+        connection_epoch,
+        &client_id,
+        &stream_id,
+        &json!({
+            "method": "turn/completed",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1"
+            }
+        }),
+    )
+    .await;
+
+    let runtime = state.runtime.lock().await;
+    assert!(!runtime.terminal_status_fallback_matches("thread-1", "turn-1"));
+    assert_eq!(runtime.current_turn_id("thread-1"), Some("turn-1"));
+}
+
+#[tokio::test]
+async fn repeated_terminal_status_does_not_replace_or_duplicate_fallback_latch() {
+    let state = test_state();
+    let (_outbound_tx, _outbound_rx, _client_id, _stream_id, _connection_epoch) =
+        setup_connected_default_client(&state).await;
+    {
+        state
+            .runtime
+            .lock()
+            .await
+            .mark_turn_started("thread-1", "turn-1");
+        let mut remote = state.remote_control.inner.lock().await;
+        let client = remote
+            .clients
+            .get_mut(DEFAULT_REMOTE_CLIENT_KEY)
+            .expect("default client");
+        client.current_thread_id = Some("thread-1".to_string());
+        client.current_turn_id = Some("turn-1".to_string());
+        sync_default_client_legacy_locked(&mut remote);
+    }
+
+    observe_thread_status_changed(
+        &state,
+        Some(DEFAULT_REMOTE_CLIENT_KEY),
+        "thread-1",
+        "systemError",
+    )
+    .await;
+    let first_token = state
+        .runtime
+        .lock()
+        .await
+        .register_terminal_status_fallback_token("thread-1", "turn-1")
+        .map(|(token, _)| token)
+        .expect("fallback token");
+
+    // The remote side has already cleared its current turn, so a duplicate
+    // status notification must not create another timer or replace the token.
+    observe_thread_status_changed(
+        &state,
+        Some(DEFAULT_REMOTE_CLIENT_KEY),
+        "thread-1",
+        "systemError",
+    )
+    .await;
+    let duplicate_token = state
+        .runtime
+        .lock()
+        .await
+        .register_terminal_status_fallback_token("thread-1", "turn-1")
+        .map(|(token, _)| token)
+        .expect("fallback token should remain reusable");
+    assert_eq!(duplicate_token, first_token);
 }
 
 #[test]

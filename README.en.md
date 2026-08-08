@@ -63,7 +63,7 @@ Continue when the status overview shows the local service is running.
 Open the `消息接入` page and choose one channel:
 
 - Feishu: click `扫码使用新机器人` and complete QR onboarding.
-- Telegram: paste the BotFather token and click `保存并接入`. Telegram currently supports private bot chats only; group chats are ignored.
+- Telegram: paste the BotFather token and click `保存并接入`. Private chats support text, image/file input, in-place menu and approval updates, aggregated command and subagent progress per turn, and streamed agent reply drafts; group chats are ignored.
 - WeChat: click `扫码连接微信` and confirm in WeChat.
 - WeCom: click `添加企业微信机器人` and confirm by scanning with WeCom. Direct/group text, streaming and final replies, image/file transfer, initial/history thread selection cards, and interactive approval template cards are supported.
 
@@ -259,7 +259,7 @@ GET http://127.0.0.1:3847/api/events
 
 - The daemon binds to `127.0.0.1` by default. Do not expose it publicly.
 - Locally saved IM tokens, model API keys, and Codex auth data are secrets; do not commit them.
-- Attachments from Feishu are downloaded to a local state-adjacent `.im/attachments/feishu/` directory.
+- Attachments from Feishu and Telegram are downloaded to local state-adjacent `.im/attachments/feishu/` and `.im/attachments/telegram/` directories.
 - Restrict access with `allowedOpenIds` and/or `allowedChatIds` for real usage.
 - The bridge can send approval decisions to Codex. Treat Feishu / Telegram / WeChat / WeCom access as equivalent to local Codex approval access.
 
