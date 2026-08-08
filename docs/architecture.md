@@ -131,7 +131,7 @@ Feishu handles:
 - `im.message.receive_v1`
 - `card.action.trigger`
 
-Normal text messages are mapped to Codex input items and sent to the selected Codex thread through `turn/start`. Attachments are downloaded locally and converted into `localImage` or text file-path references.
+Normal text messages are mapped to Codex input items and sent to the selected Codex thread through `turn/start`. Feishu and Telegram attachments are downloaded locally and converted into `localImage` or text file-path references.
 
 Outbound Codex events are rendered as Feishu messages/cards:
 
@@ -141,7 +141,7 @@ Outbound Codex events are rendered as Feishu messages/cards:
 - completion cards
 - approval cards
 
-Telegram and WeChat use text-first renderers and inline/text actions instead of Feishu CardKit.
+Telegram and WeChat use text-first renderers and inline/text actions instead of Feishu CardKit. Telegram edits existing menu and approval messages in place, aggregates command execution steps and subagent activity into separate bounded progress messages per turn, and streams agent replies with Bot API message drafts before sending the final message.
 
 The bridge only renders events for threads that are bound to an IM conversation.
 

@@ -164,12 +164,18 @@ MVP 功能：
 - approval 先用文本命令回复，后续再补 inline keyboard。
 - Codex 最终回复用普通文本发送。
 
-MVP 暂不做：
+MVP 之后已补齐：
 
-- 复杂文件/图片上传。
-- 飞书式流式卡片。
+- 图片、文件、音视频等附件入站下载；无说明的纯图片会暂存并等待下一条文字描述。
+- 菜单、分页、创建进度和审批结果优先原位更新，旧按钮随状态清理。
+- 同一 turn 的多个 `Ran` 命令步骤合并到一条进度消息，步骤完成后原位更新；完成或中断时收口，过长历史只保留关键步骤和最近步骤。
+- 同一 turn 的子代理活动合并到另一条协作进度消息；只显示名称、状态、耗时和简短结果，`wait` 轮询、内部 thread/call id、空数组及原始 JSON 不发送到聊天。
+- Agent 回复通过 Bot API 原生消息草稿流式展示，最终仍发送普通消息固化结果。
+
+仍暂不做：
+
+- 飞书 CardKit 等价的复杂富卡片。
 - Telegram webhook 部署。
-- GUI 完整管理 Telegram 配置。
 
 ## 第四阶段：Telegram 协议层加固
 
@@ -204,8 +210,8 @@ Telegram 不适合照搬飞书表单。当前表达方式：
 
 后续可优化：
 
-- 用 `editMessageText` 更新旧菜单，减少旧按钮残留。
 - 对加载列表增加搜索/filter。
+- 聚合 Telegram media group 后再一次性提交整组附件。
 
 ## 第六阶段：GUI 和体验补齐
 
@@ -230,5 +236,5 @@ Telegram 不适合照搬飞书表单。当前表达方式：
 4. 新增 Telegram long polling + 纯文本发送。已完成。
 5. 加固 Telegram 协议层：polling probe、409 backoff、getMe、typing、智能切块。已完成。
 6. Telegram thread 管理：新建、参数创建、历史加载、分页。已完成基础能力。
-7. 再补 approval inline keyboard。
-8. 再考虑流式草稿编辑和文件/图片发送。
+7. 补 approval inline keyboard 与原消息状态更新。已完成。
+8. 补原生流式草稿和文件/图片入站。已完成。

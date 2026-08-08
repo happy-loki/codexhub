@@ -64,7 +64,7 @@ Codex App 和 VS Code 插件通常只需要：下载程序 -> 配置 AI Gateway 
 切到“聊天工具接入”页面，选择一个通道：
 
 - 飞书：点击“扫码使用新机器人”，按二维码流程完成接入。
-- Telegram：填写 BotFather 提供的 Bot Token，点击“保存并接入”。当前仅支持私聊机器人，群聊不会接入。
+- Telegram：填写 BotFather 提供的 Bot Token，点击“保存并接入”。当前支持私聊文本、图片/文件输入、原位菜单与审批状态更新、同一 turn 的命令和子代理协作进度聚合，以及 Agent 回复草稿流式展示；群聊不会接入。
 - 微信：点击“扫码连接微信”，使用微信扫码确认。
 - 企业微信：点击“添加企业微信机器人”，使用企业微信扫码确认。支持私聊/群聊文本、流式与最终回复、图片文件、初始/历史会话选择卡片和审批模板卡片。
 
@@ -251,7 +251,7 @@ GET http://127.0.0.1:3847/api/events
 
 - daemon 默认只绑定 `127.0.0.1`，不要直接暴露到公网
 - 本地保存的 IM token、模型 API Key 和 Codex 认证信息都是 secret，不要提交
-- 飞书附件会下载到本地状态目录旁边的 `.im/attachments/feishu/`
+- 飞书和 Telegram 附件会分别下载到本地状态目录旁边的 `.im/attachments/feishu/` 与 `.im/attachments/telegram/`
 - 真正使用时建议配置 `allowedOpenIds` 和 / 或 `allowedChatIds`
 - bridge 可以替 IM 用户向 Codex 提交审批决定，所以飞书 / Telegram / 微信 / 企业微信访问权限应视为等价于本地 Codex 审批权限
 
