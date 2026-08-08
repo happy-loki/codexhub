@@ -1874,12 +1874,14 @@ mod tests {
     fn dropping_unfinished_sse_log_stream_marks_cancelled() {
         let db_path = temp_db_path();
         let context = insert_running_test_log(&db_path, "req-cancelled");
+        let store = context.store.clone();
+        let log_id = context.log_id;
 
         let wrapped =
             ResponsesSseLogStream::new(stream::pending::<Result<Bytes, std::io::Error>>(), context);
         drop(wrapped);
 
-        let detail = get_detail(&db_path, 1).unwrap().unwrap();
+        let detail = store.get_detail(log_id).unwrap().unwrap();
         assert_eq!(detail.summary.status, "cancelled");
         assert!(detail.summary.latency_ms.is_some());
         assert!(
@@ -1896,13 +1898,15 @@ mod tests {
     async fn sse_log_stream_end_before_completed_is_failed() {
         let db_path = temp_db_path();
         let context = insert_running_test_log(&db_path, "req-closed");
+        let store = context.store.clone();
+        let log_id = context.log_id;
         let mut wrapped =
             ResponsesSseLogStream::new(stream::empty::<Result<Bytes, std::io::Error>>(), context);
 
         assert!(wrapped.next().await.is_none());
         drop(wrapped);
 
-        let detail = get_detail(&db_path, 1).unwrap().unwrap();
+        let detail = store.get_detail(log_id).unwrap().unwrap();
         assert_eq!(detail.summary.status, "failed");
         assert_eq!(
             detail.summary.error_message.as_deref(),
@@ -1915,6 +1919,8 @@ mod tests {
     async fn failed_sse_log_stream_is_not_overwritten_by_drop() {
         let db_path = temp_db_path();
         let context = insert_running_test_log(&db_path, "req-failed");
+        let store = context.store.clone();
+        let log_id = context.log_id;
         let inner = stream::iter(vec![Err(std::io::Error::new(
             std::io::ErrorKind::Other,
             "upstream closed",
@@ -1925,7 +1931,7 @@ mod tests {
         assert!(item.is_err());
         drop(wrapped);
 
-        let detail = get_detail(&db_path, 1).unwrap().unwrap();
+        let detail = store.get_detail(log_id).unwrap().unwrap();
         assert_eq!(detail.summary.status, "failed");
         assert_eq!(
             detail.summary.error_message.as_deref(),
@@ -1938,6 +1944,8 @@ mod tests {
     async fn upstream_sse_capture_stream_records_raw_events() {
         let db_path = temp_db_path();
         let context = insert_running_test_log(&db_path, "req-upstream-sse");
+        let store = context.store.clone();
+        let log_id = context.log_id;
         let inner = stream::iter(vec![
             Ok::<_, std::io::Error>(Bytes::from_static(
                 b"event: message_start\ndata: {\"type\":\"message_start\"}\n\n",
@@ -1953,7 +1961,7 @@ mod tests {
         }
         drop(wrapped);
 
-        let detail = get_detail(&db_path, 1).unwrap().unwrap();
+        let detail = store.get_detail(log_id).unwrap().unwrap();
         let captured = detail.upstream_response_sse.unwrap();
         assert!(captured.contains("event: message_start"));
         assert!(captured.contains("event: content_block_delta"));
@@ -1965,6 +1973,8 @@ mod tests {
         let db_path = temp_db_path();
         let context =
             insert_running_test_log_with_details(&db_path, "req-upstream-sse-summary-only", false);
+        let store = context.store.clone();
+        let log_id = context.log_id;
         let inner = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from_static(
             b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\"}\n\n",
         ))]);
@@ -1975,7 +1985,7 @@ mod tests {
         }
         drop(wrapped);
 
-        let detail = get_detail(&db_path, 1).unwrap().unwrap();
+        let detail = store.get_detail(log_id).unwrap().unwrap();
         assert!(detail.upstream_response_sse.is_none());
         let _ = std::fs::remove_file(db_path);
     }
@@ -1986,6 +1996,8 @@ mod tests {
         // an `event:` line plus a `data:` line whose JSON carries the `type`.
         let db_path = temp_db_path();
         let context = insert_running_test_log(&db_path, "req-anthropic-ttft");
+        let store = context.store.clone();
+        let log_id = context.log_id;
         let inner = stream::iter(vec![
             Ok::<_, std::io::Error>(Bytes::from_static(
                 b"event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"delta\":\"th\"}\n\n",
@@ -2003,7 +2015,7 @@ mod tests {
         }
         drop(wrapped);
 
-        let detail = get_detail(&db_path, 1).unwrap().unwrap();
+        let detail = store.get_detail(log_id).unwrap().unwrap();
         assert!(
             detail.summary.ttft_ms.is_some(),
             "ttft should be recorded from the first response.*.delta event"
@@ -2016,6 +2028,8 @@ mod tests {
         let db_path = temp_db_path();
         let context =
             insert_running_test_log_with_details(&db_path, "req-summary-only-completed", false);
+        let store = context.store.clone();
+        let log_id = context.log_id;
         let inner = stream::iter(vec![
             Ok::<_, std::io::Error>(Bytes::from_static(
                 b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n",
@@ -2031,7 +2045,7 @@ mod tests {
         }
         drop(wrapped);
 
-        let detail = get_detail(&db_path, 1).unwrap().unwrap();
+        let detail = store.get_detail(log_id).unwrap().unwrap();
         assert_eq!(detail.summary.status, "completed");
         assert_eq!(detail.summary.input_tokens, Some(2));
         assert_eq!(detail.summary.output_tokens, Some(3));
