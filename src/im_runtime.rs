@@ -173,9 +173,16 @@ pub(crate) enum TelegramCommandProgressStatus {
     Failed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TelegramCommandProgressEntryKind {
+    Command,
+    McpTool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TelegramCommandProgressEntry {
     pub item_id: String,
+    pub kind: TelegramCommandProgressEntryKind,
     pub command: String,
     pub status: TelegramCommandProgressStatus,
     pub exit_code: Option<i64>,
@@ -2075,9 +2082,9 @@ mod tests {
     use super::{
         PENDING_ATTACHMENTS_MAX_AGE_MS, PendingApproval, RouteTarget, RuntimeState,
         TelegramCollabProgressStatus, TelegramCollabProgressUpdate, TelegramCommandProgressEntry,
-        TelegramCommandProgressStatus, TelegramDiffSummary, TelegramDraftSendAction,
-        TelegramPlanStep, TelegramPlanStepStatus, ThreadTurnState, TurnOrigin,
-        route_from_conversation_key,
+        TelegramCommandProgressEntryKind, TelegramCommandProgressStatus, TelegramDiffSummary,
+        TelegramDraftSendAction, TelegramPlanStep, TelegramPlanStepStatus, ThreadTurnState,
+        TurnOrigin, route_from_conversation_key,
     };
 
     fn approval(id: i64) -> PendingApproval {
@@ -2116,6 +2123,7 @@ mod tests {
     ) -> TelegramCommandProgressEntry {
         TelegramCommandProgressEntry {
             item_id: item_id.to_string(),
+            kind: TelegramCommandProgressEntryKind::Command,
             command: command.to_string(),
             status,
             exit_code: None,
