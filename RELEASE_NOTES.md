@@ -1,3 +1,27 @@
+CodexHub v0.4.21
+
+本次版本重点完善 Telegram 远程任务体验，并修复 DeepSeek Responses 会话中工具调用历史不完整导致的请求失败。
+
+## Telegram 任务体验
+
+- 聚合展示命令、MCP 工具、推理、计划、文件变更和子任务进度，减少消息刷屏。
+- 支持流式草稿更新和最终状态收口，任务失败时也能明确结束，不再长时间停留在执行中。
+- 支持 Telegram 图片、文件、音频和语音附件，并增加大小、数量和过期限制。
+- 增强轮询冲突、网络超时和 Telegram API 限流的退避处理，降低高频重试风险。
+- MCP 工具返回图片时单独发送图片，同一工具完成事件只发送一次。
+
+## DeepSeek Responses
+
+- 修复会话历史中工具调用与工具结果不成对时，上游返回 `No tool output found` 的问题。
+- 缺少结果的孤儿工具调用会被移除；缺少调用的工具结果会降级为普通上下文，尽量保留有效信息。
+- 修复仅作用于 DeepSeek Responses，OpenAI Responses 和 Grok 原生透传保持不变。
+
+## 验证
+
+- `cargo fmt --check` 通过。
+- 完整测试通过：677 passed，2 ignored。
+- GitHub Actions 将构建 Windows、macOS 和 Linux 安装包。
+
 CodexHub v0.4.20
 
 本次版本调整 DeepSeek 模型的上下文窗口，避免 1M 上下文声明带来的超长会话性能和稳定性问题。

@@ -172,6 +172,19 @@ async fn passthrough_to_endpoint(
             "prepared scoped encrypted reasoning content for upstream"
         );
     }
+    let deepseek_tool_history = if !endpoint.is_compact() {
+        repair_deepseek_tool_history(&mut raw_body, provider)
+    } else {
+        DeepSeekToolHistoryStats::default()
+    };
+    if deepseek_tool_history.changed() {
+        debug!(
+            provider = %provider.name,
+            removed_calls = deepseek_tool_history.removed_calls,
+            downgraded_outputs = deepseek_tool_history.downgraded_outputs,
+            "repaired incomplete tool history for DeepSeek Responses"
+        );
+    }
     let grok_compatibility = if endpoint.is_compact() {
         GrokModelInputStats::default()
     } else {
@@ -514,6 +527,151 @@ struct GrokModelInputStats {
     tool_search_outputs: usize,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct DeepSeekToolHistoryStats {
+    removed_calls: usize,
+    downgraded_outputs: usize,
+}
+
+fn repair_deepseek_tool_history(
+    raw_body: &mut serde_json::Value,
+    provider: &ProviderConfig,
+) -> DeepSeekToolHistoryStats {
+    let mut stats = DeepSeekToolHistoryStats::default();
+    if provider.provider_type != ProviderType::DeepSeekResponses {
+        return stats;
+    }
+
+    let Some(input) = raw_body
+        .get_mut("input")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return stats;
+    };
+
+    let original = std::mem::take(input);
+    let mut repaired = Vec::with_capacity(original.len());
+    for (index, item) in original.iter().enumerate() {
+        let item_type = item
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        if is_client_tool_call_type(item_type) {
+            if has_matching_tool_output_after(&original, index, item) {
+                repaired.push(item.clone());
+            } else {
+                stats.removed_calls += 1;
+            }
+        } else if is_client_tool_output_type(item_type) {
+            if has_matching_tool_call_before(&original, index, item) {
+                repaired.push(item.clone());
+            } else {
+                repaired.push(orphan_responses_tool_output_message(item));
+                stats.downgraded_outputs += 1;
+            }
+        } else {
+            repaired.push(item.clone());
+        }
+    }
+    *input = repaired;
+    stats
+}
+
+fn is_client_tool_call_type(item_type: &str) -> bool {
+    matches!(
+        item_type,
+        "function_call" | "local_shell_call" | "custom_tool_call" | "tool_search_call"
+    )
+}
+
+fn is_client_tool_output_type(item_type: &str) -> bool {
+    matches!(
+        item_type,
+        "function_call_output" | "custom_tool_call_output" | "tool_search_output"
+    )
+}
+
+fn has_matching_tool_output_after(
+    items: &[serde_json::Value],
+    call_index: usize,
+    call: &serde_json::Value,
+) -> bool {
+    items
+        .iter()
+        .skip(call_index.saturating_add(1))
+        .any(|output| tool_call_and_output_match(call, output))
+}
+
+fn has_matching_tool_call_before(
+    items: &[serde_json::Value],
+    output_index: usize,
+    output: &serde_json::Value,
+) -> bool {
+    items
+        .iter()
+        .take(output_index)
+        .any(|call| tool_call_and_output_match(call, output))
+}
+
+fn tool_call_and_output_match(call: &serde_json::Value, output: &serde_json::Value) -> bool {
+    let Some(call_id) = call
+        .get("call_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|call_id| !call_id.is_empty())
+    else {
+        return false;
+    };
+    if output.get("call_id").and_then(serde_json::Value::as_str) != Some(call_id) {
+        return false;
+    }
+
+    let call_type = call
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let output_type = output
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    matches!(
+        (call_type, output_type),
+        ("function_call" | "local_shell_call", "function_call_output")
+            | ("custom_tool_call", "custom_tool_call_output")
+            | ("tool_search_call", "tool_search_output")
+    )
+}
+
+fn orphan_responses_tool_output_message(output: &serde_json::Value) -> serde_json::Value {
+    let call_id = output
+        .get("call_id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|call_id| !call_id.is_empty())
+        .unwrap_or("<missing>");
+    let value = output
+        .get("output")
+        .or_else(|| output.get("tools"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    let text = match value {
+        serde_json::Value::String(text) => text,
+        other => serde_json::to_string(&other).unwrap_or_else(|_| other.to_string()),
+    };
+    json!({
+        "type": "message",
+        "role": "user",
+        "content": [{
+            "type": "input_text",
+            "text": format!("Function call output ({call_id}): {text}"),
+        }],
+    })
+}
+
+impl DeepSeekToolHistoryStats {
+    fn changed(&self) -> bool {
+        self.removed_calls > 0 || self.downgraded_outputs > 0
+    }
+}
+
 impl GrokModelInputStats {
     fn changed(self) -> bool {
         self.custom_calls > 0
@@ -747,6 +905,7 @@ mod tests {
         is_failed_to_read_request_body_error, is_invalid_encrypted_content_error,
         normalize_grok_model_input, normalize_grok_model_input_with_tool_names,
         normalize_grok_reasoning_replay, passthrough, passthrough_compact,
+        repair_deepseek_tool_history,
     };
 
     struct RetryServerState {
@@ -978,6 +1137,15 @@ mod tests {
             name: "openai-compatible".to_string(),
             provider_type: ProviderType::OpenAiResponses,
             base_url: "https://api.x.ai/v1".to_string(),
+            ..ProviderConfig::default()
+        }
+    }
+
+    fn deepseek_responses_provider() -> ProviderConfig {
+        ProviderConfig {
+            name: "deepseek-responses".to_string(),
+            provider_type: ProviderType::DeepSeekResponses,
+            base_url: "https://api.deepseek.com/v1".to_string(),
             ..ProviderConfig::default()
         }
     }
@@ -1250,6 +1418,126 @@ mod tests {
         let original = body.clone();
 
         let stats = normalize_grok_model_input(&mut body, &openai_responses_provider());
+
+        assert!(!stats.changed());
+        assert_eq!(body, original);
+    }
+
+    #[test]
+    fn deepseek_responses_repairs_incomplete_tool_history() {
+        let mut body = json!({
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_function",
+                    "name": "shell_command",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_function",
+                    "output": "ok"
+                },
+                {
+                    "type": "local_shell_call",
+                    "call_id": "call_local_shell",
+                    "action": {"type": "exec", "command": ["pwd"]}
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_local_shell",
+                    "output": "D:/workspace"
+                },
+                {
+                    "type": "custom_tool_call",
+                    "call_id": "call_custom",
+                    "name": "apply_patch",
+                    "input": "*** Begin Patch"
+                },
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_custom",
+                    "output": "Done!"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_missing_output",
+                    "name": "shell_command",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "tool_search_call",
+                    "call_id": "call_missing_search_output",
+                    "arguments": "{}"
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_missing_call",
+                    "output": "preserve this result"
+                }
+            ]
+        });
+
+        let stats = repair_deepseek_tool_history(&mut body, &deepseek_responses_provider());
+
+        assert_eq!(stats.removed_calls, 2);
+        assert_eq!(stats.downgraded_outputs, 1);
+        let input = body["input"].as_array().unwrap();
+        assert_eq!(input.len(), 7);
+        assert!(input.iter().all(|item| {
+            item.get("call_id").and_then(serde_json::Value::as_str) != Some("call_missing_output")
+        }));
+        assert!(input.iter().all(|item| {
+            item.get("call_id").and_then(serde_json::Value::as_str)
+                != Some("call_missing_search_output")
+        }));
+        assert_eq!(input[6]["type"], "message");
+        assert_eq!(input[6]["role"], "user");
+        assert_eq!(
+            input[6]["content"][0]["text"],
+            "Function call output (call_missing_call): preserve this result"
+        );
+    }
+
+    #[test]
+    fn deepseek_responses_does_not_match_output_before_call() {
+        let mut body = json!({
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_out_of_order",
+                    "output": "too early"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_out_of_order",
+                    "name": "shell_command",
+                    "arguments": "{}"
+                }
+            ]
+        });
+
+        let stats = repair_deepseek_tool_history(&mut body, &deepseek_responses_provider());
+
+        assert_eq!(stats.removed_calls, 1);
+        assert_eq!(stats.downgraded_outputs, 1);
+        assert_eq!(body["input"].as_array().unwrap().len(), 1);
+        assert_eq!(body["input"][0]["type"], "message");
+    }
+
+    #[test]
+    fn openai_responses_does_not_repair_tool_history() {
+        let mut body = json!({
+            "input": [{
+                "type": "function_call",
+                "call_id": "call_without_output",
+                "name": "shell_command",
+                "arguments": "{}"
+            }]
+        });
+        let original = body.clone();
+
+        let stats = repair_deepseek_tool_history(&mut body, &openai_responses_provider());
 
         assert!(!stats.changed());
         assert_eq!(body, original);
