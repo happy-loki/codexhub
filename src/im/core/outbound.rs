@@ -65,6 +65,11 @@ pub(crate) fn channel() -> (ImOutboundSender, ImOutboundReceiver) {
     (ImOutboundSender { sender }, ImOutboundReceiver { receiver })
 }
 
+#[cfg(test)]
+pub(crate) fn try_recv_for_test(receiver: &mut ImOutboundReceiver) -> Option<ImOutboundMessage> {
+    receiver.receiver.try_recv().ok()
+}
+
 impl ImOutboundSender {
     pub(crate) fn enqueue(&self, message: ImOutboundMessage) -> Result<()> {
         self.sender

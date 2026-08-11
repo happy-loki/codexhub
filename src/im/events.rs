@@ -71,7 +71,7 @@ async fn telegram_command_turn(
     }
 }
 
-async fn update_telegram_command_progress(
+async fn update_telegram_task_progress(
     state: &SharedState,
     api_registry: &ImApiRegistry,
     thread_id: &str,
@@ -97,10 +97,12 @@ async fn update_telegram_command_progress(
             return true;
         }
     };
-    let entry = if completed {
-        telegram_progress::completed_entry(item_id, item)
-    } else {
-        telegram_progress::running_entry(item_id, item)
+    let is_mcp_tool = item.get("type").and_then(|value| value.as_str()) == Some("mcpToolCall");
+    let entry = match (is_mcp_tool, completed) {
+        (true, true) => telegram_progress::mcp_completed_entry(item_id, item),
+        (true, false) => telegram_progress::mcp_running_entry(item_id, item),
+        (false, true) => telegram_progress::completed_entry(item_id, item),
+        (false, false) => telegram_progress::running_entry(item_id, item),
     };
     let snapshot = state
         .runtime
@@ -1854,8 +1856,8 @@ pub(crate) async fn handle_codex_notification(
                 return;
             };
             if route.platform == ImPlatformKind::Telegram {
-                if item_type == "commandExecution" {
-                    let _ = update_telegram_command_progress(
+                if matches!(item_type, "commandExecution" | "mcpToolCall") {
+                    let _ = update_telegram_task_progress(
                         &state,
                         &api_registry,
                         thread_id,
@@ -2132,8 +2134,8 @@ pub(crate) async fn handle_codex_notification(
                 return;
             };
             if route.platform == ImPlatformKind::Telegram {
-                if item_type == "commandExecution" {
-                    let _ = update_telegram_command_progress(
+                if matches!(item_type, "commandExecution" | "mcpToolCall") {
+                    let _ = update_telegram_task_progress(
                         &state,
                         &api_registry,
                         thread_id,
@@ -2266,11 +2268,13 @@ pub(crate) async fn handle_codex_notification(
                     }
                     return;
                 }
-                if route.platform == ImPlatformKind::Telegram && item_type == "commandExecution" {
-                    // Command executions belong to the aggregate progress
-                    // message.  Keep late events from falling through to the
+                if route.platform == ImPlatformKind::Telegram
+                    && matches!(item_type, "commandExecution" | "mcpToolCall")
+                {
+                    // Commands and MCP calls belong to the aggregate progress
+                    // message. Keep late events from falling through to the
                     // ordinary item sender after the turn has been cleaned up.
-                    let _ = update_telegram_command_progress(
+                    let _ = update_telegram_task_progress(
                         &state,
                         &api_registry,
                         thread_id,
@@ -2281,6 +2285,28 @@ pub(crate) async fn handle_codex_notification(
                         true,
                     )
                     .await;
+                    if item_type == "mcpToolCall"
+                        && let Err(err) = queue_telegram_mcp_tool_images(
+                            &state,
+                            &outbound_tx,
+                            thread_id,
+                            &route,
+                            item_id,
+                            item,
+                        )
+                        .await
+                    {
+                        state
+                            .push_event(
+                                "error",
+                                "telegram_mcp_tool_images_failed",
+                                format!(
+                                    "thread={thread_id} item={item_id} chat={} err={err}",
+                                    route.chat_id
+                                ),
+                            )
+                            .await;
+                    }
                     return;
                 }
                 if route.platform == ImPlatformKind::Wecom && item_type == "agentMessage" {
@@ -3077,6 +3103,50 @@ async fn send_text_im_codex_item(
     Ok(())
 }
 
+async fn queue_telegram_mcp_tool_images(
+    state: &SharedState,
+    outbound_tx: &ImOutboundSender,
+    thread_id: &str,
+    route: &RouteTarget,
+    item_id: &str,
+    item: &serde_json::Value,
+) -> Result<()> {
+    let paths = mcp_tool_image_paths_for_item(state, "telegram", item, item_id).await?;
+    if paths.is_empty() {
+        return Ok(());
+    }
+
+    let should_queue = {
+        let mut runtime = state.runtime.lock().await;
+        let key = format!(
+            "{}:item:{item_id}:mcpToolCall:images",
+            route.conversation_key
+        );
+        if runtime.should_skip_duplicate_text(&key, "queued") {
+            false
+        } else {
+            runtime.remember_sent_text(&key, "queued");
+            true
+        }
+    };
+    if !should_queue {
+        return Ok(());
+    }
+
+    let image_count = queue_mcp_tool_images(outbound_tx, thread_id, route, item_id, paths)?;
+    state
+        .push_event(
+            "info",
+            "telegram_mcp_tool_images_queued",
+            format!(
+                "thread={thread_id} item={item_id} type=mcpToolCall chat={} image_count={image_count}",
+                route.chat_id
+            ),
+        )
+        .await;
+    Ok(())
+}
+
 fn queue_mcp_tool_images(
     outbound_tx: &ImOutboundSender,
     thread_id: &str,
@@ -3410,7 +3480,10 @@ mod tests {
     use crate::{
         app_state::AppState,
         config::AppConfig,
-        im::wecom::{WecomApi, WecomSettings},
+        im::{
+            core::outbound::{channel as outbound_channel, try_recv_for_test},
+            wecom::{WecomApi, WecomSettings},
+        },
         im_runtime::{RouteTarget, WecomStreamState},
     };
 
@@ -3442,6 +3515,16 @@ mod tests {
             conversation_key: "wecom:account:single:user".to_string(),
             account_id: "account".to_string(),
             chat_id: "single:user".to_string(),
+            remote_client_key: "remote".to_string(),
+        }
+    }
+
+    fn test_telegram_route() -> RouteTarget {
+        RouteTarget {
+            platform: ImPlatformKind::Telegram,
+            conversation_key: "telegram:account:chat".to_string(),
+            account_id: "account".to_string(),
+            chat_id: "chat".to_string(),
             remote_client_key: "remote".to_string(),
         }
     }
@@ -3478,6 +3561,47 @@ mod tests {
             telegram_command_progress_retry_delay_ms(&error, true, false),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn telegram_mcp_images_are_queued_once_without_an_item_text_message() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let state = AppState::new(
+            temp_dir.path().join("state.toml"),
+            AppConfig::default(),
+            None,
+            None,
+        );
+        let route = test_telegram_route();
+        let (outbound_tx, mut outbound_rx) = outbound_channel();
+        let item = json!({
+            "type": "mcpToolCall",
+            "result": {
+                "content": [{
+                    "type": "image",
+                    "mimeType": "image/png",
+                    "data": "iVBORw0KGgo="
+                }]
+            }
+        });
+
+        queue_telegram_mcp_tool_images(&state, &outbound_tx, "thread", &route, "mcp-item", &item)
+            .await
+            .expect("first image queue");
+        queue_telegram_mcp_tool_images(&state, &outbound_tx, "thread", &route, "mcp-item", &item)
+            .await
+            .expect("duplicate image queue");
+
+        let message = try_recv_for_test(&mut outbound_rx).expect("queued image");
+        assert_eq!(message.kind, ImOutboundKind::ImageItem);
+        assert_eq!(message.item_type.as_deref(), Some("mcpToolCall"));
+        match message.payload {
+            ImOutboundPayload::Image { path, .. } => assert!(path.is_file()),
+            ImOutboundPayload::Text(_) | ImOutboundPayload::Approval(_) => {
+                panic!("MCP aggregation must not queue an item text message")
+            }
+        }
+        assert!(try_recv_for_test(&mut outbound_rx).is_none());
     }
 
     #[test]

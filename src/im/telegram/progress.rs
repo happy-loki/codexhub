@@ -3,9 +3,9 @@ use serde_json::Value;
 use crate::{
     im::core::i18n::ImText,
     im_runtime::{
-        TelegramCommandProgressEntry, TelegramCommandProgressSnapshot,
-        TelegramCommandProgressStatus, TelegramDiffSummary, TelegramPlanStep,
-        TelegramPlanStepStatus,
+        TelegramCommandProgressEntry, TelegramCommandProgressEntryKind,
+        TelegramCommandProgressSnapshot, TelegramCommandProgressStatus, TelegramDiffSummary,
+        TelegramPlanStep, TelegramPlanStepStatus,
     },
 };
 
@@ -236,6 +236,7 @@ fn push_unique_path(paths: &mut Vec<String>, path: String) {
 pub(crate) fn running_entry(item_id: &str, item: &Value) -> TelegramCommandProgressEntry {
     TelegramCommandProgressEntry {
         item_id: item_id.to_string(),
+        kind: TelegramCommandProgressEntryKind::Command,
         command: command_text(item),
         status: TelegramCommandProgressStatus::Running,
         exit_code: None,
@@ -248,12 +249,40 @@ pub(crate) fn completed_entry(item_id: &str, item: &Value) -> TelegramCommandPro
     let status = completed_status(item);
     TelegramCommandProgressEntry {
         item_id: item_id.to_string(),
+        kind: TelegramCommandProgressEntryKind::Command,
         command: command_text(item),
         status,
         exit_code: item.get("exitCode").and_then(Value::as_i64),
         duration_ms: item.get("durationMs").and_then(Value::as_u64),
         failure_output: (status == TelegramCommandProgressStatus::Failed)
             .then(|| failure_output_tail(item))
+            .flatten(),
+    }
+}
+
+pub(crate) fn mcp_running_entry(item_id: &str, item: &Value) -> TelegramCommandProgressEntry {
+    TelegramCommandProgressEntry {
+        item_id: item_id.to_string(),
+        kind: TelegramCommandProgressEntryKind::McpTool,
+        command: mcp_tool_text(item),
+        status: TelegramCommandProgressStatus::Running,
+        exit_code: None,
+        duration_ms: item.get("durationMs").and_then(Value::as_u64),
+        failure_output: None,
+    }
+}
+
+pub(crate) fn mcp_completed_entry(item_id: &str, item: &Value) -> TelegramCommandProgressEntry {
+    let status = mcp_completed_status(item);
+    TelegramCommandProgressEntry {
+        item_id: item_id.to_string(),
+        kind: TelegramCommandProgressEntryKind::McpTool,
+        command: mcp_tool_text(item),
+        status,
+        exit_code: None,
+        duration_ms: item.get("durationMs").and_then(Value::as_u64),
+        failure_output: (status == TelegramCommandProgressStatus::Failed)
+            .then(|| mcp_failure_output(item))
             .flatten(),
     }
 }
@@ -557,6 +586,9 @@ fn render_entry(
         TelegramCommandProgressStatus::Failed => "❌",
     };
     let mut line = icon.to_string();
+    if entry.kind == TelegramCommandProgressEntryKind::McpTool {
+        line.push_str(" · MCP");
+    }
     if let Some(duration) = entry.duration_ms {
         line.push_str(" · ");
         line.push_str(&format_duration(duration));
@@ -567,9 +599,17 @@ fn render_entry(
     {
         line.push_str(&format!(" · exit {exit_code}"));
     }
-    line.push_str("\n```shell\n");
-    line.push_str(&entry.command);
-    line.push_str("\n```");
+    match entry.kind {
+        TelegramCommandProgressEntryKind::Command => {
+            line.push_str("\n```shell\n");
+            line.push_str(&entry.command);
+            line.push_str("\n```");
+        }
+        TelegramCommandProgressEntryKind::McpTool => {
+            line.push('\n');
+            line.push_str(&entry.command);
+        }
+    }
     if let Some(output) = entry.failure_output.as_deref()
         && failure_output_chars > 0
     {
@@ -580,6 +620,40 @@ fn render_entry(
         line.push_str("\n```");
     }
     line
+}
+
+fn mcp_tool_text(item: &Value) -> String {
+    let server = item
+        .get("server")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let tool = item
+        .get("tool")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let tool_name = match (server, tool) {
+        (Some(server), Some(tool)) => format!("{server}.{tool}"),
+        (Some(server), None) => server.to_string(),
+        (None, Some(tool)) => tool.to_string(),
+        (None, None) => "MCP tool".to_string(),
+    };
+    let title = item
+        .get("arguments")
+        .and_then(|arguments| arguments.get("title"))
+        .and_then(Value::as_str)
+        .or_else(|| item.get("title").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != tool_name);
+    let text = match title {
+        Some(title) => format!("{tool_name} · {title}"),
+        None => tool_name,
+    };
+    truncate_middle(
+        &single_line(&text).replace('`', "'"),
+        TELEGRAM_COMMAND_PROGRESS_COMMAND_CHARS,
+    )
 }
 
 fn command_text(item: &Value) -> String {
@@ -632,6 +706,82 @@ fn completed_status(item: &Value) -> TelegramCommandProgressStatus {
         }
         _ => TelegramCommandProgressStatus::Succeeded,
     }
+}
+
+fn mcp_completed_status(item: &Value) -> TelegramCommandProgressStatus {
+    if item.get("error").is_some_and(json_value_has_content)
+        || item.get("isError").and_then(Value::as_bool) == Some(true)
+        || item
+            .get("result")
+            .and_then(|result| result.get("isError").or_else(|| result.get("is_error")))
+            .and_then(Value::as_bool)
+            == Some(true)
+    {
+        return TelegramCommandProgressStatus::Failed;
+    }
+    completed_status(item)
+}
+
+fn mcp_failure_output(item: &Value) -> Option<String> {
+    let error = item
+        .get("error")
+        .filter(|value| json_value_has_content(value))
+        .or_else(|| {
+            item.get("result")
+                .and_then(|result| result.get("error"))
+                .filter(|value| json_value_has_content(value))
+        })
+        .map(json_value_text)
+        .or_else(|| {
+            item.get("result")
+                .and_then(|result| result.get("content"))
+                .and_then(Value::as_array)
+                .map(|content| {
+                    content
+                        .iter()
+                        .filter_map(|entry| {
+                            (entry.get("type").and_then(Value::as_str) == Some("text"))
+                                .then(|| entry.get("text").and_then(Value::as_str))
+                                .flatten()
+                        })
+                        .map(str::trim)
+                        .filter(|text| !text.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .filter(|text| !text.is_empty())
+        })?;
+    Some(truncate_tail(
+        &compact_text(&error, TELEGRAM_COMMAND_PROGRESS_FAILURE_CHARS).replace("```", "'''"),
+        TELEGRAM_COMMAND_PROGRESS_FAILURE_CHARS,
+    ))
+}
+
+fn json_value_has_content(value: &Value) -> bool {
+    match value {
+        Value::Null => false,
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Array(values) => !values.is_empty(),
+        Value::Object(values) => !values.is_empty(),
+        _ => true,
+    }
+}
+
+fn json_value_text(value: &Value) -> String {
+    if let Some(text) = value.as_str() {
+        return text.to_string();
+    }
+    for key in ["message", "additionalDetails", "details"] {
+        if let Some(text) = value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            return text.to_string();
+        }
+    }
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
 
 fn failure_output_tail(item: &Value) -> Option<String> {
@@ -724,13 +874,16 @@ mod tests {
 
     use crate::{
         im::core::i18n::ImText,
-        im_runtime::{TelegramCommandProgressSnapshot, TelegramCommandProgressStatus},
+        im_runtime::{
+            TelegramCommandProgressEntryKind, TelegramCommandProgressSnapshot,
+            TelegramCommandProgressStatus,
+        },
     };
 
     use super::{
         TELEGRAM_COMMAND_PROGRESS_MAX_CHARS, completed_entry, diff_summary_from_diff,
-        file_change_diff_summary, parse_plan_update, reasoning_summary_from_item,
-        render_command_progress, running_entry,
+        file_change_diff_summary, mcp_completed_entry, mcp_running_entry, parse_plan_update,
+        reasoning_summary_from_item, render_command_progress, running_entry,
     };
 
     use crate::im_runtime::{TelegramDiffSummary, TelegramPlanStep, TelegramPlanStepStatus};
@@ -753,6 +906,165 @@ mod tests {
         assert!(!output.contains("one"));
         assert!(output.contains("two"));
         assert!(output.contains("seven"));
+    }
+
+    #[test]
+    fn mcp_entries_use_a_compact_tool_label() {
+        let item = json!({
+            "type": "mcpToolCall",
+            "server": "browser",
+            "tool": "screenshot",
+            "arguments": {"title": "获取页面截图"},
+            "status": "completed",
+            "durationMs": 850
+        });
+
+        let running = mcp_running_entry("mcp-1", &item);
+        assert_eq!(running.kind, TelegramCommandProgressEntryKind::McpTool);
+        assert_eq!(running.command, "browser.screenshot · 获取页面截图");
+        assert_eq!(running.status, TelegramCommandProgressStatus::Running);
+
+        let completed = mcp_completed_entry("mcp-1", &item);
+        assert_eq!(completed.status, TelegramCommandProgressStatus::Succeeded);
+        assert_eq!(completed.duration_ms, Some(850));
+    }
+
+    #[test]
+    fn render_mcp_entry_without_a_shell_code_block() {
+        let rendered = render_command_progress(
+            &TelegramCommandProgressSnapshot {
+                turn_id: "turn".to_string(),
+                revision: 1,
+                message_id: None,
+                entries: vec![mcp_running_entry(
+                    "mcp-1",
+                    &json!({
+                        "type": "mcpToolCall",
+                        "server": "browser",
+                        "tool": "screenshot",
+                        "arguments": {"title": "获取页面截图"}
+                    }),
+                )],
+                dropped_entries: 0,
+                retry_count: 0,
+                retry_error: None,
+                reasoning_summary: None,
+                plan_explanation: None,
+                plan: Vec::new(),
+                diff_summary: None,
+                completed: false,
+                failed: false,
+            },
+            ImText::zh_cn(),
+        );
+
+        assert!(rendered.contains("⏳ · MCP\nbrowser.screenshot · 获取页面截图"));
+        assert!(!rendered.contains("```shell"));
+    }
+
+    #[test]
+    fn mcp_result_error_is_rendered_as_a_bounded_failure_summary() {
+        let entry = mcp_completed_entry(
+            "mcp-1",
+            &json!({
+                "type": "mcpToolCall",
+                "server": "browser",
+                "tool": "navigate",
+                "status": "completed",
+                "result": {
+                    "isError": true,
+                    "content": [{"type": "text", "text": "503 Service Unavailable"}]
+                }
+            }),
+        );
+        assert_eq!(entry.status, TelegramCommandProgressStatus::Failed);
+        assert_eq!(
+            entry.failure_output.as_deref(),
+            Some("503 Service Unavailable")
+        );
+
+        let rendered = render_command_progress(
+            &TelegramCommandProgressSnapshot {
+                turn_id: "turn".to_string(),
+                revision: 2,
+                message_id: Some("42".to_string()),
+                entries: vec![entry],
+                dropped_entries: 0,
+                retry_count: 0,
+                retry_error: None,
+                reasoning_summary: None,
+                plan_explanation: None,
+                plan: Vec::new(),
+                diff_summary: None,
+                completed: false,
+                failed: false,
+            },
+            ImText::zh_cn(),
+        );
+        assert!(rendered.contains("❌ · MCP\nbrowser.navigate"));
+        assert!(rendered.contains("503 Service Unavailable"));
+    }
+
+    #[test]
+    fn mcp_protocol_error_prefers_the_message_field() {
+        let entry = mcp_completed_entry(
+            "mcp-1",
+            &json!({
+                "type": "mcpToolCall",
+                "server": "browser",
+                "tool": "navigate",
+                "status": "failed",
+                "error": {
+                    "message": "MCP server unavailable",
+                    "code": -32000
+                }
+            }),
+        );
+
+        assert_eq!(entry.status, TelegramCommandProgressStatus::Failed);
+        assert_eq!(
+            entry.failure_output.as_deref(),
+            Some("MCP server unavailable")
+        );
+    }
+
+    #[test]
+    fn mcp_entries_share_the_five_visible_step_limit() {
+        let entries = (0..8)
+            .map(|index| {
+                mcp_completed_entry(
+                    &format!("mcp-{index}"),
+                    &json!({
+                        "type": "mcpToolCall",
+                        "server": "browser",
+                        "tool": format!("tool-{index}"),
+                        "status": "completed"
+                    }),
+                )
+            })
+            .collect();
+        let rendered = render_command_progress(
+            &TelegramCommandProgressSnapshot {
+                turn_id: "turn".to_string(),
+                revision: 8,
+                message_id: Some("42".to_string()),
+                entries,
+                dropped_entries: 0,
+                retry_count: 0,
+                retry_error: None,
+                reasoning_summary: None,
+                plan_explanation: None,
+                plan: Vec::new(),
+                diff_summary: None,
+                completed: true,
+                failed: false,
+            },
+            ImText::zh_cn(),
+        );
+
+        assert!(rendered.contains("另外 3 个较早步骤"));
+        assert!(!rendered.contains("browser.tool-2"));
+        assert!(rendered.contains("browser.tool-7"));
     }
 
     #[test]
