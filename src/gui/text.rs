@@ -2726,10 +2726,10 @@ impl GuiText {
     pub(super) fn ai_gw_channel_editor_help(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "选择 OpenAI、Grok、DeepSeek Chat、DeepSeek Responses、Anthropic 或智谱 GLM，并填写大模型厂商接入信息。"
+                "选择 OpenAI、Grok、DeepSeek Responses、其他 Chat 兼容厂商、Anthropic 或智谱 GLM，并填写大模型厂商接入信息。"
             }
             GuiLocale::EnUs => {
-                "Choose OpenAI, Grok, DeepSeek Chat, DeepSeek Responses, Anthropic, or GLM and fill in the channel connection details."
+                "Choose OpenAI, Grok, DeepSeek Responses, another Chat-compatible provider, Anthropic, or GLM and fill in the channel connection details."
             }
         }
     }
@@ -2806,7 +2806,10 @@ impl GuiText {
     }
 
     pub(super) fn ai_gw_service_deepseek(self) -> &'static str {
-        "DeepSeek Chat"
+        match self.locale {
+            GuiLocale::ZhCn => "Chat Completions（其他厂商）",
+            GuiLocale::EnUs => "Chat Completions (other providers)",
+        }
     }
 
     pub(super) fn ai_gw_service_deepseek_responses(self) -> &'static str {

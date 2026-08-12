@@ -677,7 +677,7 @@ mod tests {
     #[test]
     fn grok_standard_responses_normalizes_apply_patch_and_hosted_search() {
         let mut body = json!({
-            "model": "grok-4.5",
+            "model": "grok-4.6",
             "input": [{"role":"user","content":"update the file and verify online"}],
             "tools": [
                 {

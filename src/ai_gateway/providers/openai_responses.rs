@@ -1153,7 +1153,7 @@ mod tests {
     #[test]
     fn xai_reasoning_replay_without_item_id_drops_encrypted_content() {
         let mut body = json!({
-            "model": "grok-4.5",
+            "model": "grok-4.6",
             "input": [
                 {
                     "type": "reasoning",
@@ -1176,7 +1176,7 @@ mod tests {
     #[test]
     fn xai_reasoning_replay_with_item_id_keeps_blob_and_adds_status() {
         let mut body = json!({
-            "model": "grok-4.5",
+            "model": "grok-4.6",
             "input": [
                 {
                     "type": "reasoning",
@@ -1199,7 +1199,7 @@ mod tests {
     #[test]
     fn grok_model_input_normalizes_gpt_5_6_custom_tool_history() {
         let mut body = json!({
-            "model": "grok-4.5",
+            "model": "grok-4.6",
             "input": [
                 {
                     "type": "message",
@@ -1557,7 +1557,7 @@ mod tests {
         let client = reqwest::Client::new();
         let context = GatewayContext::extract(&HeaderMap::new(), Some("grok-history-session"));
         let request = json!({
-            "model": "grok-4.5",
+            "model": "grok-4.6",
             "stream": false,
             "input": [
                 {
@@ -1584,7 +1584,7 @@ mod tests {
             ]
         });
 
-        let response = passthrough(&client, &context, request, "grok-4.5", &provider, None)
+        let response = passthrough(&client, &context, request, "grok-4.6", &provider, None)
             .await
             .expect("Grok history normalization should reach upstream");
         assert_eq!(response.status(), StatusCode::OK);
@@ -1743,7 +1743,7 @@ mod tests {
     #[test]
     fn openai_responses_provider_does_not_apply_grok_reasoning_replay_compatibility() {
         let mut body = json!({
-            "model": "grok-4.5",
+            "model": "grok-4.6",
             "input": [
                 {
                     "type": "reasoning",

@@ -89,7 +89,7 @@ React 生产构建会压缩组件名，内部结构也会随 Codex App 更新变
 诊断器定位到撰写器模型按钮对应的压缩 React 组件 `RO`。组件 props 包含：
 
 ```text
-model = grok-4.5
+model = grok-4.6
 reasoningEffort = xhigh
 labelCandidates = 29 个模型/推理档位组合
 ```
@@ -126,9 +126,9 @@ gpt-5.2
 }
 ```
 
-两个列表完全一致。当前模型 `grok-4.5` 仍保留在按钮状态中，但没有进入 `labelCandidates`。因此可以确认：
+两个列表完全一致。当前模型 `grok-4.6` 仍保留在按钮状态中，但没有进入 `labelCandidates`。因此可以确认：
 
-1. CodexHub/Core 的模型数据已经进入 renderer，当前会话也能识别 `grok-4.5`；
+1. CodexHub/Core 的模型数据已经进入 renderer，当前会话也能识别 `grok-4.6`；
 2. 真正丢失发生在 renderer 生成模型候选列表时；
 3. 直接过滤输入就是官方 Statsig `107580212.available_models`，并由 `use_hidden_models=true` 启用白名单行为；
 4. 这不是 CodexHub `/models` 合成或 app-server `model/list` 丢弃造成的。
@@ -189,7 +189,7 @@ for (const model of models) {
 TanStack Query 原始缓存中实际有 12 个模型，且以下自定义模型全部为 `hidden=false`：
 
 ```text
-Grok-4.5
+Grok-4.6
 deepseek-v4-pro
 deepseek-v4-flash
 GLM-5.2
@@ -199,7 +199,7 @@ Sonnet-4.6
 
 只更新 Statsig `_store` 并触发 `values_updated` 仍不足以立即改变菜单，因为已经挂载的 TanStack Query observer 持有旧 `availableModels` Set 的闭包。实验脚本在一次 `refetchQueries()` 期间，临时让“恰好匹配官方 8 模型白名单”的 Set 通过所有模型；Promise 完成后立即恢复原生 `Set.prototype.has`。
 
-重新派生后，真实二级模型菜单显示完整 12 个模型。按钮也从“自定义”恢复为当前模型名 `Grok-4.5`。这证明：
+重新派生后，真实二级模型菜单显示完整 12 个模型。按钮也从“自定义”恢复为当前模型名 `Grok-4.6`。这证明：
 
 1. CodexHub `/models`、app-server `model/list` 和 React Query 原始缓存都正确；
 2. 自定义模型的 `hidden` 标志正确；

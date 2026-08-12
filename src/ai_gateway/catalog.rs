@@ -160,7 +160,7 @@ mod tests {
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
-            "grok-4.5",
+            "grok-4.6",
             "gpt-5.5",
             "deepseek-v4-pro",
             "deepseek-v4-flash",
@@ -182,13 +182,13 @@ mod tests {
                 "gpt-5.6-sol",
                 "gpt-5.6-terra",
                 "gpt-5.6-luna",
-                "grok-4.5",
+                "grok-4.6",
                 "gpt-5.5",
                 "deepseek-v4-pro",
                 "deepseek-v4-flash"
             ]
         );
-        assert_eq!(response["models"][3]["display_name"], "Grok-4.5");
+        assert_eq!(response["models"][3]["display_name"], "Grok-4.6");
         assert_eq!(
             response["models"][3]["comp_hash"],
             "codexhub-grok-summary-v1"
@@ -312,21 +312,21 @@ mod tests {
                 .expect("catalog model should declare comp_hash")
         };
 
-        assert_eq!(comp_hash("grok-4.5"), "codexhub-grok-summary-v1");
+        assert_eq!(comp_hash("grok-4.6"), "codexhub-grok-summary-v1");
         assert_eq!(comp_hash("deepseek-v4-pro"), "3000");
         assert_eq!(comp_hash("deepseek-v4-flash"), "3000");
         assert_eq!(comp_hash("GLM-5.2"), "codexhub-anthropic-summary-v1");
         assert_eq!(comp_hash("Opus-4.8"), "codexhub-anthropic-summary-v1");
         assert_eq!(comp_hash("Sonnet-4.6"), "codexhub-anthropic-summary-v1");
 
-        assert_ne!(comp_hash("grok-4.5"), comp_hash("gpt-5.6-sol"));
+        assert_ne!(comp_hash("grok-4.6"), comp_hash("gpt-5.6-sol"));
         assert_ne!(comp_hash("deepseek-v4-pro"), comp_hash("gpt-5.5"));
         assert_ne!(comp_hash("Opus-4.8"), comp_hash("deepseek-v4-pro"));
     }
 
     #[test]
     fn codexhub_third_party_models_use_372k_context_window() {
-        for slug in ["grok-4.5", "GLM-5.2", "Opus-4.8", "Sonnet-4.6"] {
+        for slug in ["grok-4.6", "GLM-5.2", "Opus-4.8", "Sonnet-4.6"] {
             let model = catalog_models()
                 .iter()
                 .find(|model| model_slug(model) == Some(slug))
@@ -439,7 +439,7 @@ mod tests {
             "gpt-5.6-sol",
             "gpt-5.6-terra",
             "gpt-5.6-luna",
-            "grok-4.5",
+            "grok-4.6",
             "gpt-5.5",
             "gpt-5.4",
             "gpt-5.4-mini",

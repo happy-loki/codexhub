@@ -3,31 +3,30 @@
 本文记录 CodexHub 对 DeepSeek 原生 Responses API 的接入边界。协议依据为
 [DeepSeek Responses API 官方指南](https://api-docs.deepseek.com/zh-cn/guides/responses_api/)。
 
-## 两条 DeepSeek 接入路径
+## DeepSeek Responses
 
-CodexHub 保留两种互不替代的 DeepSeek 渠道：
+DeepSeek Pro 已支持原生 Responses API。CodexHub 的 GUI 默认使用
+`deepseek_responses`，不再把 DeepSeek Pro 配置到 Chat Completions 入口。
 
-| GUI 选项 | `providerType` | 上游协议 | 适用场景 |
-|---|---|---|---|
-| DeepSeek Chat | `chat_completions` | Chat Completions | 兼容已有配置和已有模型 |
-| DeepSeek Responses | `deepseek_responses` | 原生 Responses | 使用 DeepSeek 新 Responses 能力 |
-
-新增 Responses 支持不会迁移或改写已有 DeepSeek Chat 渠道。
+底层 `chat_completions` Provider 和 Responses -> Chat 转换代码暂时保留，主要用于
+其它仍只提供 Chat Completions 的兼容厂商；已有旧版 DeepSeek Chat 配置也不会被自动删除，
+但新配置应优先使用 DeepSeek Responses。
 
 ## 默认配置
 
 ```text
 name: deepseek-responses
 baseUrl: https://api.deepseek.com/v1
-model: deepseek-v4-flash
+model: deepseek-v4-pro
 ```
 
 官方模型目录同时包含 `deepseek-v4-flash` 和 `deepseek-v4-pro`。CodexHub 默认填入
-`deepseek-v4-flash`，用户可以按 DeepSeek 账号实际可用范围选择 Pro。
+`deepseek-v4-pro`；如果账号或上游渠道只提供 Flash，可以在模型列表中手动选择
+`deepseek-v4-flash`。
 
 当前官方目录中的两款模型均声明：
 
-- 上下文窗口：`1,048,576`
+- 上下文窗口：`372,000`
 - 有效上下文比例：`95%`
 - `comp_hash`：`3000`
 - `use_responses_lite`：`false`

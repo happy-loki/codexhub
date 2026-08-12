@@ -647,7 +647,7 @@ dynamic_configs["107580212"].v.default_model
 {
   "107580212": {
     "v": {
-      "available_models": ["gpt-5.6-sol", "grok-4.5", "Opus-4.8"],
+      "available_models": ["gpt-5.6-sol", "grok-4.6", "Opus-4.8"],
       "use_hidden_models": false,
       "default_model": "gpt-5.6-sol"
     }

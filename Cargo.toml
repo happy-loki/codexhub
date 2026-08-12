@@ -1,6 +1,6 @@
 [package]
 name = "codexhub"
-version = "0.4.21"
+version = "0.4.22"
 edition = "2024"
 license = "Apache-2.0"
 build = "build.rs"

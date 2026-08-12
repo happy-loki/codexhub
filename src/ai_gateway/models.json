@@ -663,8 +663,8 @@
       "comp_hash": "codexhub-grok-summary-v1",
       "reasoning_summary_format": "experimental",
       "default_reasoning_summary": "none",
-      "slug": "grok-4.5",
-      "display_name": "Grok-4.5",
+      "slug": "grok-4.6",
+      "display_name": "Grok-4.6",
       "description": "Grok Responses model for everyday coding.",
       "default_reasoning_level": "medium",
       "supported_reasoning_levels": [

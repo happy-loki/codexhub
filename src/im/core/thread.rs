@@ -950,7 +950,7 @@ fn thread_model_choices(
         "gpt-5.5",
         "gpt-5.4",
         "gpt-5.4-mini",
-        "grok-4.5",
+        "grok-4.6",
         "gpt-5.3-codex",
     ] {
         push_model_choice(&mut models, model.to_string(), model.to_string());
@@ -1188,7 +1188,7 @@ mod tests {
             .map(|choice| choice.value.as_str())
             .collect::<Vec<_>>();
 
-        for expected in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "grok-4.5"] {
+        for expected in ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "grok-4.6"] {
             assert!(
                 values.contains(&expected),
                 "missing model choice {expected}"

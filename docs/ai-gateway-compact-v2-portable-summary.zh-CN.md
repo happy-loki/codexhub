@@ -98,7 +98,7 @@ Codex 还会从压缩请求中移除本次新用户消息和 `<model_switch>`。
 
 ```text
 GPT-5.6 -> GPT-5.5
-GPT-5.6 -> Grok-4.5
+GPT-5.6 -> Grok-4.6
 ```
 
 Gateway 只能看到旧模型 `gpt-5.6` 和 `reason=comp_hash_changed`，无法无状态地判断目标是否仍为 OpenAI。

@@ -42,7 +42,7 @@ supports_search_tool。这个开关属于早期保守策略：当时转换链路
 
 ### 2.2 Grok
 
-Grok 走标准 OpenAI Responses，不是 Responses Lite。grok-4.5 目录里已经开启
+Grok 走标准 OpenAI Responses，不是 Responses Lite。grok-4.6 目录里已经开启
 supports_search_tool=true，所以 Codex 会把原生 tool_search 暴露出来。
 
 当前问题是 Grok adapter 只完成了这些工具兼容：

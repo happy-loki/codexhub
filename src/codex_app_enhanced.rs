@@ -2678,12 +2678,12 @@ mod tests {
     #[test]
     fn enhanced_script_embeds_models_and_only_patches_selected_statsig_sections() {
         let script = enhanced_statsig_script(
-            &["gpt-5.6-sol".into(), "grok-4.5".into()],
+            &["gpt-5.6-sol".into(), "grok-4.6".into()],
             "http://127.0.0.1:3847/api",
         )
         .expect("script");
         assert!(script.contains("gpt-5.6-sol"));
-        assert!(script.contains("grok-4.5"));
+        assert!(script.contains("grok-4.6"));
         assert!(script.contains("107580212"));
         assert!(!SUPPORTED_FEATURE_GATES.contains(&"824038554"));
         assert!(SUPPORTED_FEATURE_GATES.contains(&"3446105535"));
@@ -2931,8 +2931,8 @@ mod tests {
     #[test]
     fn normalized_models_trims_and_deduplicates() {
         assert_eq!(
-            normalized_models(vec![" grok-4.5 ".into(), "".into(), "grok-4.5".into()]),
-            vec!["grok-4.5"]
+            normalized_models(vec![" grok-4.6 ".into(), "".into(), "grok-4.6".into()]),
+            vec!["grok-4.6"]
         );
     }
 
@@ -3139,7 +3139,7 @@ mod tests {
             "gpt-5.5",
             "gpt-5.4",
             "gpt-5.4-mini",
-            "grok-4.5",
+            "grok-4.6",
             "deepseek-v4-pro",
             "deepseek-v4-flash",
             "GLM-5.2",

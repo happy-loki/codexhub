@@ -1,3 +1,26 @@
+CodexHub v0.4.22
+
+本次版本同步最新模型配置，并收敛大模型厂商配置界面。
+
+## 模型更新
+
+- Grok 模型统一更新为旗舰模型 `grok-4.6`，移除 `grok-4.5` 的目录、默认配置和界面引用。
+- DeepSeek Pro 默认使用原生 Responses 接口。
+- DeepSeek Responses 同时支持 `deepseek-v4-pro` 和 `deepseek-v4-flash`，默认选择 Pro。
+
+## 厂商配置界面
+
+- 隐藏“Chat Completions（其他厂商）”入口，避免用户误将 DeepSeek Pro 配置到旧 Chat 协议。
+- 底层 Chat Completions 类型和转换代码继续保留，方便后续接入其他仅支持 Chat 协议的厂商。
+- 已有旧 Chat 配置仍可读取和编辑，不会被自动删除。
+
+## 验证
+
+- `cargo fmt --check` 通过。
+- `cargo check --features gui --bin codexhub` 通过。
+- 完整测试通过：679 passed，2 ignored。
+- GitHub Actions 将构建 Windows、macOS 和 Linux 安装包。
+
 CodexHub v0.4.21
 
 本次版本重点完善 Telegram 远程任务体验，并修复 DeepSeek Responses 会话中工具调用历史不完整导致的请求失败。
