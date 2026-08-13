@@ -1,3 +1,26 @@
+CodexHub v0.4.23
+
+本次版本修复自动更新链路，避免残缺 Release、GitHub API 限流和过长更新说明影响用户升级。
+
+## 自动更新
+
+- 应用优先读取各平台的静态更新清单，不再回退到容易触发共享 IP 限流的 GitHub Releases API。
+- 应用内更新说明与开发者 Release Note 分离，并限制为最多 4 行，避免 macOS 更新按钮被长文本挤出窗口。
+- 更新检查失败时显示简洁提示，不再直接向普通用户展示多段 403/404 技术错误。
+- 新增 Linux `latest-linux.json`，统一 Windows、macOS 和 Linux 的更新清单机制。
+
+## 发布可靠性
+
+- macOS 创建 DMG 前释放双架构 Rust 和 wxWidgets 构建中间文件，修复 GitHub Runner 磁盘不足导致的发布失败。
+- Windows 和 Linux 只上传资产；macOS 在确认三个平台清单齐全后，才将 Release 晋升为 Latest。
+- 发布失败时继续保留上一个完整版本为 Latest，避免旧客户端进入缺少平台清单的半成品 Release。
+
+## 验证
+
+- `cargo fmt --check` 通过。
+- `cargo check --features gui --bin codexhub` 通过。
+- 更新清单与发布流程防回归检查通过。
+
 CodexHub v0.4.22
 
 本次版本同步最新模型配置，并收敛大模型厂商配置界面。
