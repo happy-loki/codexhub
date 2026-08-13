@@ -52,8 +52,6 @@ const UPDATE_MANIFEST_URL: &str =
     "https://github.com/happy-loki/codexhub/releases/latest/download/latest-linux.json";
 const LEGACY_UPDATE_MANIFEST_URL: &str =
     "https://github.com/happy-loki/codexhub/releases/latest/download/latest.json";
-const UPDATE_RELEASE_API_URL: &str =
-    "https://api.github.com/repos/happy-loki/codexhub/releases/latest";
 const UPDATE_RELEASE_PAGE_URL: &str = "https://github.com/happy-loki/codexhub/releases/latest";
 const DASHBOARD_REFRESH_INTERVAL_MS: i32 = 10_000;
 const REQUEST_LOG_REFRESH_INTERVAL_MS: i32 = 5_000;

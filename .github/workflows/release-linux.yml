@@ -118,6 +118,61 @@ jobs:
           test -n "$APPIMAGE"
           mv "$APPIMAGE" "$DIST_ROOT/CodexHub Linux x86_64.AppImage"
 
+      - name: Write Linux Update Metadata
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          from urllib.parse import quote
+
+          dist = Path("target/dist")
+          appimage = dist / "CodexHub Linux x86_64.AppImage"
+          tarball = dist / "CodexHub Linux x86_64.tar.gz"
+          release_tag = os.environ["RELEASE_TAG"]
+          repository = os.environ["RELEASE_REPOSITORY"]
+          release_url = f"https://github.com/{repository}/releases/tag/{release_tag}"
+          download_base_url = f"https://github.com/{repository}/releases/download/{release_tag}"
+          update_notes = Path("UPDATE_NOTES.md").read_text(encoding="utf-8").strip()
+
+          def sha256(path: Path) -> str:
+              digest = hashlib.sha256()
+              with path.open("rb") as handle:
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          manifest = {
+              "version": release_tag,
+              "releaseUrl": release_url,
+              "notes": update_notes,
+              "assets": {
+                  "linux-x86_64": {
+                      "type": "appimage",
+                      "url": f"{download_base_url}/{quote(appimage.name)}",
+                      "sha256": sha256(appimage),
+                      "size": appimage.stat().st_size,
+                  },
+                  "linux-tar-x86_64": {
+                      "type": "tar.gz",
+                      "url": f"{download_base_url}/{quote(tarball.name)}",
+                      "sha256": sha256(tarball),
+                      "size": tarball.stat().st_size,
+                  },
+              },
+          }
+          (dist / "latest-linux.json").write_text(
+              json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          PY
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -125,6 +180,7 @@ jobs:
           path: |
             target/dist/CodexHub Linux x86_64.AppImage
             target/dist/CodexHub Linux x86_64.tar.gz
+            target/dist/latest-linux.json
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
@@ -133,7 +189,10 @@ jobs:
           overwrite_files: true
           body_path: RELEASE_NOTES.md
           prerelease: ${{ contains(github.ref_name, '-') }}
-          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
+          # macOS publishes last and promotes the release only after every
+          # platform-specific update manifest is available.
+          make_latest: false
           files: |
             target/dist/CodexHub Linux x86_64.AppImage
             target/dist/CodexHub Linux x86_64.tar.gz
+            target/dist/latest-linux.json

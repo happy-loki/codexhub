@@ -224,6 +224,18 @@ jobs:
           rm -f "$NOTARY_ZIP"
           ditto -c -k --keepParent "$APP" "$ZIP"
 
+          # The signed app and update ZIP are self-contained now. Universal
+          # builds leave two complete Rust/wxWidgets trees behind, which can
+          # exhaust the hosted runner while hdiutil creates its temporary image.
+          echo "Disk usage before removing build intermediates:"
+          df -h
+          rm -rf \
+            target/aarch64-apple-darwin \
+            target/x86_64-apple-darwin \
+            target/release
+          echo "Disk usage before creating DMG:"
+          df -h
+
           rm -rf "$DMG_STAGING"
           mkdir -p "$DMG_STAGING"
           ditto "$APP" "$DMG_STAGING/CodexHub.app"
@@ -267,6 +279,7 @@ jobs:
           repository = os.environ["RELEASE_REPOSITORY"]
           release_url = f"https://github.com/{repository}/releases/tag/{release_tag}"
           download_base_url = f"https://github.com/{repository}/releases/download/{release_tag}"
+          update_notes = Path("UPDATE_NOTES.md").read_text(encoding="utf-8").strip()
 
           def sha256(path: Path) -> str:
               digest = hashlib.sha256()
@@ -278,7 +291,7 @@ jobs:
           manifest = {
               "version": release_tag,
               "releaseUrl": release_url,
-              "notes": "",
+              "notes": update_notes,
               "assets": {
                   asset_key: {
                       "type": "dmg",
@@ -305,7 +318,7 @@ jobs:
           intel_manifest = {
               "version": release_tag,
               "releaseUrl": release_url,
-              "notes": "",
+              "notes": update_notes,
               "assets": {
                   "macos-intel": manifest["assets"][asset_key],
                   "macos-sparkle-intel": manifest["assets"][sparkle_key],
@@ -326,6 +339,32 @@ jobs:
             target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.app.zip
             target/dist/${{ matrix.manifest_name }}
             target/dist/${{ matrix.intel_manifest_name }}
+
+      - name: Verify Companion Update Manifests
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          required=(latest-windows.json latest-linux.json)
+          for attempt in {1..30}; do
+            assets="$(gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' 2>/dev/null || true)"
+            missing=()
+            for name in "${required[@]}"; do
+              if ! grep -Fxq "$name" <<<"$assets"; then
+                missing+=("$name")
+              fi
+            done
+            if [ "${#missing[@]}" -eq 0 ]; then
+              echo "All companion update manifests are available."
+              exit 0
+            fi
+            echo "Waiting for companion manifests: ${missing[*]} (attempt $attempt/30)"
+            sleep 20
+          done
+          echo "Release is incomplete; refusing to promote it to Latest." >&2
+          exit 1
 
       - name: Publish GitHub Release
         if: startsWith(github.ref, 'refs/tags/')

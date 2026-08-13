@@ -24,8 +24,7 @@ use super::daemon::hide_command_window;
 use super::text::GuiText;
 use super::{
     FrameTimerStore, GuiTimers, LEGACY_UPDATE_MANIFEST_URL, UPDATE_CHECK_TIMEOUT,
-    UPDATE_MANIFEST_URL, UPDATE_RELEASE_API_URL, UPDATE_RELEASE_PAGE_URL,
-    apply_outbound_blocking_proxy,
+    UPDATE_MANIFEST_URL, UPDATE_RELEASE_PAGE_URL, apply_outbound_blocking_proxy,
 };
 use super::{confirm_open_update_release, show_error, show_info};
 
@@ -74,21 +73,6 @@ struct UpdateAsset {
     sha256: Option<String>,
     #[serde(default, rename = "type")]
     asset_type: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct GitHubRelease {
-    tag_name: String,
-    html_url: String,
-    body: Option<String>,
-    #[serde(default)]
-    assets: Vec<GitHubReleaseAsset>,
-}
-
-#[derive(Deserialize)]
-struct GitHubReleaseAsset {
-    name: String,
-    browser_download_url: String,
 }
 
 #[derive(Clone, Debug)]
@@ -226,15 +210,9 @@ fn check_for_updates(text: GuiText) -> Result<UpdateCheckOutcome, String> {
 
     let release = fetch_update_manifest(text, &client, UPDATE_MANIFEST_URL).or_else(
         |platform_manifest_err| {
-            fetch_update_manifest(text, &client, LEGACY_UPDATE_MANIFEST_URL).or_else(
+            fetch_update_manifest(text, &client, LEGACY_UPDATE_MANIFEST_URL).map_err(
                 |legacy_manifest_err| {
-                    fetch_github_latest_release(text, &client).map_err(|api_err| {
-                        text.update_sources_failed(
-                            &api_err,
-                            &platform_manifest_err,
-                            &legacy_manifest_err,
-                        )
-                    })
+                    text.update_sources_failed(&platform_manifest_err, &legacy_manifest_err)
                 },
             )
         },
@@ -262,21 +240,6 @@ fn fetch_update_manifest(
         release_url,
         download,
         notes: manifest.notes,
-    })
-}
-
-fn fetch_github_latest_release(
-    text: GuiText,
-    client: &Client,
-) -> Result<LatestReleaseInfo, String> {
-    let body = fetch_update_text(text, client, UPDATE_RELEASE_API_URL)?;
-    let release: GitHubRelease = serde_json::from_str(&body)
-        .map_err(|err| text.github_release_parse_failed(&err.to_string()))?;
-    Ok(LatestReleaseInfo {
-        version: release.tag_name,
-        release_url: release.html_url,
-        download: platform_download_from_github_assets(&release.assets),
-        notes: release.body,
     })
 }
 
@@ -387,7 +350,21 @@ fn update_notes_for_dialog(text: GuiText, notes: Option<&str>) -> String {
     if notes.is_empty() {
         return text.release_notes_default().to_string();
     }
-    text.release_notes(&truncate_for_dialog(notes, 700))
+    text.release_notes(&compact_update_notes(notes))
+}
+
+fn compact_update_notes(notes: &str) -> String {
+    const MAX_LINES: usize = 4;
+    const MAX_CHARS: usize = 280;
+
+    let compact = notes
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .take(MAX_LINES)
+        .collect::<Vec<_>>()
+        .join("\n");
+    truncate_for_dialog(&compact, MAX_CHARS)
 }
 
 impl UpdateDownload {
@@ -433,27 +410,6 @@ fn platform_download_for_platform(
         .and_then(UpdateDownload::from_asset)
 }
 
-fn platform_download_from_github_assets(assets: &[GitHubReleaseAsset]) -> Option<UpdateDownload> {
-    platform_download_from_github_assets_for_platform(current_update_platform(), assets)
-}
-
-fn platform_download_from_github_assets_for_platform(
-    platform: UpdatePlatform,
-    assets: &[GitHubReleaseAsset],
-) -> Option<UpdateDownload> {
-    assets.iter().find_map(|asset| {
-        if platform_github_asset_matches(platform, &asset.name) {
-            Some(UpdateDownload {
-                url: asset.browser_download_url.clone(),
-                sha256: None,
-                asset_type: Some(platform_installer_asset_type(platform).to_string()),
-            })
-        } else {
-            None
-        }
-    })
-}
-
 #[cfg(target_os = "windows")]
 fn current_update_platform() -> UpdatePlatform {
     UpdatePlatform::Windows
@@ -467,25 +423,6 @@ fn current_update_platform() -> UpdatePlatform {
 #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
 fn current_update_platform() -> UpdatePlatform {
     UpdatePlatform::Linux
-}
-
-fn platform_github_asset_matches(platform: UpdatePlatform, name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    match platform {
-        UpdatePlatform::Windows => {
-            name.ends_with(".msi") && name.contains("windows") && name.contains("x64")
-        }
-        UpdatePlatform::Macos => name.ends_with(".dmg") && name.contains("macos"),
-        UpdatePlatform::Linux => name.ends_with(".appimage") || name.ends_with(".tar.gz"),
-    }
-}
-
-fn platform_installer_asset_type(platform: UpdatePlatform) -> &'static str {
-    match platform {
-        UpdatePlatform::Windows => "msi",
-        UpdatePlatform::Macos => "dmg",
-        UpdatePlatform::Linux => "appimage",
-    }
 }
 
 fn platform_manifest_asset_key(platform: UpdatePlatform) -> &'static str {
@@ -875,6 +812,37 @@ mod update_tests {
     }
 
     #[test]
+    fn in_app_update_notes_are_bounded_to_four_short_lines() {
+        let notes = "# Developer changelog\n\n- first user change\n- second user change\n- third user change\n- fourth user change\n- internal verification details";
+
+        let compact = compact_update_notes(notes);
+
+        assert_eq!(compact.lines().count(), 4);
+        assert!(compact.chars().count() <= 280);
+        assert!(compact.contains("fourth user change"));
+        assert!(!compact.contains("internal verification"));
+    }
+
+    #[test]
+    fn release_workflows_embed_separate_user_update_notes() {
+        let windows = include_str!("../../.github/workflows/release-windows.yml");
+        let macos = include_str!("../../.github/workflows/release-macos.yml");
+        let linux = include_str!("../../.github/workflows/release-linux.yml");
+
+        assert!(windows.contains("Get-Content \"UPDATE_NOTES.md\""));
+        assert!(windows.contains("notes = $updateNotes"));
+        assert!(macos.contains("Path(\"UPDATE_NOTES.md\").read_text"));
+        assert!(macos.contains("\"notes\": update_notes"));
+        assert!(linux.contains("Path(\"UPDATE_NOTES.md\").read_text"));
+        assert!(linux.contains("target/dist/latest-linux.json"));
+        assert!(windows.contains("make_latest: false"));
+        assert!(linux.contains("make_latest: false"));
+        assert!(macos.contains("make_latest: ${{ contains(github.ref_name, '-')"));
+        assert!(macos.contains("required=(latest-windows.json latest-linux.json)"));
+        assert!(macos.contains("refusing to promote it to Latest"));
+    }
+
+    #[test]
     fn macos_update_manifest_url_is_arch_independent() {
         assert!(super::super::MACOS_UPDATE_MANIFEST_URL.ends_with("/latest-macos.json"));
         assert!(!super::super::MACOS_UPDATE_MANIFEST_URL.contains("intel"));
@@ -905,30 +873,10 @@ mod update_tests {
             notes: None,
             assets,
         };
-        let release_assets = vec![
-            GitHubReleaseAsset {
-                name: "CodexHub-v9.9.9-macos-universal.dmg".to_string(),
-                browser_download_url: "https://example.test/CodexHub.dmg".to_string(),
-            },
-            GitHubReleaseAsset {
-                name: "CodexHub-v9.9.9-macos-universal.app.zip".to_string(),
-                browser_download_url: "https://example.test/CodexHub.app.zip".to_string(),
-            },
-        ];
-
         assert_eq!(
             platform_download_for_platform(UpdatePlatform::Macos, &manifest)
                 .expect("macOS manifest download")
                 .url,
-            "https://example.test/CodexHub.dmg"
-        );
-        assert_eq!(
-            platform_download_from_github_assets_for_platform(
-                UpdatePlatform::Macos,
-                &release_assets
-            )
-            .expect("macOS GitHub asset download")
-            .url,
             "https://example.test/CodexHub.dmg"
         );
     }
@@ -942,6 +890,11 @@ mod update_tests {
         assert!(workflow.contains("intel_manifest_name: latest-macos-intel.json"));
         assert!(workflow.contains("\"macos-intel\": manifest[\"assets\"][asset_key]"));
         assert!(workflow.contains("target/dist/${{ matrix.intel_manifest_name }}"));
+        let cleanup = workflow
+            .find("rm -rf \\\n            target/aarch64-apple-darwin")
+            .expect("universal build cleanup");
+        let create_dmg = workflow.find("hdiutil create").expect("DMG creation");
+        assert!(cleanup < create_dmg);
     }
 
     #[test]
@@ -982,14 +935,6 @@ mod update_tests {
                 .url,
             "https://example.test/CodexHub.tar.gz"
         );
-        assert!(platform_github_asset_matches(
-            UpdatePlatform::Windows,
-            "CodexHub-v9.9.9-windows-x64.msi"
-        ));
-        assert!(platform_github_asset_matches(
-            UpdatePlatform::Linux,
-            "CodexHub.Linux.x86_64.AppImage"
-        ));
     }
 
     #[cfg(target_os = "windows")]

@@ -1944,21 +1944,16 @@ impl GuiText {
 
     pub(super) fn update_sources_failed(
         self,
-        api_err: &str,
         platform_manifest_err: &str,
         legacy_manifest_err: &str,
     ) -> String {
         match self.locale {
-            GuiLocale::ZhCn => {
-                format!(
-                    "无法读取 GitHub Release 更新信息：{api_err}\n平台更新清单检查结果：{platform_manifest_err}\n旧版 latest.json 检查结果：{legacy_manifest_err}"
-                )
-            }
-            GuiLocale::EnUs => {
-                format!(
-                    "Failed to read GitHub Release update info: {api_err}\nPlatform manifest result: {platform_manifest_err}\nLegacy latest.json result: {legacy_manifest_err}"
-                )
-            }
+            GuiLocale::ZhCn => format!(
+                "暂时无法检查更新，请稍后重试或打开发布页面。\n\n详细信息：{platform_manifest_err}; {legacy_manifest_err}"
+            ),
+            GuiLocale::EnUs => format!(
+                "Unable to check for updates right now. Try again later or open the Releases page.\n\nDetails: {platform_manifest_err}; {legacy_manifest_err}"
+            ),
         }
     }
 
@@ -1966,13 +1961,6 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => format!("latest.json 无法解析：{err}"),
             GuiLocale::EnUs => format!("Failed to parse latest.json: {err}"),
-        }
-    }
-
-    pub(super) fn github_release_parse_failed(self, err: &str) -> String {
-        match self.locale {
-            GuiLocale::ZhCn => format!("GitHub Release API 无法解析：{err}"),
-            GuiLocale::EnUs => format!("Failed to parse GitHub Release API response: {err}"),
         }
     }
 
@@ -2056,8 +2044,8 @@ impl GuiText {
 
     pub(super) fn release_notes_default(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "Release 页面包含安装包和更新说明。",
-            GuiLocale::EnUs => "The Release page includes installers and release notes.",
+            GuiLocale::ZhCn => "本次更新包含体验优化和问题修复。",
+            GuiLocale::EnUs => "This update includes usability improvements and bug fixes.",
         }
     }
 

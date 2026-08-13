@@ -213,11 +213,12 @@ jobs:
           $zipSize = (Get-Item $zipPath).Length
           $msiUrl = "$downloadBaseUrl/$env:WINDOWS_MSI_NAME"
           $zipUrl = "$downloadBaseUrl/$env:WINDOWS_ZIP_NAME"
+          $updateNotes = (Get-Content "UPDATE_NOTES.md" -Raw -Encoding UTF8).Trim()
 
           $manifest = [ordered]@{
             version = $env:RELEASE_TAG
             releaseUrl = $releaseUrl
-            notes = ""
+            notes = $updateNotes
             assets = [ordered]@{
               "windows-x86_64" = [ordered]@{
                 type = "msi"
@@ -282,7 +283,9 @@ jobs:
           overwrite_files: true
           body_path: RELEASE_NOTES.md
           prerelease: ${{ contains(github.ref_name, '-') }}
-          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
+          # macOS publishes last and promotes the release only after every
+          # platform-specific update manifest is available.
+          make_latest: false
           files: |
             target/dist/CodexHub-*-windows-x64.zip
             target/dist/CodexHub-*-windows-x64.msi
