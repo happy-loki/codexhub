@@ -134,13 +134,21 @@ fn normalize_deepseek_model(model: &mut Value) {
         return;
     }
 
+    let is_vision_flash = slug == "deepseek-v4-flash";
     if let Some(object) = model.as_object_mut() {
         object.insert("web_search_tool_type".to_string(), json!("text"));
         object.insert(
             "supports_image_detail_original".to_string(),
-            Value::Bool(false),
+            Value::Bool(is_vision_flash),
         );
-        object.insert("input_modalities".to_string(), json!(["text"]));
+        object.insert(
+            "input_modalities".to_string(),
+            if is_vision_flash {
+                json!(["text", "image"])
+            } else {
+                json!(["text"])
+            },
+        );
     }
 }
 
@@ -202,6 +210,14 @@ mod tests {
             false
         );
         assert_eq!(response["models"][5]["input_modalities"], json!(["text"]));
+        assert_eq!(
+            response["models"][6]["supports_image_detail_original"],
+            true
+        );
+        assert_eq!(
+            response["models"][6]["input_modalities"],
+            json!(["text", "image"])
+        );
     }
 
     #[test]
@@ -252,6 +268,11 @@ mod tests {
         assert_eq!(model["input_modalities"], json!(["text"]));
         assert_eq!(model["web_search_tool_type"], "text");
         assert_eq!(model["supports_search_tool"], true);
+
+        let vision_model =
+            &configured_models_response(&config(&["deepseek-v4-flash"]))["models"][0];
+        assert_eq!(vision_model["supports_image_detail_original"], true);
+        assert_eq!(vision_model["input_modalities"], json!(["text", "image"]));
     }
 
     #[test]
@@ -373,6 +394,23 @@ mod tests {
             assert_eq!(model["minimal_client_version"], "0.144.0", "model {slug}");
             assert_eq!(model["priority"], priority, "model {slug}");
             assert_eq!(model["supports_search_tool"], true, "model {slug}");
+            if slug == "deepseek-v4-flash" {
+                assert_eq!(
+                    model["supports_image_detail_original"], true,
+                    "model {slug}"
+                );
+                assert_eq!(
+                    model["input_modalities"],
+                    json!(["text", "image"]),
+                    "model {slug}"
+                );
+            } else {
+                assert_eq!(
+                    model["supports_image_detail_original"], false,
+                    "model {slug}"
+                );
+                assert_eq!(model["input_modalities"], json!(["text"]), "model {slug}");
+            }
             assert_eq!(
                 model["availability_nux"]["message"],
                 "不管你是贫穷还是富有, deepseek让所有人都感受到AI的乐趣, 人民的AI",

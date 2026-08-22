@@ -889,9 +889,10 @@
       "apply_patch_tool_type": "freeform",
       "web_search_tool_type": "text",
       "input_modalities": [
-        "text"
+        "text",
+        "image"
       ],
-      "supports_image_detail_original": false,
+      "supports_image_detail_original": true,
       "truncation_policy": {
         "mode": "tokens",
         "limit": 10000

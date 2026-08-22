@@ -1,3 +1,11 @@
+CodexHub v0.4.24
+
+本次版本新增 DeepSeek 多模态识图支持，并保持原有模型选择方式不变。
+
+- `deepseek-v4-flash` 现在支持图片理解。
+- 图片请求会自动使用 DeepSeek 官方视觉模型处理。
+- `deepseek-v4-pro` 保持文本和工具调用能力不变。
+
 CodexHub v0.4.23
 
 本次版本修复自动更新链路，避免残缺 Release、GitHub API 限流和过长更新说明影响用户升级。
