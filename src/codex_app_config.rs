@@ -2708,7 +2708,12 @@ fn cleanup_codexhub_config(
             doc.remove("model_provider");
         }
     }
+    // Keep ai-gateway so historical sessions can still be opened after the
+    // active provider is restored to the user's original configuration.
     for provider_name in managed_provider_names {
+        if provider_name == AI_GATEWAY_PROVIDER_NAME {
+            continue;
+        }
         remove_provider_table(&mut doc, &provider_name);
     }
     if !config_existed_before_first_write {
@@ -4787,7 +4792,7 @@ base_url = "https://api.openai.com/v1"
         assert!(!config.contains("chatgpt_base_url"));
         assert!(!config.contains("model_provider = \"ai-gateway\""));
         assert!(config.contains("model_provider = \"openai\""));
-        assert!(!config.contains("[model_providers.ai-gateway]"));
+        assert!(config.contains("[model_providers.ai-gateway]"));
         assert!(config.contains("model = \"codex-app-later-model\""));
         assert!(config.contains("new_codex_app_flag = true"));
         assert!(config.contains("[model_providers.openai]"));
@@ -4832,7 +4837,7 @@ requires_openai_auth = true
         let restored = std::fs::read_to_string(&config_path).expect("read restored config");
         assert!(restored.contains("model_provider = \"custom\""));
         assert!(restored.contains("[model_providers.custom]"));
-        assert!(!restored.contains("[model_providers.ai-gateway]"));
+        assert!(restored.contains("[model_providers.ai-gateway]"));
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -4882,7 +4887,7 @@ base_url = "https://custom.example/v1"
         let restored = std::fs::read_to_string(&config_path).expect("read restored config");
         assert!(restored.contains("model_provider = \"custom\""));
         assert!(restored.contains("[model_providers.custom]"));
-        assert!(!restored.contains("[model_providers.ai-gateway]"));
+        assert!(restored.contains("[model_providers.ai-gateway]"));
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -4922,7 +4927,7 @@ base_url = "https://custom.example/v1"
         assert!(restored.contains("model_provider = \"later\""));
         assert!(restored.contains("[model_providers.later]"));
         assert!(restored.contains("[model_providers.custom]"));
-        assert!(!restored.contains("[model_providers.ai-gateway]"));
+        assert!(restored.contains("[model_providers.ai-gateway]"));
 
         let _ = std::fs::remove_dir_all(codex_home);
     }
@@ -4944,7 +4949,9 @@ base_url = "https://custom.example/v1"
         assert!(report.removed_chatgpt_base_url);
         assert!(report.removed_model_provider);
         assert!(report.removed_auth);
-        assert!(!config_path.exists());
+        assert!(config_path.exists());
+        let config = std::fs::read_to_string(&config_path).expect("read retained config");
+        assert!(config.contains("[model_providers.ai-gateway]"));
         assert!(!auth_path.exists());
 
         let _ = std::fs::remove_dir_all(managed_backup_paths(&codex_home).dir);
@@ -4991,7 +4998,7 @@ base_url = "https://api.example.invalid"
         let config = std::fs::read_to_string(&config_path).expect("read config");
         assert!(!config.contains("chatgpt_base_url"));
         assert!(!config.contains("model_provider = \"ai-gateway\""));
-        assert!(!config.contains("[model_providers.ai-gateway]"));
+        assert!(config.contains("[model_providers.ai-gateway]"));
         assert!(config.contains("model = \"gpt-5.5\""));
         assert!(config.contains("[model_providers.keep]"));
         assert!(config.contains("base_url = \"https://api.example.invalid\""));
@@ -5036,7 +5043,7 @@ base_url = "https://api.example.invalid"
         assert!(removed_chatgpt_base_url);
         assert!(removed_model_provider);
         let config = std::fs::read_to_string(&config_path).expect("read cleaned config");
-        assert!(!config.contains("[model_providers.ai-gateway]"));
+        assert!(config.contains("[model_providers.ai-gateway]"));
         assert!(!config.contains("[model_providers.ai-codex]"));
         assert!(config.contains("[model_providers.keep]"));
 

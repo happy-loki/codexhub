@@ -1,3 +1,26 @@
+CodexHub v0.4.25
+
+本次版本同步 GLM 5.3 模型目录，并修复恢复 Codex 原有配置后历史会话无法继续打开的问题。
+
+## 模型目录
+
+- 新增 `GLM-5.3` 和 `GLM-5.3-Flash` 模型条目。
+- 同步 GLM 模型的图片输入、搜索、推理和上下文能力配置。
+- 保留 `availability_nux` 等 Codex 模型目录字段，确保模型列表显示一致。
+
+## Codex App 配置恢复
+
+- 点击“恢复 Codex 原有配置”时，仍会恢复用户原来的默认 provider。
+- 不再删除 `[model_providers.ai-gateway]` 配置段。
+- 旧的 ai-gateway 历史会话可以继续找到对应 provider，避免点击会话时报“未找到模型提供者 ai-gateway”。
+- 不修改 rollout 历史文件和 Codex state SQLite 数据库。
+
+## 验证
+
+- `cargo fmt --all -- --check` 通过。
+- 完整测试通过：682 passed，2 ignored。
+- `git diff --check` 通过。
+
 CodexHub v0.4.24
 
 本次版本新增 DeepSeek 多模态识图支持，并保持原有模型选择方式不变。
