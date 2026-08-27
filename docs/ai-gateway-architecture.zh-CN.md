@@ -4,7 +4,7 @@
 
 本文记录 `codexhub` 内置 AI Gateway 的目标、协议边界、缓存策略和分期实现计划。它是后续实现的约束文档，不代表当前代码已经完成这些能力。
 
-实现细节和逐步计划见 [`ai-gateway-impl.zh-CN.md`](ai-gateway-impl.zh-CN.md)。后续 provider 接入重心见 [`ai-gateway-anthropic-first-roadmap.zh-CN.md`](ai-gateway-anthropic-first-roadmap.zh-CN.md)。智谱 GLM 的具体对接流程见 [`ai-gateway-glm-anthropic-integration.zh-CN.md`](ai-gateway-glm-anthropic-integration.zh-CN.md)。
+实现细节和逐步计划见 [`ai-gateway-impl.zh-CN.md`](ai-gateway-impl.zh-CN.md)。后续 provider 接入重心见 [`ai-gateway-anthropic-first-roadmap.zh-CN.md`](ai-gateway-anthropic-first-roadmap.zh-CN.md)。智谱普通 API 与 Coding Plan 的统一 Anthropic 对接流程见 [`ai-gateway-glm-anthropic-integration.zh-CN.md`](ai-gateway-glm-anthropic-integration.zh-CN.md)。
 
 当前已落地链路：
 

@@ -163,6 +163,28 @@ pub fn provider_display_base_url(base_url: &str) -> String {
     }
 }
 
+/// 智谱 Anthropic 渠道使用的服务类型。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ZaiAccessMode {
+    /// 智谱普通 API。
+    Api,
+    /// GLM Coding Plan。
+    CodingPlan,
+}
+
+impl Default for ZaiAccessMode {
+    fn default() -> Self {
+        Self::Api
+    }
+}
+
+impl ZaiAccessMode {
+    fn is_api(&self) -> bool {
+        matches!(self, Self::Api)
+    }
+}
+
 /// 单个 provider 配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -176,6 +198,9 @@ pub struct ProviderConfig {
     /// provider 兼容 profile。Anthropic Messages 兼容厂商优先使用该字段表达差异。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compatibility: Option<String>,
+    /// 智谱 Anthropic 渠道的服务类型；其它 provider 忽略该字段。
+    #[serde(default, skip_serializing_if = "ZaiAccessMode::is_api")]
+    pub zai_access_mode: ZaiAccessMode,
     /// 上游 API base URL。
     pub base_url: String,
     /// 可选的模型列表 API URL。为空时 GUI 按 base_url 推导 `/models`。
@@ -187,7 +212,7 @@ pub struct ProviderConfig {
     pub models: Vec<String>,
     /// Codex 侧 model 到上游 provider model 的映射。
     ///
-    /// 例如 `glm-5.2 = "GLM-5.2"`。路由使用 key 匹配 Codex 请求，出站使用 value。
+    /// 例如 `glm-5.3 = "GLM-5.3"`。路由使用 key 匹配 Codex 请求，出站使用 value。
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub model_aliases: BTreeMap<String, String>,
     /// 可选的 prompt_cache_retention 覆盖。
@@ -206,6 +231,7 @@ impl Default for ProviderConfig {
             enabled: true,
             provider_type: ProviderType::OpenAiResponses,
             compatibility: None,
+            zai_access_mode: ZaiAccessMode::default(),
             base_url: String::new(),
             models_url: None,
             api_key: String::new(),
@@ -299,6 +325,22 @@ mod tests {
     }
 
     #[test]
+    fn zai_access_mode_uses_stable_wire_names() {
+        assert_eq!(
+            serde_json::to_string(&ZaiAccessMode::Api).unwrap(),
+            r#""api""#
+        );
+        assert_eq!(
+            serde_json::to_string(&ZaiAccessMode::CodingPlan).unwrap(),
+            r#""coding_plan""#
+        );
+        assert_eq!(
+            ProviderConfig::default().zai_access_mode,
+            ZaiAccessMode::Api
+        );
+    }
+
+    #[test]
     fn test_exact_match() {
         let config = make_config(vec![
             make_provider(
@@ -375,28 +417,28 @@ mod tests {
         let config = make_config(vec![make_provider(
             "glm",
             ProviderType::AnthropicMessages,
-            vec!["GLM-5.2"],
+            vec!["GLM-5.3"],
         )]);
 
-        let provider = config.select_provider("glm-5.2").unwrap();
+        let provider = config.select_provider("glm-5.3").unwrap();
         assert_eq!(provider.name, "glm");
-        assert_eq!(provider.resolve_upstream_model("glm-5.2"), Some("GLM-5.2"));
+        assert_eq!(provider.resolve_upstream_model("glm-5.3"), Some("GLM-5.3"));
     }
 
     #[test]
     fn test_model_alias_routes_to_provider_model() {
         let mut provider =
-            make_provider("glm", ProviderType::AnthropicMessages, vec!["xx-GLM-5-2"]);
+            make_provider("glm", ProviderType::AnthropicMessages, vec!["xx-GLM-5-3"]);
         provider
             .model_aliases
-            .insert("glm-5.2".to_string(), "xx-GLM-5-2".to_string());
+            .insert("glm-5.3".to_string(), "xx-GLM-5-3".to_string());
         let config = make_config(vec![provider]);
 
-        let provider = config.select_provider("glm-5.2").unwrap();
+        let provider = config.select_provider("glm-5.3").unwrap();
         assert_eq!(provider.name, "glm");
         assert_eq!(
-            provider.resolve_upstream_model("glm-5.2"),
-            Some("xx-GLM-5-2")
+            provider.resolve_upstream_model("glm-5.3"),
+            Some("xx-GLM-5-3")
         );
     }
 
@@ -668,11 +710,12 @@ mod tests {
             name = "glm"
             providerType = "anthropic_messages"
             compatibility = "glm_anthropic"
+            zaiAccessMode = "coding_plan"
             baseUrl = "https://open.bigmodel.cn/api/anthropic"
             modelsUrl = "https://open.bigmodel.cn/api/paas/v4/models"
             apiKey = "sk-glm"
             models = ["glm-4.6"]
-            modelAliases = { "glm-5.2" = "GLM-5.2" }
+            modelAliases = { "glm-5.3" = "GLM-5.3" }
 
             [[providers]]
             name = "grok"
@@ -722,15 +765,19 @@ mod tests {
             Some("glm_anthropic")
         );
         assert_eq!(
+            config.providers[3].zai_access_mode,
+            ZaiAccessMode::CodingPlan
+        );
+        assert_eq!(
             config.providers[3].models_url.as_deref(),
             Some("https://open.bigmodel.cn/api/paas/v4/models")
         );
         assert_eq!(
             config.providers[3]
                 .model_aliases
-                .get("glm-5.2")
+                .get("glm-5.3")
                 .map(String::as_str),
-            Some("GLM-5.2")
+            Some("GLM-5.3")
         );
     }
 

@@ -10,7 +10,7 @@
 | Local Codex access | Does not modify Codex frontend code. Connect Codex App, the VS Code extension, and Codex CLI through the local backend. |
 | Codex session management | Manage Codex session history from the GUI. After switching providers or enabling AI Gateway, move old sessions into the current entry so they still appear in the Codex App sidebar. |
 | Manage Codex sessions from IM | Use the native Codex remote-control protocol to create and resume Codex sessions from IM. |
-| Built-in AI Gateway | Keep Codex App on its native Responses entry while routing model calls to OpenAI, DeepSeek, Anthropic/Claude, Zhipu GLM, or compatible providers from the local GUI. |
+| Built-in AI Gateway | Keep Codex App on its native Responses entry while routing model calls to OpenAI, DeepSeek, Anthropic/Claude, and Z.AI Anthropic (API / Coding Plan) from the local GUI. |
 
 <p align="center">
   <img src="docs/assets/product/main.png" alt="CodexHub GUI status and config UI" width="900">
@@ -41,7 +41,7 @@ For Codex App and the VS Code extension, the usual flow is: download the app -> 
 - macOS, Windows, or Linux device
 - Codex App, the Codex VS Code extension, or Codex CLI
 - No ChatGPT account and no acceleration network required
-- At least one model API key: OpenAI Responses, DeepSeek, Anthropic/Claude, Zhipu GLM, or another compatible provider
+- At least one model API key: OpenAI Responses, DeepSeek, Anthropic/Claude, Z.AI Anthropic (API / Coding Plan), or another compatible provider
 - Optional IM channel: needed only for Feishu, WeChat, or Telegram remote control
 
 ### 1. Install
@@ -79,7 +79,7 @@ Open the `Codex 接入` page and add a model provider in the AI Gateway area. Th
 - API Key
 - Model list
 
-If the upstream model name differs from the name you want to expose in Codex, use `Edit Model Aliases`. For example, the upstream model can be `GLM-5.2` while Codex shows `glm-5.2`.
+If the upstream model name differs from the name you want to expose in Codex, use `Edit Model Aliases`. For example, the upstream model can be `GLM-5.3` while Codex shows `glm-5.3`.
 
 If a provider rejects Codex's image generation tool, enable `Filter image generation tool`. It takes effect immediately and removes `image_generation` from outgoing AI Gateway requests.
 
@@ -145,7 +145,7 @@ Current highlights:
 - DeepSeek Responses providers for the native DeepSeek `/v1/responses` API, including hosted web search, function tools, and `apply_patch`.
 - DeepSeek Chat / Chat Completions providers retain the existing conversion path back to Codex-compatible Responses output.
 - Anthropic Messages providers for Claude / Anthropic-compatible models, including text, images, tool calls, thinking output, and web search conversion.
-- Zhipu GLM through the Anthropic-compatible path, including GLM web search normalization.
+- Z.AI Anthropic for both the standard API and Coding Plan, with API-key model discovery from Z.AI's separate model catalogs and GLM web search normalization.
 - Model aliases for case differences, provider-specific names, and third-party relay names.
 - Codex visible model selection.
 - Request logs with original Codex request, upstream request, response or error, tokens, cache usage, cost, latency, TTFT, and request body size.

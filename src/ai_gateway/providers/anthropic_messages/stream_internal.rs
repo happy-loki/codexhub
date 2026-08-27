@@ -10,11 +10,10 @@
 //! token-by-token, this rewriter:
 //!   * emits a single `response.created` + `response.in_progress` up front,
 //!   * forwards every real content event (text/reasoning deltas, tool and
-//!     web-search progress, item added/done) while renumbering `output_index`
+//!     converter-generated web-search progress, item added/done) while renumbering `output_index`
 //!     and `sequence_number` into one global sequence,
 //!   * swallows each per-round envelope event, accumulating the completed
 //!     output items and usage,
-//!   * emits web-search progress items the gateway injects between rounds, and
 //!   * emits a single terminal `response.completed` (or `response.incomplete`).
 
 use std::collections::HashMap;
@@ -172,34 +171,6 @@ impl InternalSseEnvelope {
         self.next_output_index += 1;
         self.index_map.insert(local, global);
         global
-    }
-
-    /// Reserves the next global output index for a gateway-injected item (such
-    /// as a web-search progress placeholder) that does not originate from the
-    /// converter.
-    pub(super) fn reserve_output_index(&mut self) -> usize {
-        let index = self.next_output_index;
-        self.next_output_index += 1;
-        index
-    }
-
-    /// Records a completed output item that the rewriter emitted directly (for
-    /// example an injected web-search call) so it appears in the terminal
-    /// response object.
-    pub(super) fn push_completed_output(&mut self, item: Value) {
-        self.completed_output.push(item);
-    }
-
-    /// Emits a rewriter-owned event with a fresh global sequence number.
-    pub(super) async fn emit_owned(
-        &mut self,
-        tx: &mpsc::Sender<Result<Bytes, std::io::Error>>,
-        event_type: &str,
-        mut data: Value,
-    ) -> Result<(), GatewayError> {
-        let seq = self.next_seq();
-        data["sequence_number"] = json!(seq);
-        self.send(tx, event_type, data).await
     }
 
     /// Handles one converted SSE event from a round. Envelope events are

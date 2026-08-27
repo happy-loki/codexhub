@@ -1,16 +1,16 @@
-﻿# AI Gateway 智谱 GLM Anthropic Messages 对接说明
+# AI Gateway 智谱 Anthropic Messages 对接说明
 
-更新时间：2026-06-20
+更新时间：2026-08-27
 
-状态：已落地首版，用于指导后续 Anthropic-compatible 厂商接入。
+状态：已落地首版。
 
-本文记录 `codexhub` AI Gateway 如何通过 Anthropic Messages 协议接入智谱 GLM。它也是后续新增 Kimi、DeepSeek Anthropic Messages 等显式厂商 profile 时的参考模板。
+本文记录 `codexhub` AI Gateway 如何通过 Anthropic Messages 协议接入智谱普通 API 和 Coding Plan。两种套餐共用一个智谱入口，服务类型由渠道里的 Radio 选择决定。
 
 相关文档：
 
 - [`ai-gateway-anthropic-first-roadmap.zh-CN.md`](ai-gateway-anthropic-first-roadmap.zh-CN.md)：Anthropic Messages 优先路线。
 - [`ai-gateway-anthropic-messages.zh-CN.md`](ai-gateway-anthropic-messages.zh-CN.md)：Anthropic Messages adapter 设计。
-- [`ai-gateway-web-search-protocol.zh-CN.md`](ai-gateway-web-search-protocol.zh-CN.md)：Codex Responses `web_search` 与 Anthropic/GLM web search 的详细对接规则。
+- [`ai-gateway-web-search-protocol.zh-CN.md`](ai-gateway-web-search-protocol.zh-CN.md)：Codex Responses 与 Anthropic/GLM web search 的对接规则。
 - [`provider-logo-assets.zh-CN.md`](provider-logo-assets.zh-CN.md)：provider logo 资源维护方式。
 
 官方参考：
@@ -20,287 +20,148 @@
 
 ## 1. 接入结论
 
-智谱 GLM 当前按 Anthropic Messages 兼容协议接入，不新增独立 `ProviderType`，也不走 Chat Completions。
+智谱普通 API 和 Coding Plan 统一使用 Anthropic Messages。智谱不再提供单独的 Chat Completions 配置入口，也不需要为智谱维护 Responses 到 Chat 的兼容分支。
 
 配置形态：
 
 ```toml
 [[aiGateway.providers]]
-name = "glm"
+name = "zai"
 enabled = true
 providerType = "anthropic_messages"
 compatibility = "glm_anthropic"
+zaiAccessMode = "api"
 baseUrl = "https://open.bigmodel.cn/api/anthropic"
-modelsUrl = "https://open.bigmodel.cn/api/paas/v4/models"
 apiKey = "..."
-models = ["glm-4.6"]
-modelAliases = { "glm-5.2" = "GLM-5.2" }
+models = ["GLM-5.3", "GLM-5.3-Flash"]
 ```
 
 关键约束：
 
 - `providerType` 表示协议族，智谱使用 `anthropic_messages`。
-- `compatibility` 表示显式厂商 profile，智谱使用 `glm_anthropic`。
-- `baseUrl` 表示推理请求入口；`modelsUrl` 表示模型列表入口。智谱两者不是同一个路径。
-- `modelAliases` 表示 Codex 侧模型名到上游模型名的映射。路由按 key 匹配，出站请求用 value。
-- `glm_anthropic` profile 会承接智谱 GLM 返回的 `web_search_prime` server tool，并转换成 Responses 标准 `web_search_call`。
-- 智谱私有搜索过程文本只用于兼容清理，不透传给 Codex 应用层。
-- GUI 新建智谱渠道时只生成 `glm_anthropic`，不生成通用未知兼容 profile。
-- `zhipu_anthropic` 只作为别名解析保留，方便将来配置迁移；项目主推名称是 `glm_anthropic`。
+- `compatibility` 表示厂商 profile，智谱使用 `glm_anthropic`。
+- `zaiAccessMode` 只能是 `api` 或 `coding_plan`，分别表示智谱普通 API 和 GLM Coding Plan。
+- `baseUrl` 只表示 Anthropic 对话入口；`modelsUrl` 只表示模型列表入口。
+- `modelAliases` 表示 Codex 侧模型名到上游模型名的映射。
+- GUI 新建智谱渠道时只生成 `glm_anthropic`。
+- `zhipu_anthropic` 作为历史配置别名保留，便于迁移到同一 Anthropic profile。
 
-## 2. 智谱协议入口
+通用 `ChatCompletions` provider 仍可服务于其它只提供 Chat 接口的厂商，但它不是智谱入口，也不会被智谱配置使用。
 
-智谱官方 Claude API 兼容说明中，Anthropic 兼容 base URL 为：
+## 2. 两个独立接口
+
+### 2.1 Anthropic 对话接口
+
+智谱 Anthropic 兼容 base URL 为：
 
 ```text
 https://open.bigmodel.cn/api/anthropic
 ```
 
-Gateway 运行时会用统一的 `provider_api_root()` 处理 base URL，然后拼接 Anthropic Messages 路径：
-
-```text
-{baseUrl}/v1/messages
-```
-
-因此智谱最终请求地址为：
+Gateway 会在该地址后拼接 `/v1/messages`：
 
 ```text
 https://open.bigmodel.cn/api/anthropic/v1/messages
 ```
 
-模型列表不从 Anthropic 兼容 base URL 推导。智谱模型列表使用 OpenAI-compatible 模型列表入口：
+请求使用：
+
+```http
+Authorization: Bearer <apiKey>
+anthropic-version: <ANTHROPIC_VERSION>
+```
+
+### 2.2 模型列表接口
+
+模型列表不从 Anthropic 对话地址推导。GUI 使用 API Key，按 `zaiAccessMode` 独立请求对应的智谱目录：
+
+| `zaiAccessMode` | 中国区目录 | 国际区目录 |
+| --- | --- | --- |
+| `api` | `https://open.bigmodel.cn/api/paas/v4/models` | `https://api.z.ai/api/paas/v4/models` |
+| `coding_plan` | `https://open.bigmodel.cn/api/coding/paas/v4/models` | `https://api.z.ai/api/coding/paas/v4/models` |
 
 ```text
 GET https://open.bigmodel.cn/api/paas/v4/models
-Authorization: Bearer <apiKey>
 ```
 
-GUI 的智谱 GLM 模板会自动填充该 `modelsUrl`，用户通常不需要手工填写或推断模型列表地址。
+国际站对应地址为：
 
-当前 GLM profile 与 Anthropic 官方 profile 共用同一套传输形态：
+```text
+https://api.z.ai/api/paas/v4/models
+```
 
-| 项 | 当前取值 |
-| --- | --- |
-| 协议族 | Anthropic Messages |
-| endpoint style | `/v1/messages` |
-| auth header | `Authorization: Bearer <apiKey>` |
-| version header | `anthropic-version: <ANTHROPIC_VERSION>` |
-| stream shape | Anthropic SSE |
-| usage shape | Anthropic usage |
+选择 `api` 时只尝试普通 API 目录，选择 `coding_plan` 时只尝试 Coding Plan 目录；当前 `baseUrl` 所在区域优先，失败后再尝试另一区域。HTTP 错误、无效 JSON 或空模型列表会触发下一个区域候选地址；第一个非空列表成功后停止。
 
-目前已经确认的 GLM 差异集中在 web search 回包：
+目录请求成功后，只把模型 ID 写入模型表，不会把目录地址写回对话 `baseUrl`。
+
+## 3. Cline 参考与取舍
+
+Cline 将普通 Z.AI 和 Coding Plan 建成两个 provider ID，并分别保存区域地址。CodexHub 采用一个“智谱 Anthropic（API / Coding Plan）”入口，再用二级 Radio 选择服务类型，因为两者的对话协议相同，差异主要在额度和模型目录。
+
+因此：
+
+- 对话始终走 Anthropic Messages。
+- 模型列表只探测所选服务类型的目录。
+- 不新增智谱 Chat Completions 入口。
+- 通用 Chat 适配器只保留给其它厂商和历史配置。
+
+## 4. GLM 响应差异
+
+智谱与 Anthropic 共用鉴权、版本头、endpoint、usage 和 SSE 基础形态。需要 profile 单独处理的差异主要是 web search 回包：
 
 - Codex / Responses 侧仍按标准 `web_search` 能力表达。
-- Gateway 出站 Anthropic Messages 请求仍构造 Anthropic server tool `web_search_20250305`。
-- 智谱 GLM 实际回包可能使用 `server_tool_use.name = "web_search_prime"`。
-- 智谱 GLM 搜索结果可能使用 `tool_result`，而不是 Anthropic 原生 `web_search_tool_result`。
-- 智谱 GLM 可能额外输出 `Z.ai Built-in Tool: web_search_prime` 和 `web_search_prime_result_summary` 等私有过程文本。
+- Anthropic Messages 出站请求构造 server tool `web_search_20250305`。
+- 智谱回包可能使用 `server_tool_use.name = "web_search_prime"`。
+- 搜索结果可能使用 `tool_result`，而不是 `web_search_tool_result`。
+- 可能出现 `Z.ai Built-in Tool: web_search_prime` 等私有过程文本。
 
-Gateway 的处理原则是：协议边界对齐 Responses，不把上游私有字段泄漏到 Codex 应用层。`web_search_prime` 被视为 GLM profile 内部兼容细节，最终输出仍是标准 `web_search_call`，且 `action` 只保留标准 `type/search/query`，不把搜索结果塞进 `action.result`。
+Gateway 只在 `glm_anthropic` profile 内识别这些差异，最终向 Codex 输出标准 `web_search_call`，不泄漏智谱私有字段。流式场景会在合适的 block stop 或 response done 时清理私有过程文本。
 
-如果后续实测发现智谱对其它字段宽容或忽略，不需要在 Gateway 主动补兼容分支。只有出现“必须不一样才能跑通”或“上游回包会污染 Responses 协议”的差异，才进入 `GlmAnthropic` profile。
+## 5. 代码落点
 
-## 3. 代码落点
-
-### 3.1 配置字段
-
-`ProviderConfig` 增加 `compatibility` 与 `models_url`：
-
-```rust
-pub struct ProviderConfig {
-    pub provider_type: ProviderType,
-    pub compatibility: Option<String>,
-    pub base_url: String,
-    pub models_url: Option<String>,
-    pub api_key: String,
-    pub models: Vec<String>,
-    pub model_aliases: BTreeMap<String, String>,
-}
+```text
+src/ai_gateway/config.rs
+src/ai_gateway/providers/anthropic_messages/options.rs
+src/ai_gateway/providers/anthropic_messages/request.rs
+src/ai_gateway/providers/anthropic_messages/glm_compat.rs
+src/gui.rs
+src/gui/ai_gateway.rs
 ```
 
 约定：
 
-- 未配置 `compatibility` 时，`anthropic_messages` 默认按官方 Anthropic 处理。
-- 已配置时必须命中白名单 profile。
-- 未知 profile 返回明确 bad request，不降级成“通用兼容”。
-- `models_url` 是模型列表接口，独立于推理 `base_url`。为空时 GUI 会按服务商 profile 或 `base_url` 推导默认 `/models` 地址。
-- `model_aliases` 解决三方渠道模型名大小写或命名细节差异。例如 Codex App 暴露 `glm-5.2`，上游只接受 `GLM-5.2` 或 `xx-GLM-5-2`。
-- 未配置 alias 时，路由仍会先做精确匹配，再做大小写不敏感匹配；大小写不同但实际同名的模型不需要用户额外配置。
-
-### 3.2 Anthropic profile
-
-智谱 profile 位于：
-
-```text
-src/ai_gateway/providers/anthropic_messages/options.rs
-```
-
-当前白名单：
-
-```rust
-pub(super) enum AnthropicProviderProfile {
-    Anthropic,
-    GlmAnthropic,
-}
-```
-
-解析规则：
-
-```rust
-match compatibility {
-    None | Some("anthropic") | Some("claude") => Anthropic,
-    Some("glm_anthropic") | Some("zhipu_anthropic") => GlmAnthropic,
-    Some(other) => unsupported profile error,
-}
-```
-
-`GlmAnthropic` 当前复用 Anthropic 基础 transport options：鉴权、版本头、endpoint、usage shape 和 stream shape 都保持 Anthropic 形态。差异不在请求 transport，而在响应归一化：
-
-- `AnthropicProviderProfile::is_web_search_server_tool()` 在 GLM profile 中额外接受 `web_search_prime`。
-- 非流式 response 中，`server_tool_use.name = "web_search_prime"` 转成 Responses `web_search_call`。
-- 非流式 response 中，GLM `tool_result` 可用于完成对应 `web_search_call` 状态，但不会把结果嵌入 `action.result`。
-- 流式 SSE 中，GLM `server_tool_use web_search_prime` 转成 `response.output_item.added/done` 的 `web_search_call`。
-- 流式 SSE 中，GLM `tool_result` 可完成对应搜索 item。
-- GLM profile 中的 text block 会先经过私有 web search 文本清理，再输出给 Codex。
-
-### 3.3 请求发送
-
-Anthropic Messages provider 负责：
-
-- 根据 `compatibility` 构造 `AnthropicProviderOptions`。
-- 用 `options.messages_url(provider)` 生成上游 URL。
-- 根据 `options.auth` 注入鉴权 header。
-- 根据 `options.version_header` 注入版本 header。
-- 复用 `AppState` 中共享的 `reqwest::Client`。
-- 用统一 `ensure_success_response()` 归一化上游错误。
-
-这保证新增兼容厂商时，大多数差异先从 `options.rs` 显式 profile 进入；只有已经实测明确的响应差异，才进入 response / stream 的 profile 分支。
-
-### 3.4 GLM web search 兼容模块
-
-GLM 私有搜索兼容集中在：
-
-```text
-src/ai_gateway/providers/anthropic_messages/glm_compat.rs
-```
-
-该模块只做文本清理，不决定协议路由。当前清理规则：
-
-- 删除 `Z.ai Built-in Tool: web_search_prime` 执行过程块。
-- 删除 `web_search_prime_result_summary` 私有摘要块。
-- 保留同一 text block 中真实面向用户的回答内容。
-- 如果清理后为空，则不生成 message item 或 text delta。
-
-流式场景下，GLM profile 会临时缓存 text block，到 block stop 或 response done 时再清理并输出。这样可以避免上游把私有搜索过程分片输出时，Gateway 已经提前把脏文本发给 Codex。
-
-注意：该清理逻辑不是通用 Markdown 清洗器，只服务于 GLM Anthropic 兼容 profile 的 web search 私有输出。新增其它厂商时，不应复用这组 marker，除非实测回包完全一致。
-
-## 4. GUI 落点
-
-智谱作为显式渠道出现在“新增 / 编辑渠道”弹窗的服务商列表中。
-
-GUI 默认模板：
-
-```rust
-ProviderConfig {
-    name: "glm".to_string(),
-    provider_type: ProviderType::AnthropicMessages,
-    compatibility: Some("glm_anthropic".to_string()),
-    base_url: "https://open.bigmodel.cn/api/anthropic".to_string(),
-    models_url: Some("https://open.bigmodel.cn/api/paas/v4/models".to_string()),
-    ..Default::default()
-}
-```
-
-保存逻辑：
-
-- 选中“智谱 GLM”时，保存 `providerType = "anthropic_messages"`。
-- 同时保存 `compatibility = "glm_anthropic"`。
-- 同时保存 `modelsUrl = "https://open.bigmodel.cn/api/paas/v4/models"`。
-- 编辑已有 `glm_anthropic` / `zhipu_anthropic` 渠道时，服务商选项显示为“智谱 GLM”。
-- 选中普通 Anthropic 时，保存 `compatibility = "anthropic"`。
-- 模型列表获取优先使用显式 `modelsUrl`；为空才按 `baseUrl` 推导候选地址。
-
-渠道列表 logo：
-
-- `openai_responses` 显示 OpenAI。
-- `chat_completions` 显示 DeepSeek。
-- `anthropic_messages + glm_anthropic/zhipu_anthropic` 显示智谱。
-- 其它 `anthropic_messages` 显示 Anthropic。
-
-## 5. Logo 资源
-
-智谱 logo 文件：
-
-```text
-packaging/brand/providers/zhipu.svg
-```
-
-来源记录：
-
-```text
-packaging/brand/providers/SOURCES.md
-```
-
-GUI 通过 `ProviderLogoKind::Zhipu` 编译期嵌入该 SVG。后续新增厂商 logo 时，按同样方式：
-
-1. 把 SVG 放入 `packaging/brand/providers/`。
-2. 在 `SOURCES.md` 记录来源。
-3. 在 `ProviderLogoKind` 增加枚举值。
-4. 在 `provider_logo_bitmap()` 增加 `include_bytes!()`。
-5. 在 provider row 的 logo 选择逻辑中按 profile 映射。
+- `ProviderConfig::models_url` 不参与对话路由。
+- `ProviderConfig::zai_access_mode` 只影响智谱模型目录选择，不改变 Anthropic 对话 URL。
+- `AnthropicProviderProfile` 使用白名单；未知 profile 明确返回错误。
+- 智谱目录探测只在 `anthropic_messages + glm_anthropic/zhipu_anthropic` 组合下启用。
+- URL 只接受 `http` 和 `https`。
+- API Key 只放在 `Authorization` 请求头，不拼进 URL。
 
 ## 6. 验证清单
 
-新增或修改 GLM profile 后至少跑：
-
 ```powershell
-cargo fmt
+cargo fmt --all
 cargo test ai_gateway
 cargo check
 cargo check --features gui
 git diff --check
 ```
 
-目前已有测试覆盖：
+至少覆盖：
 
-- `ProviderConfig` 可反序列化 `compatibility = "glm_anthropic"`。
-- `glm_anthropic` 映射到 `GlmAnthropic`。
-- `zhipu_anthropic` 别名映射到 `GlmAnthropic`。
-- 未知 Anthropic compatibility profile 返回明确错误。
-- GLM profile URL 拼接为 `https://open.bigmodel.cn/api/anthropic/v1/messages`。
-- GLM 非流式 `web_search_prime` 转成 Responses `web_search_call`。
-- GLM 非流式私有 web search 文本会被过滤，最终只保留用户可见回答。
-- GLM 流式 `web_search_prime` 转成 Responses SSE `web_search_call`。
-- GLM 流式私有 web search 文本不会泄漏到 SSE。
-- Responses `web_search_call.action` 不嵌入上游搜索结果，保持标准 `type/search/query` 形态。
+- 智谱配置反序列化为 `AnthropicMessages`。
+- `glm_anthropic` 和 `zhipu_anthropic` 映射到同一 profile。
+- 对话 URL 为 `/api/anthropic/v1/messages`。
+- 中国和国际模型目录候选顺序正确。
+- `api` 只使用普通 API 目录，`coding_plan` 只使用 Coding Plan 目录。
+- 模型目录请求不会覆盖对话 `baseUrl`。
+- GLM web search 非流式和流式回包可转换为 Responses `web_search_call`。
 
-建议后续补充的实测用例：
+## 7. 后续新增 Anthropic 厂商
 
-- 非流式文本请求。
-- SSE 文本流。
-- tool_use / tool_result 多轮。
-- prompt cache control 是否被智谱接受或忽略。
-- thinking / reasoning 字段是否接受 Anthropic 原生形态。
-- GLM 官方和第三方转发渠道在 web search 成功、失败、无结果时的回包差异。
-- 多次 web search 串行或并行时，`tool_use_id` / block index 是否稳定。
-
-## 7. 后续新增厂商模板
-
-后续新增 Anthropic-compatible 厂商时，不要复制一套 provider。按以下步骤做：
-
-1. 确认官方文档：base URL、路径、鉴权 header、版本 header、stream 格式、tool 格式。
-2. 在 `AnthropicProviderProfile` 增加显式 profile，例如 `KimiAnthropic`。
-3. 在 `from_compatibility()` 增加白名单字符串，例如 `kimi_anthropic`。
-4. 在 `AnthropicProviderOptions` 增加厂商 options；如果与 Anthropic 完全一致，可以先复用 `base(profile)`。
-5. 如果 GUI 要支持一键新增，增加默认 provider 模板和服务商单选项。
-6. 如果有独立品牌展示，加入 logo 并按 profile 映射。
-7. 增加 options 单元测试和配置反序列化测试。
-8. 用真实 API 做最小 smoke test，再决定是否打开更多能力。
-
-差异处理原则：
-
-- 厂商会自行忽略的字段，不必在 Gateway 主动删除。
-- 只有会导致请求失败、响应解析失败或 Codex 行为错误的差异，才进入 profile。
-- profile 是白名单，不接受用户随便填写未知兼容厂商。
-- 新厂商稳定后，优先只保留 Anthropic Messages 接法，不再新增 Chat Completions 接法。
+1. 确认官方 base URL、鉴权 header、版本 header、SSE 和 tool 格式。
+2. 在 `AnthropicProviderProfile` 增加显式 profile。
+3. 在 `from_compatibility()` 增加白名单字符串。
+4. 只有实测存在协议差异时，才增加 response 或 stream 分支。
+5. GUI 需要一键新增时，增加一个入口；不要为同一协议的套餐复制多个入口。
+6. 用真实 API 做最小 smoke test，再决定是否打开更多能力。

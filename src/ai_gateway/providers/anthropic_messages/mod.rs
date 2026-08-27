@@ -1,6 +1,9 @@
 //! Anthropic Messages 出站 provider。
 
-use std::{collections::HashSet, io};
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+};
 
 use axum::{
     body::{Body, Bytes},
@@ -412,7 +415,6 @@ async fn run_internal_web_search_stream(
 
         let mut tool_results = Vec::new();
         for tool_use in tool_uses {
-            emit_injected_web_search_call(&mut envelope, &tx, &tool_use).await?;
             let search_text = execute_internal_web_search(
                 &client,
                 &ctx,
@@ -527,59 +529,6 @@ async fn stream_anthropic_round(
     Ok(raw_sse)
 }
 
-/// Emits the injected web-search call that represents the gateway running the
-/// search on the model's behalf. Unlike answer text, a web-search call has no
-/// incremental content, so it ships as a single `output_item.added` +
-/// `output_item.done` pair rather than streamed progress. The Codex client only
-/// consumes these two `output_item` events for `web_search_call`; the
-/// intermediate `response.web_search_call.*` progress events are not read, so we
-/// omit them.
-async fn emit_injected_web_search_call(
-    envelope: &mut InternalSseEnvelope,
-    tx: &mpsc::Sender<Result<Bytes, io::Error>>,
-    tool_use: &WebSearchToolUse,
-) -> Result<(), GatewayError> {
-    let item_id = generate_web_search_item_id();
-    let output_index = envelope.reserve_output_index();
-    envelope
-        .emit_owned(
-            tx,
-            "response.output_item.added",
-            json!({
-                "type": "response.output_item.added",
-                "output_index": output_index,
-                "item": {
-                    "type": "web_search_call",
-                    "id": item_id,
-                    "status": "in_progress",
-                },
-            }),
-        )
-        .await?;
-    let done_item = json!({
-        "type": "web_search_call",
-        "id": item_id,
-        "status": "completed",
-        "action": {
-            "type": "search",
-            "query": tool_use.query.clone(),
-            "queries": [tool_use.query.clone()],
-        },
-    });
-    envelope.push_completed_output(done_item.clone());
-    envelope
-        .emit_owned(
-            tx,
-            "response.output_item.done",
-            json!({
-                "type": "response.output_item.done",
-                "output_index": output_index,
-                "item": done_item,
-            }),
-        )
-        .await
-}
-
 /// Splits a converter output chunk (which may batch several `event:`/`data:`
 /// frames) into `(event_type, data)` pairs.
 fn parse_converted_frames(frame: &Bytes) -> Vec<(String, Value)> {
@@ -617,10 +566,6 @@ fn parse_converted_frames(frame: &Bytes) -> Vec<(String, Value)> {
 
 fn is_first_token_event(event_type: &str) -> bool {
     event_type.starts_with("response.") && event_type.ends_with(".delta")
-}
-
-fn generate_web_search_item_id() -> String {
-    format!("ws_{}", uuid::Uuid::new_v4().as_simple())
 }
 
 async fn execute_anthropic_stream_message(
@@ -1037,36 +982,214 @@ fn grouped_tool_result_blocks(tool_results: Vec<(String, String)>) -> Vec<Value>
     content
 }
 
+const MAX_SEARCH_RESULT_NESTING: usize = 8;
+
+#[derive(Debug, Default)]
+struct SearchResult {
+    title: String,
+    url: String,
+    snippet: String,
+}
+
 fn search_results_to_tool_text(query: &str, raw_sse: &str) -> String {
     let mut results = Vec::new();
+    let mut result_indexes = HashMap::new();
     for event in parse_sse_json_events(raw_sse) {
-        let Some(block) = event.get("content_block").filter(|block| {
-            block.get("type").and_then(Value::as_str) == Some("web_search_tool_result")
-        }) else {
-            continue;
-        };
-        if let Some(content) = block.get("content").and_then(Value::as_array) {
-            for result in content {
-                if result.get("type").and_then(Value::as_str) != Some("web_search_result") {
-                    continue;
-                }
-                let title = result.get("title").and_then(Value::as_str).unwrap_or("");
-                let url = result.get("url").and_then(Value::as_str).unwrap_or("");
-                let snippet = result
-                    .get("encrypted_content")
-                    .and_then(Value::as_str)
-                    .unwrap_or("");
-                results.push(format!("{title}\nURL: {url}\nSnippet: {snippet}"));
-            }
-        }
+        collect_search_result_blocks(&event, &mut results, &mut result_indexes, 0);
     }
+
+    debug!(
+        query = %query,
+        result_count = results.len(),
+        raw_bytes = raw_sse.len(),
+        "normalized anthropic web search results"
+    );
+
     if results.is_empty() {
         return format!("No web search results were returned for query: {query}");
     }
+    let results = results.iter().map(format_search_result).collect::<Vec<_>>();
     format!(
         "Web search results for query: {query}\n\n{}",
         results.join("\n\n")
     )
+}
+
+/// Finds standard Anthropic and GLM result blocks anywhere in an SSE event.
+/// GLM may put the actual result list in a JSON-encoded `tool_result.content`.
+fn collect_search_result_blocks(
+    value: &Value,
+    results: &mut Vec<SearchResult>,
+    result_indexes: &mut HashMap<String, usize>,
+    depth: usize,
+) {
+    if depth > MAX_SEARCH_RESULT_NESTING {
+        return;
+    }
+    match value {
+        Value::Object(object) => {
+            let is_result_block = matches!(
+                object.get("type").and_then(Value::as_str),
+                Some("web_search_tool_result" | "tool_result")
+            );
+            if is_result_block {
+                if let Some(content) = object.get("content") {
+                    collect_search_result_values(content, results, result_indexes, depth + 1);
+                }
+            }
+            for (key, child) in object {
+                if is_result_block && key == "content" {
+                    continue;
+                }
+                collect_search_result_blocks(child, results, result_indexes, depth + 1);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_search_result_blocks(item, results, result_indexes, depth + 1);
+            }
+        }
+        Value::String(text) => {
+            if let Some(parsed) = parse_embedded_search_json(text) {
+                collect_search_result_blocks(&parsed, results, result_indexes, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Walks the content of a result block and extracts result-shaped objects from
+/// arrays, `{ "text": [...] }` wrappers, and nested JSON strings.
+fn collect_search_result_values(
+    value: &Value,
+    results: &mut Vec<SearchResult>,
+    result_indexes: &mut HashMap<String, usize>,
+    depth: usize,
+) {
+    if depth > MAX_SEARCH_RESULT_NESTING {
+        return;
+    }
+    match value {
+        Value::Object(object) => {
+            if let Some(result) = search_result_from_object(object) {
+                let key = search_result_identity(&result);
+                if let Some(index) = result_indexes.get(&key).copied() {
+                    let existing = &mut results[index];
+                    if existing.title.is_empty() {
+                        existing.title = result.title;
+                    }
+                    if existing.url.is_empty() {
+                        existing.url = result.url;
+                    }
+                    if existing.snippet.is_empty() {
+                        existing.snippet = result.snippet;
+                    }
+                } else {
+                    result_indexes.insert(key, results.len());
+                    results.push(result);
+                }
+            }
+            for child in object.values() {
+                collect_search_result_values(child, results, result_indexes, depth + 1);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_search_result_values(item, results, result_indexes, depth + 1);
+            }
+        }
+        Value::String(text) => {
+            if let Some(parsed) = parse_embedded_search_json(text) {
+                collect_search_result_values(&parsed, results, result_indexes, depth + 1);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn search_result_from_object(object: &Map<String, Value>) -> Option<SearchResult> {
+    let title = first_text_field(object, &["title"]);
+    let url = first_text_field(object, &["url", "link"]);
+    let snippet = ["snippet", "description", "content", "text"]
+        .iter()
+        .find_map(|key| {
+            let value = object.get(*key).and_then(Value::as_str)?;
+            let value = value.trim();
+            if value.is_empty() || is_json_container(value) {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        })
+        .unwrap_or_default();
+
+    if title.is_empty() && url.is_empty() && snippet.is_empty() {
+        return None;
+    }
+
+    Some(SearchResult {
+        title,
+        url,
+        snippet,
+    })
+}
+
+fn first_text_field(object: &Map<String, Value>, keys: &[&str]) -> String {
+    keys.iter()
+        .find_map(|key| {
+            object
+                .get(*key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
+}
+
+fn is_json_container(text: &str) -> bool {
+    let text = text.trim();
+    (text.starts_with('{') || text.starts_with('[')) && serde_json::from_str::<Value>(text).is_ok()
+}
+
+fn parse_embedded_search_json(text: &str) -> Option<Value> {
+    let trimmed = text.trim();
+    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+        return None;
+    }
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(value) => Some(value),
+        Err(error) => {
+            debug!(
+                error = %error,
+                embedded_bytes = trimmed.len(),
+                "ignored malformed embedded web search JSON"
+            );
+            None
+        }
+    }
+}
+
+fn search_result_identity(result: &SearchResult) -> String {
+    if result.url.is_empty() {
+        format!("title:{}\u{1f}snippet:{}", result.title, result.snippet)
+    } else {
+        format!("url:{}", result.url)
+    }
+}
+
+fn format_search_result(result: &SearchResult) -> String {
+    let mut lines = Vec::new();
+    if !result.title.is_empty() {
+        lines.push(result.title.clone());
+    }
+    if !result.url.is_empty() {
+        lines.push(format!("URL: {}", result.url));
+    }
+    if !result.snippet.is_empty() {
+        lines.push(format!("Snippet: {}", result.snippet));
+    }
+    lines.join("\n")
 }
 
 fn anthropic_message_from_sse(raw_sse: &str) -> Result<Value, GatewayError> {

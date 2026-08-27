@@ -10,7 +10,7 @@
 | 本地 Codex 接入 | 不修改任何 Codex 前端代码，通过本地 backend 连接 Codex App、VS Code 插件和 Codex CLI。 |
 | Codex 会话管理 | 在 GUI 中管理 Codex 历史会话；切换 provider 或接入 AI Gateway 后，可以把旧会话移动到当前入口，让 Codex App 左侧继续看到。 |
 | 支持 IM 端管理 Codex 会话 | 利用 Codex 原生 remote-control 协议，在 IM 里创建会话、恢复会话、处理审批。 |
-| 内置 AI Gateway | 让 Codex App 继续使用原生 Responses 入口，同时可以在本地 GUI 中接入 OpenAI、DeepSeek、Anthropic/Claude、智谱 GLM 等模型渠道。 |
+| 内置 AI Gateway | 让 Codex App 继续使用原生 Responses 入口，同时可以在本地 GUI 中接入 OpenAI、DeepSeek、Anthropic/Claude、智谱 Anthropic（API / Coding Plan）等模型渠道。 |
 
 <p align="center">
   <img src="docs/assets/product/main.png" alt="CodexHub GUI 状态和配置界面" width="900">
@@ -42,7 +42,7 @@ Codex App 和 VS Code 插件通常只需要：下载程序 -> 配置 AI Gateway 
 - macOS、Windows 或 Linux 设备
 - Codex App、Codex VS Code 插件或 Codex CLI
 - 不需要 ChatGPT 账号，也不需要“加速网络”
-- 至少一个模型服务 API Key：OpenAI Responses、DeepSeek、Anthropic/Claude、智谱 GLM 或其它兼容渠道
+- 至少一个模型服务 API Key：OpenAI Responses、DeepSeek、Anthropic/Claude、智谱 Anthropic（API / Coding Plan）或其它兼容渠道
 - 可选 IM 通道：只有需要飞书、微信、Telegram 远程控制时才需要
 
 ### 1. 安装
@@ -80,7 +80,7 @@ Codex App 和 VS Code 插件通常只需要：下载程序 -> 配置 AI Gateway 
 - API Key
 - 模型列表
 
-如果上游模型名和你希望在 Codex 里看到的名字不一致，可以在“编辑模型映射”里把一个上游模型映射成一个或多个 Codex 可见模型。例如上游要求 `GLM-5.2`，Codex 里可以显示成 `glm-5.2`。
+如果上游模型名和你希望在 Codex 里看到的名字不一致，可以在“编辑模型映射”里把一个上游模型映射成一个或多个 Codex 可见模型。例如上游要求 `GLM-5.3`，Codex 里可以显示成 `glm-5.3`。
 
 如果渠道不支持 Codex 请求里的生图工具，勾选“过滤生图工具”即可实时移除 `image_generation` 工具，不需要再改 Codex 配置。
 
@@ -146,7 +146,7 @@ AI Gateway 解决的是“Codex 只认原生模型入口，但用户想用更多
 - DeepSeek Responses 渠道：原生对接 DeepSeek `/v1/responses`，支持官方 hosted web search、function 和 `apply_patch`。
 - DeepSeek Chat / Chat Completions 渠道：保留旧接入方式，把 Codex 请求转换成 Chat Completions，再把返回结果转换回 Codex 可消费的格式。
 - Anthropic Messages 渠道：用于 Claude / Anthropic 兼容模型，支持文本、图片、工具调用、思考输出和 web search 的协议转换。
-- 智谱 GLM 渠道：按 Anthropic 兼容方式接入，并处理 GLM web search 的返回差异。
+- 智谱 Anthropic 渠道：普通智谱 API 与 Coding Plan 统一走 Anthropic Messages；模型列表使用 API Key 从智谱独立目录自动获取，并处理 GLM web search 的返回差异。
 - 模型映射：解决上游模型名大小写、别名、第三方转发命名不一致的问题。
 - Codex 可见模型：控制 Codex App 模型列表里展示哪些模型。
 - 请求日志：记录 Codex 原始请求、发给上游的请求、返回结果、错误、token、缓存、耗时和请求包大小，方便排查首帧慢、超时和协议转换问题。

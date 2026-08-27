@@ -10,7 +10,7 @@
 
 - [`ai-gateway-architecture.zh-CN.md`](ai-gateway-architecture.zh-CN.md)：当前 AI Gateway 总体架构和已落地能力。
 - [`ai-gateway-anthropic-messages.zh-CN.md`](ai-gateway-anthropic-messages.zh-CN.md)：当前 Anthropic Messages adapter 设计与实现记录。
-- [`ai-gateway-glm-anthropic-integration.zh-CN.md`](ai-gateway-glm-anthropic-integration.zh-CN.md)：智谱 GLM Anthropic Messages profile 对接说明，可作为后续新增厂商模板。
+- [`ai-gateway-glm-anthropic-integration.zh-CN.md`](ai-gateway-glm-anthropic-integration.zh-CN.md)：智谱 Anthropic Messages profile 对接说明，可作为后续新增厂商模板。
 - [`ai-gateway-provider-adapter-design.zh-CN.md`](ai-gateway-provider-adapter-design.zh-CN.md)：更通用的 Provider Adapter / Gateway IR 设计草案。
 
 ## 1. 背景判断

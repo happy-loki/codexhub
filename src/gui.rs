@@ -13,6 +13,7 @@ use std::{
 };
 
 use tokio::sync::mpsc as tokio_mpsc;
+use url::Url;
 use wxdragon::widgets::dataview::{
     CustomDataViewVirtualListModel, DataViewAlign, DataViewColumnFlags, DataViewCtrl, Variant,
 };
@@ -25,7 +26,7 @@ use windows_sys::Win32::{
 };
 
 use crate::ai_gateway::config::{
-    DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderConfig, ProviderType, provider_api_root,
+    DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderConfig, ProviderType, ZaiAccessMode, provider_api_root,
     provider_display_base_url,
 };
 use crate::config::{AppConfig, LocalConnectionMode, OutboundProxyConfig, OutboundProxyMode};
@@ -91,6 +92,14 @@ type ImAccountModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
 type PendingImToggle = Rc<RefCell<Option<ImAccountToggle>>>;
 type ModelMappingRows = Rc<RefCell<Vec<ModelMappingRow>>>;
 type ModelMappingModel = Rc<RefCell<CustomDataViewVirtualListModel>>;
+
+#[derive(Clone, Copy)]
+struct ZaiAccessControls {
+    layout_host: Panel,
+    panel: Panel,
+    api: RadioButton,
+    coding_plan: RadioButton,
+}
 
 type FrameTimerStore = Rc<RefCell<Option<Timer<Frame>>>>;
 type RequestLogResultStore = Arc<Mutex<Option<Result<Vec<RequestLogItem>, String>>>>;
@@ -2558,10 +2567,12 @@ fn show_ai_gw_channel_dialog(
         false,
         true,
     );
+    // Z.AI's standard API and Coding Plan share one Anthropic Messages entry.
+    // The generic Chat Completions entry remains available for other vendors.
     let radio_glm = ai_gw_service_option(
         &service_panel,
         &service_sizer,
-        text.ai_gw_service_glm(),
+        text.ai_gw_service_zai_anthropic(),
         Some(ProviderLogoKind::Zhipu),
         false,
         true,
@@ -2585,6 +2596,75 @@ fn show_ai_gw_channel_dialog(
         SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
         18,
     );
+
+    // The service column is intentionally narrow. Keep the Z.AI mode selector
+    // in the wider configuration column so its labels remain readable.
+    let zai_access_panel = Panel::builder(&form_panel).build();
+    zai_access_panel.set_background_color(theme::theme().bg_card_alt);
+    let zai_access_sizer = BoxSizer::builder(Orientation::Vertical).build();
+    let zai_access_row = BoxSizer::builder(Orientation::Horizontal).build();
+    let zai_access_title = StaticText::builder(&zai_access_panel)
+        .with_label(text.ai_gw_zai_access_mode())
+        .build();
+    zai_access_title.set_foreground_color(theme::theme().ink_primary);
+    zai_access_title.set_font(&theme::font(theme::TextRole::Caption));
+    zai_access_row.add(
+        &zai_access_title,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::Right,
+        18,
+    );
+    let zai_api_radio = RadioButton::builder(&zai_access_panel)
+        .with_label(text.ai_gw_zai_api())
+        .first_in_group()
+        .build();
+    zai_api_radio.set_background_color(theme::theme().bg_card_alt);
+    zai_api_radio.set_foreground_color(theme::theme().ink_primary);
+    zai_api_radio.set_tooltip(text.ai_gw_zai_api());
+    zai_access_row.add(
+        &zai_api_radio,
+        0,
+        SizerFlag::AlignCenterVertical | SizerFlag::Right,
+        18,
+    );
+    let zai_coding_plan_radio = RadioButton::builder(&zai_access_panel)
+        .with_label(text.ai_gw_zai_coding_plan())
+        .build();
+    zai_coding_plan_radio.set_background_color(theme::theme().bg_card_alt);
+    zai_coding_plan_radio.set_foreground_color(theme::theme().ink_primary);
+    zai_coding_plan_radio.set_tooltip(text.ai_gw_zai_coding_plan());
+    zai_access_row.add(&zai_coding_plan_radio, 0, SizerFlag::AlignCenterVertical, 0);
+    zai_access_sizer.add_sizer(
+        &zai_access_row,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        10,
+    );
+    let zai_access_help = StaticText::builder(&zai_access_panel)
+        .with_label(text.ai_gw_zai_access_mode_help())
+        .build();
+    zai_access_help.set_foreground_color(theme::theme().ink_muted);
+    zai_access_help.wrap(520);
+    zai_access_sizer.add(
+        &zai_access_help,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Bottom,
+        10,
+    );
+    zai_access_panel.set_sizer(zai_access_sizer, true);
+    zai_access_panel.show(false);
+    form_sizer.add(
+        &zai_access_panel,
+        0,
+        SizerFlag::Expand | SizerFlag::Left | SizerFlag::Right | SizerFlag::Top,
+        10,
+    );
+    let zai_access_controls = ZaiAccessControls {
+        layout_host: form_panel,
+        panel: zai_access_panel,
+        api: zai_api_radio,
+        coding_plan: zai_coding_plan_radio,
+    };
 
     let grid = FlexGridSizer::builder(0, 2)
         .with_vgap(12)
@@ -2741,6 +2821,7 @@ fn show_ai_gw_channel_dialog(
         &radio_deepseek_responses,
         &radio_anthropic,
         &radio_glm,
+        &zai_access_controls,
         &type_input,
         &name_input,
         &base_url_input,
@@ -2799,6 +2880,7 @@ fn show_ai_gw_channel_dialog(
                     &radio_deepseek_responses,
                     &radio_anthropic,
                     &radio_glm,
+                    &zai_access_controls,
                     &type_input,
                     &name_input,
                     &base_url_input,
@@ -2838,6 +2920,7 @@ fn show_ai_gw_channel_dialog(
                     &radio_deepseek_responses,
                     &radio_anthropic,
                     &radio_glm,
+                    &zai_access_controls,
                     &type_input,
                     &name_input,
                     &base_url_input,
@@ -2877,6 +2960,7 @@ fn show_ai_gw_channel_dialog(
                     &radio_deepseek_responses,
                     &radio_anthropic,
                     &radio_glm,
+                    &zai_access_controls,
                     &type_input,
                     &name_input,
                     &base_url_input,
@@ -2916,6 +3000,7 @@ fn show_ai_gw_channel_dialog(
                     &radio_deepseek_responses,
                     &radio_anthropic,
                     &radio_glm,
+                    &zai_access_controls,
                     &type_input,
                     &name_input,
                     &base_url_input,
@@ -2955,6 +3040,7 @@ fn show_ai_gw_channel_dialog(
                     &radio_deepseek_responses,
                     &radio_anthropic,
                     &radio_glm,
+                    &zai_access_controls,
                     &type_input,
                     &name_input,
                     &base_url_input,
@@ -2994,6 +3080,7 @@ fn show_ai_gw_channel_dialog(
                     &radio_deepseek_responses,
                     &radio_anthropic,
                     &radio_glm,
+                    &zai_access_controls,
                     &type_input,
                     &name_input,
                     &base_url_input,
@@ -3110,9 +3197,21 @@ fn show_ai_gw_channel_dialog(
             let api_key = strip_nul(&key_input.get_value()).trim().to_string();
             let mut template = current_ai_gw_provider_template.borrow().clone();
             template.base_url = base_url.clone();
+            let is_zai = is_zai_anthropic_provider(&template);
+            if is_zai {
+                template.zai_access_mode = selected_zai_access_mode(&zai_access_controls);
+            }
             let models_url_value = strip_nul(&models_url_input.get_value());
-            let models_url = normalize_optional_url(Some(&models_url_value));
-            let fallback_models_url = known_models_url_for_provider(&template);
+            let models_url = normalize_optional_url(Some(&models_url_value))
+                .filter(|url| !is_zai || !is_known_zai_models_url(url));
+            if is_zai && api_key.is_empty() {
+                fetch_models_button.set_label(text.ai_gw_fetch_models());
+                fetch_models_button.enable(true);
+                fetch_models_in_flight.store(false, Ordering::SeqCst);
+                show_error(&dialog, text.ai_gw_api_key_empty());
+                return;
+            }
+            let fallback_models_urls = known_models_urls_for_provider(&template);
             let provider_type = template.provider_type.clone();
             let fetch_models_result = fetch_models_result.clone();
             let fetch_models_in_flight = fetch_models_in_flight.clone();
@@ -3121,7 +3220,7 @@ fn show_ai_gw_channel_dialog(
                 let outcome = fetch_remote_models(
                     &base_url,
                     models_url.as_deref(),
-                    fallback_models_url.as_deref(),
+                    &fallback_models_urls,
                     &api_key,
                     GUI_MODEL_LIST_FETCH_TIMEOUT_SECS,
                 )
@@ -3220,6 +3319,16 @@ fn show_ai_gw_channel_dialog(
             let compatibility = initial
                 .and_then(|provider| provider.compatibility.clone())
                 .or_else(|| selected_ai_gw_dialog_compatibility(&radio_anthropic, &radio_glm));
+            let is_zai = provider_type == ProviderType::AnthropicMessages
+                && matches!(
+                    compatibility.as_deref(),
+                    Some("glm_anthropic" | "zhipu_anthropic")
+                );
+            let zai_access_mode = if is_zai {
+                selected_zai_access_mode(&zai_access_controls)
+            } else {
+                ZaiAccessMode::default()
+            };
             let (models, explicit_aliases) = model_mapping_rows_to_config(&model_mapping_rows);
             let model_aliases = build_model_aliases_for_save(&models, explicit_aliases);
             let mut template = current_ai_gw_provider_template.borrow().clone();
@@ -3239,6 +3348,7 @@ fn show_ai_gw_channel_dialog(
                 enabled: initial.map(|provider| provider.enabled).unwrap_or(true),
                 provider_type,
                 compatibility,
+                zai_access_mode,
                 base_url: template.base_url,
                 models_url,
                 api_key: strip_nul(&key_input.get_value()).trim().to_string(),
@@ -3271,6 +3381,7 @@ fn apply_ai_gw_dialog_template(
     radio_deepseek_responses: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
+    zai_access_controls: &ZaiAccessControls,
     type_input: &TextCtrl,
     name_input: &TextCtrl,
     base_url_input: &TextCtrl,
@@ -3298,6 +3409,11 @@ fn apply_ai_gw_dialog_template(
         radio_glm,
         type_input,
     );
+    set_zai_access_controls(
+        zai_access_controls,
+        provider.zai_access_mode,
+        is_zai_anthropic_provider(&provider),
+    );
     name_input.change_value(&provider.name);
     base_url_input.change_value(&provider.base_url);
     models_url_input.change_value(provider.models_url.as_deref().unwrap_or_default());
@@ -3320,6 +3436,7 @@ fn apply_ai_gw_service_template(
     radio_deepseek_responses: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
+    zai_access_controls: &ZaiAccessControls,
     type_input: &TextCtrl,
     name_input: &TextCtrl,
     base_url_input: &TextCtrl,
@@ -3341,6 +3458,7 @@ fn apply_ai_gw_service_template(
         radio_deepseek_responses,
         radio_anthropic,
         radio_glm,
+        zai_access_controls,
         type_input,
         name_input,
         base_url_input,
@@ -3538,19 +3656,35 @@ fn default_ai_gw_glm_service_provider() -> ProviderConfig {
         name: "glm".to_string(),
         provider_type: ProviderType::AnthropicMessages,
         compatibility: Some("glm_anthropic".to_string()),
+        zai_access_mode: ZaiAccessMode::Api,
         base_url: "https://open.bigmodel.cn/api/anthropic".to_string(),
         ..Default::default()
+    }
+}
+
+fn set_zai_access_controls(controls: &ZaiAccessControls, mode: ZaiAccessMode, visible: bool) {
+    controls.api.set_value(false);
+    controls.coding_plan.set_value(false);
+    match mode {
+        ZaiAccessMode::Api => controls.api.set_value(true),
+        ZaiAccessMode::CodingPlan => controls.coding_plan.set_value(true),
+    }
+    controls.panel.show(visible);
+    controls.layout_host.layout();
+}
+
+fn selected_zai_access_mode(controls: &ZaiAccessControls) -> ZaiAccessMode {
+    if controls.coding_plan.get_value() {
+        ZaiAccessMode::CodingPlan
+    } else {
+        ZaiAccessMode::Api
     }
 }
 
 fn normalize_provider_models_url(mut provider: ProviderConfig) -> ProviderConfig {
     provider.models_url = normalize_optional_url(provider.models_url.as_deref())
         .filter(|models_url| !is_default_models_url_for_base(&provider.base_url, models_url))
-        .filter(|models_url| {
-            known_models_url_for_provider(&provider)
-                .as_deref()
-                .is_none_or(|known_url| known_url.trim_end_matches('/') != models_url.as_str())
-        });
+        .filter(|models_url| !is_known_zai_models_url(models_url));
     provider
 }
 
@@ -3561,27 +3695,78 @@ fn is_default_models_url_for_base(base_url: &str, models_url: &str) -> bool {
     normalized == format!("{raw}/models") || normalized == format!("{root}/v1/models")
 }
 
-fn known_models_url_for_provider(provider: &ProviderConfig) -> Option<String> {
-    let provider_name = provider.name.trim();
-    let base_url = provider.base_url.trim().to_ascii_lowercase();
-    if (matches!(
-        provider.compatibility.as_deref(),
-        Some("glm_anthropic" | "zhipu_anthropic")
-    ) || provider_name.eq_ignore_ascii_case("glm")
-        || provider_name.eq_ignore_ascii_case("zhipu"))
-        && base_url.contains("open.bigmodel.cn")
-    {
-        return Some("https://open.bigmodel.cn/api/paas/v4/models".to_string());
+fn known_models_urls_for_provider(provider: &ProviderConfig) -> Vec<String> {
+    if !is_zai_anthropic_provider(provider) {
+        return Vec::new();
     }
 
-    None
+    let base_url = provider.base_url.trim().to_ascii_lowercase();
+    let (china, international) = match provider.zai_access_mode {
+        ZaiAccessMode::Api => (
+            "https://open.bigmodel.cn/api/paas/v4/models",
+            "https://api.z.ai/api/paas/v4/models",
+        ),
+        ZaiAccessMode::CodingPlan => (
+            "https://open.bigmodel.cn/api/coding/paas/v4/models",
+            "https://api.z.ai/api/coding/paas/v4/models",
+        ),
+    };
+
+    let mut urls = Vec::with_capacity(2);
+    if base_url.contains("api.z.ai") {
+        urls.push(international.to_string());
+        urls.push(china.to_string());
+    } else if base_url.contains("open.bigmodel.cn") {
+        urls.push(china.to_string());
+        urls.push(international.to_string());
+    }
+    urls
+}
+
+fn is_known_zai_models_url(value: &str) -> bool {
+    matches!(
+        value.trim().trim_end_matches('/'),
+        "https://open.bigmodel.cn/api/paas/v4/models"
+            | "https://open.bigmodel.cn/api/coding/paas/v4/models"
+            | "https://api.z.ai/api/paas/v4/models"
+            | "https://api.z.ai/api/coding/paas/v4/models"
+    )
+}
+
+fn is_zai_anthropic_provider(provider: &ProviderConfig) -> bool {
+    provider.provider_type == ProviderType::AnthropicMessages
+        && matches!(
+            provider.compatibility.as_deref(),
+            Some("glm_anthropic" | "zhipu_anthropic")
+        )
 }
 
 fn normalize_optional_url(value: Option<&str>) -> Option<String> {
     value
         .map(str::trim)
         .filter(|value| !value.is_empty())
+        .filter(|value| is_http_url(value))
         .map(|value| value.trim_end_matches('/').to_string())
+}
+
+fn is_http_url(value: &str) -> bool {
+    Url::parse(value)
+        .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+}
+
+fn has_api_version_suffix(value: &str) -> bool {
+    let Ok(url) = Url::parse(value) else {
+        return false;
+    };
+    url.path()
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .is_some_and(|segment| {
+            segment.len() > 1
+                && segment.starts_with('v')
+                && segment[1..].chars().all(|ch| ch.is_ascii_digit())
+        })
 }
 
 fn set_ai_gw_dialog_provider_type(
@@ -3978,7 +4163,7 @@ mod model_mapping_tests {
     #[test]
     fn does_not_infer_generic_lowercase_model_aliases() {
         let models = vec![
-            "zai-org/GLM-5.2".to_string(),
+            "zai-org/GLM-5.3".to_string(),
             "moonshotai/Kimi-K2.7-Code".to_string(),
             "deepseek-ai/DeepSeek-V4-Pro".to_string(),
         ];
@@ -3986,7 +4171,7 @@ mod model_mapping_tests {
         assert!(inferred_model_aliases(&models).is_empty());
 
         let rows = model_mapping_rows_from_config(&models, &BTreeMap::new());
-        assert_eq!(rows[0].upstream_model, "zai-org/GLM-5.2");
+        assert_eq!(rows[0].upstream_model, "zai-org/GLM-5.3");
         assert!(rows[0].codex_models.is_empty());
         assert!(rows[1].codex_models.is_empty());
         assert!(rows[2].codex_models.is_empty());
@@ -4026,6 +4211,104 @@ mod model_mapping_tests {
                 "deepseek-ai/DeepSeek-V4-Pro",
                 "deepseek-ai/DeepSeek-V4-Flash",
             ]
+        );
+    }
+
+    #[test]
+    fn versioned_zai_model_list_does_not_add_v1_fallback() {
+        let candidates =
+            model_list_candidates("https://open.bigmodel.cn/api/coding/paas/v4", None, &[]);
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.url.as_str())
+                .collect::<Vec<_>>(),
+            vec!["https://open.bigmodel.cn/api/coding/paas/v4/models"]
+        );
+    }
+
+    #[test]
+    fn known_zai_model_list_uses_selected_api_root() {
+        let provider = ProviderConfig {
+            provider_type: ProviderType::AnthropicMessages,
+            compatibility: Some("glm_anthropic".to_string()),
+            base_url: "https://api.z.ai/api/anthropic".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            known_models_urls_for_provider(&provider),
+            vec![
+                "https://api.z.ai/api/paas/v4/models",
+                "https://open.bigmodel.cn/api/paas/v4/models",
+            ]
+        );
+    }
+
+    #[test]
+    fn zai_coding_plan_model_list_uses_only_coding_catalogs() {
+        let provider = ProviderConfig {
+            provider_type: ProviderType::AnthropicMessages,
+            compatibility: Some("glm_anthropic".to_string()),
+            zai_access_mode: ZaiAccessMode::CodingPlan,
+            base_url: "https://api.z.ai/api/anthropic".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            known_models_urls_for_provider(&provider),
+            vec![
+                "https://api.z.ai/api/coding/paas/v4/models",
+                "https://open.bigmodel.cn/api/coding/paas/v4/models",
+            ]
+        );
+    }
+
+    #[test]
+    fn zai_anthropic_model_list_prefers_china_catalogs_for_china_base_url() {
+        let provider = ProviderConfig {
+            provider_type: ProviderType::AnthropicMessages,
+            compatibility: Some("glm_anthropic".to_string()),
+            base_url: "https://open.bigmodel.cn/api/anthropic".to_string(),
+            ..Default::default()
+        };
+
+        let candidates = model_list_candidates(
+            &provider.base_url,
+            None,
+            &known_models_urls_for_provider(&provider),
+        );
+
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|candidate| candidate.url.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "https://open.bigmodel.cn/api/paas/v4/models",
+                "https://api.z.ai/api/paas/v4/models",
+            ]
+        );
+    }
+
+    #[test]
+    fn zai_anthropic_model_fetch_preserves_messages_base_url() {
+        let provider = ProviderConfig {
+            compatibility: Some("glm_anthropic".to_string()),
+            provider_type: ProviderType::AnthropicMessages,
+            base_url: "https://open.bigmodel.cn/api/anthropic".to_string(),
+            ..Default::default()
+        };
+        let candidates = model_list_candidates(
+            &provider.base_url,
+            None,
+            &known_models_urls_for_provider(&provider),
+        );
+
+        assert_eq!(
+            candidates[0].normalized_base_url,
+            "https://open.bigmodel.cn/api/anthropic"
         );
     }
 
@@ -4263,7 +4546,7 @@ mod model_mapping_tests {
 fn fetch_remote_models(
     base_url: &str,
     models_url: Option<&str>,
-    fallback_models_url: Option<&str>,
+    fallback_models_urls: &[String],
     api_key: &str,
     timeout_secs: u64,
 ) -> Result<(Vec<String>, String), String> {
@@ -4276,7 +4559,7 @@ fn fetch_remote_models(
     .build()
     .map_err(|err| err.to_string())?;
     let mut errors = Vec::new();
-    for candidate in model_list_candidates(base_url, models_url, fallback_models_url) {
+    for candidate in model_list_candidates(base_url, models_url, fallback_models_urls) {
         let mut request = client.get(&candidate.url);
         if !api_key.trim().is_empty() {
             request = request.header("authorization", format!("Bearer {}", api_key.trim()));
@@ -4307,7 +4590,14 @@ fn fetch_remote_models(
         }
 
         match serde_json::from_str::<serde_json::Value>(&body) {
-            Ok(json) => return Ok((extract_model_ids(&json), candidate.normalized_base_url)),
+            Ok(json) => {
+                let models = extract_model_ids(&json);
+                if models.is_empty() {
+                    errors.push(format!("{}: response contains no models", candidate.url));
+                    continue;
+                }
+                return Ok((models, candidate.normalized_base_url));
+            }
             Err(err) => errors.push(format!(
                 "{}: response is not JSON ({err}): {}",
                 candidate.url,
@@ -4326,34 +4616,48 @@ struct ModelListCandidate {
 fn model_list_candidates(
     base_url: &str,
     models_url: Option<&str>,
-    fallback_models_url: Option<&str>,
+    fallback_models_urls: &[String],
 ) -> Vec<ModelListCandidate> {
     let raw = base_url.trim().trim_end_matches('/');
-    if raw.is_empty() {
+    if !is_http_url(raw) {
         return Vec::new();
     }
 
     let mut candidates = Vec::new();
+    let normalized_base_url = if fallback_models_urls.is_empty() {
+        provider_display_base_url(raw)
+    } else {
+        // Z.AI's model catalog is separate from its Anthropic Messages base
+        // URL. Preserve the latter exactly when the catalog request succeeds.
+        raw.to_string()
+    };
     if let Some(models_url) = models_url.map(str::trim).filter(|value| !value.is_empty()) {
-        push_configured_model_list_candidates(&mut candidates, models_url, raw);
+        push_configured_model_list_candidates(
+            &mut candidates,
+            models_url,
+            normalized_base_url.clone(),
+        );
+    }
+
+    // Z.AI exposes model discovery on its OpenAI-compatible API roots even
+    // when the conversation itself uses the Anthropic Messages endpoint.
+    // Do not derive /models from /api/anthropic; that endpoint is not a model
+    // catalog and used to produce misleading 401/404 candidates.
+    if !fallback_models_urls.is_empty() {
+        for url in fallback_models_urls {
+            push_model_list_candidate(&mut candidates, url.clone(), normalized_base_url.clone());
+        }
+        return candidates;
     }
 
     let root = provider_api_root(raw);
     push_model_list_candidate(&mut candidates, format!("{raw}/models"), raw.to_string());
-    push_model_list_candidate(
-        &mut candidates,
-        format!("{root}/v1/models"),
-        provider_display_base_url(&root),
-    );
-    if models_url
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .is_none()
-        && let Some(fallback_models_url) = fallback_models_url
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-    {
-        push_configured_model_list_candidates(&mut candidates, fallback_models_url, raw);
+    if !has_api_version_suffix(raw) {
+        push_model_list_candidate(
+            &mut candidates,
+            format!("{root}/v1/models"),
+            provider_display_base_url(&root),
+        );
     }
     candidates
 }
@@ -4361,14 +4665,13 @@ fn model_list_candidates(
 fn push_configured_model_list_candidates(
     candidates: &mut Vec<ModelListCandidate>,
     models_url: &str,
-    base_url: &str,
+    normalized_base_url: String,
 ) {
     let configured = models_url.trim().trim_end_matches('/');
-    if configured.is_empty() {
+    if !is_http_url(configured) {
         return;
     }
 
-    let normalized_base_url = provider_display_base_url(base_url);
     if configured.to_ascii_lowercase().ends_with("/models") {
         push_model_list_candidate(candidates, configured.to_string(), normalized_base_url);
         return;
@@ -4388,6 +4691,9 @@ fn push_model_list_candidate(
     url: String,
     normalized_base_url: String,
 ) {
+    if !is_http_url(&url) {
+        return;
+    }
     if candidates.iter().any(|candidate| candidate.url == url) {
         return;
     }

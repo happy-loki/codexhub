@@ -172,6 +172,8 @@ mod tests {
             "gpt-5.5",
             "deepseek-v4-pro",
             "deepseek-v4-flash",
+            "GLM-5.3",
+            "GLM-5.3-Flash",
             "custom-model",
             "codex-auto-review",
         ]);
@@ -193,7 +195,9 @@ mod tests {
                 "grok-4.6",
                 "gpt-5.5",
                 "deepseek-v4-pro",
-                "deepseek-v4-flash"
+                "deepseek-v4-flash",
+                "GLM-5.3",
+                "GLM-5.3-Flash"
             ]
         );
         assert_eq!(response["models"][3]["display_name"], "Grok-4.6");
@@ -216,6 +220,18 @@ mod tests {
         );
         assert_eq!(
             response["models"][6]["input_modalities"],
+            json!(["text", "image"])
+        );
+        assert_eq!(
+            response["models"][7]["comp_hash"],
+            "codexhub-anthropic-summary-v1"
+        );
+        assert_eq!(
+            response["models"][8]["comp_hash"],
+            "codexhub-anthropic-summary-v1"
+        );
+        assert_eq!(
+            response["models"][8]["input_modalities"],
             json!(["text", "image"])
         );
     }
@@ -336,7 +352,13 @@ mod tests {
         assert_eq!(comp_hash("grok-4.6"), "codexhub-grok-summary-v1");
         assert_eq!(comp_hash("deepseek-v4-pro"), "3000");
         assert_eq!(comp_hash("deepseek-v4-flash"), "3000");
-        assert_eq!(comp_hash("GLM-5.2"), "codexhub-anthropic-summary-v1");
+        for slug in ["GLM-5.3", "GLM-5.3-Flash"] {
+            assert_eq!(
+                comp_hash(slug),
+                "codexhub-anthropic-summary-v1",
+                "model {slug}"
+            );
+        }
         assert_eq!(comp_hash("Opus-4.8"), "codexhub-anthropic-summary-v1");
         assert_eq!(comp_hash("Sonnet-4.6"), "codexhub-anthropic-summary-v1");
 
@@ -347,7 +369,13 @@ mod tests {
 
     #[test]
     fn codexhub_third_party_models_use_372k_context_window() {
-        for slug in ["grok-4.6", "GLM-5.2", "Opus-4.8", "Sonnet-4.6"] {
+        for slug in [
+            "grok-4.6",
+            "GLM-5.3",
+            "GLM-5.3-Flash",
+            "Opus-4.8",
+            "Sonnet-4.6",
+        ] {
             let model = catalog_models()
                 .iter()
                 .find(|model| model_slug(model) == Some(slug))
@@ -481,6 +509,8 @@ mod tests {
             "gpt-5.5",
             "gpt-5.4",
             "gpt-5.4-mini",
+            "GLM-5.3",
+            "GLM-5.3-Flash",
         ] {
             assert!(
                 slugs.contains(&expected),

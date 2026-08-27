@@ -1657,7 +1657,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let upstream = requests.recv().await.expect("captured upstream request");
-        assert_eq!(upstream["model"], "deepseek-v4-flash");
+        assert_eq!(upstream["model"], "deepseek-v4-flash-vision-exp");
         assert!(upstream.get("prompt_cache_key").is_none());
         assert!(upstream.get("prompt_cache_retention").is_none());
         assert_eq!(upstream["tools"][0]["type"], "web_search");

@@ -5,10 +5,10 @@ use super::stream::AnthropicSseToResponsesSse;
 use super::stream_internal::InternalSseEnvelope;
 use super::types::{ANTHROPIC_CLAUDE_CODE_BETA, ANTHROPIC_WEB_SEARCH_TYPE, CLAUDE_CODE_USER_AGENT};
 use super::{
-    WebSearchToolUse, anthropic_message_from_sse, append_tool_results, bearer_authorization,
-    build_anthropic_upstream_request, emit_injected_web_search_call, find_web_search_tool_uses,
-    insert_metadata_user_id, internal_web_search_body, merge_anthropic_betas,
-    raw_sse_has_first_content_token, scope_anthropic_response,
+    anthropic_message_from_sse, append_tool_results, bearer_authorization,
+    build_anthropic_upstream_request, find_web_search_tool_uses, insert_metadata_user_id,
+    internal_web_search_body, merge_anthropic_betas, raw_sse_has_first_content_token,
+    scope_anthropic_response, search_results_to_tool_text,
 };
 use crate::ai_gateway::config::{ProviderConfig, ProviderType};
 use crate::ai_gateway::context::GatewayContext;
@@ -310,7 +310,7 @@ fn glm_profile_also_uses_claude_code_headers() {
     inbound_headers.insert("user-agent", HeaderValue::from_static("Codex/1.0"));
     let ctx = GatewayContext::extract(&inbound_headers, None);
     let req = request(vec![message("user", "hello")]);
-    let body = json!({"model":"glm-5.2","messages":[]});
+    let body = json!({"model":"glm-5.3","messages":[]});
     let provider = provider("glm-key", Some("glm_anthropic"));
     let options = AnthropicProviderOptions::from_provider(&provider).unwrap();
 
@@ -1872,7 +1872,7 @@ fn converts_anthropic_tool_use_web_search_response() {
 fn reconstructs_multiple_web_search_tool_uses_from_stream() {
     let raw_sse = concat!(
         "event: message_start\n",
-        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.2\",\"content\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
+        "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3\",\"content\":[],\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\n",
         "event: content_block_start\n",
         "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_1\",\"name\":\"WebSearch\",\"input\":{}}}\n\n",
         "event: content_block_delta\n",
@@ -1935,7 +1935,7 @@ fn ignores_duplicate_web_search_tool_use_ids_from_stream() {
 #[test]
 fn appends_all_parallel_web_search_tool_results() {
     let mut body = json!({
-        "model": "glm-5.2",
+        "model": "glm-5.3",
         "messages": [{
             "role": "user",
             "content": [{"type": "text", "text": "search"}]
@@ -1979,6 +1979,177 @@ fn appends_all_parallel_web_search_tool_results() {
     assert_eq!(
         messages[2]["content"][1]["content"],
         "result two\n\nresult two extra"
+    );
+}
+
+#[test]
+fn normalizes_standard_web_search_results() {
+    let event = json!({
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+            "type": "web_search_tool_result",
+            "content": [{
+                "type": "web_search_result",
+                "title": "Rust",
+                "url": "https://www.rust-lang.org",
+                "snippet": "A language empowering everyone."
+            }]
+        }
+    });
+    let raw_sse = format!("event: content_block_start\ndata: {event}\n\n");
+
+    let text = search_results_to_tool_text("rust language", &raw_sse);
+
+    assert!(text.contains("Rust"));
+    assert!(text.contains("URL: https://www.rust-lang.org"));
+    assert!(text.contains("Snippet: A language empowering everyone."));
+    assert!(!text.contains("No web search results were returned"));
+}
+
+#[test]
+fn normalizes_glm_nested_tool_result_content() {
+    let embedded_results = json!([[
+        {
+            "title": "OpenAI News",
+            "link": "https://openai.com/news/",
+            "content": "Latest OpenAI news.",
+            "refer": "ref_1"
+        },
+        {
+            "title": "Rust",
+            "link": "https://www.rust-lang.org/",
+            "content": "Rust language homepage.",
+            "refer": "ref_2"
+        }
+    ]]);
+    let event = json!({
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+            "type": "tool_result",
+            "tool_use_id": "call_search_1",
+            "content": serde_json::to_string(&embedded_results).unwrap()
+        }
+    });
+    let raw_sse = format!("event: content_block_start\ndata: {event}\n\n");
+
+    let text = search_results_to_tool_text("OpenAI and Rust", &raw_sse);
+
+    assert!(text.contains("OpenAI News"));
+    assert!(text.contains("URL: https://openai.com/news/"));
+    assert!(text.contains("Snippet: Latest OpenAI news."));
+    assert!(text.contains("Rust language homepage."));
+    assert!(!text.contains("No web search results were returned"));
+}
+
+#[tokio::test]
+async fn forwards_a_converter_web_search_once_without_gateway_duplicate() {
+    let input = stream::iter(vec![
+        Ok::<_, std::io::Error>(Bytes::from_static(
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_search_1\",\"name\":\"WebSearch\",\"input\":{}}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\":\\\"OpenAI June 2026\\\"}\"}}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+        )),
+        Ok(Bytes::from_static(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+        )),
+    ]);
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    let mut envelope = InternalSseEnvelope::new("resp_test".to_string(), "glm-5.3".to_string(), 0);
+    envelope.ensure_started(&tx).await.unwrap();
+    envelope.begin_round();
+    let mut converted = response_stream(input, "glm-5.3", ToolNameMap::default());
+    while let Some(frame) = converted.next().await {
+        for (event, data) in super::parse_converted_frames(&frame.unwrap()) {
+            envelope.forward_converted(&tx, &event, data).await.unwrap();
+        }
+    }
+    envelope.finish(&tx).await.unwrap();
+    drop(tx);
+
+    let mut chunks = Vec::new();
+    while let Some(item) = rx.recv().await {
+        chunks.push(item.unwrap());
+    }
+    let events = parse_events_from_bytes(&chunks);
+    let searches = events
+        .iter()
+        .filter(|(event, data)| {
+            event == "response.output_item.done" && data["item"]["type"] == "web_search_call"
+        })
+        .collect::<Vec<_>>();
+
+    assert_eq!(searches.len(), 1);
+    assert_eq!(searches[0].1["item"]["call_id"], "call_search_1");
+    assert_eq!(searches[0].1["item"]["action"]["query"], "OpenAI June 2026");
+}
+
+#[test]
+fn deduplicates_search_results_and_ignores_encrypted_content_as_snippet() {
+    let event = json!({
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+            "type": "tool_result",
+            "tool_use_id": "call_search_1",
+            "content": [
+                {
+                    "type": "web_search_result",
+                    "title": "First title",
+                    "link": "https://example.com",
+                    "content": "Readable result"
+                },
+                {
+                    "type": "web_search_result",
+                    "title": "Duplicate title",
+                    "link": "https://example.com",
+                    "encrypted_content": "opaque-private-payload"
+                },
+                {
+                    "type": "web_search_result",
+                    "title": "Opaque only",
+                    "encrypted_content": "opaque-only-payload"
+                }
+            ]
+        }
+    });
+    let raw_sse = format!("event: content_block_start\ndata: {event}\n\n");
+
+    let text = search_results_to_tool_text("example", &raw_sse);
+
+    assert_eq!(text.matches("https://example.com").count(), 1);
+    assert!(text.contains("First title"));
+    assert!(text.contains("Snippet: Readable result"));
+    assert!(text.contains("Opaque only"));
+    assert!(!text.contains("opaque-private-payload"));
+    assert!(!text.contains("opaque-only-payload"));
+}
+
+#[test]
+fn emits_empty_search_message_only_when_no_readable_results_exist() {
+    let event = json!({
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": {
+            "type": "tool_result",
+            "tool_use_id": "call_search_1",
+            "content": "[{\"text\":[{\"encrypted_content\":\"opaque-only-payload\"}],\"type\":\"text\"}]"
+        }
+    });
+    let raw_sse = format!("event: content_block_start\ndata: {event}\n\n");
+
+    assert_eq!(
+        search_results_to_tool_text("opaque", &raw_sse),
+        "No web search results were returned for query: opaque"
     );
 }
 
@@ -2079,112 +2250,6 @@ fn raw_sse_first_content_token_ignores_message_start_and_ping() {
     assert!(
         raw_sse_has_first_content_token(&with_delta),
         "first content_block_delta marks time-to-first-token"
-    );
-}
-
-#[tokio::test]
-async fn internal_web_search_stream_emits_web_search_call_added_and_done_only() {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-    let mut envelope =
-        InternalSseEnvelope::new("resp_test".to_string(), "claude-opus-4-8".to_string(), 0);
-    let tool_use = WebSearchToolUse {
-        id: "toolu_search_1".to_string(),
-        query: "World Cup 2026 results".to_string(),
-    };
-
-    envelope.ensure_started(&tx).await.unwrap();
-    emit_injected_web_search_call(&mut envelope, &tx, &tool_use)
-        .await
-        .unwrap();
-    // Simulate a following answer round: forward a converted message item, then
-    // finish the envelope.
-    envelope.begin_round();
-    envelope
-        .forward_converted(
-            &tx,
-            "response.output_item.done",
-            json!({
-                "type": "response.output_item.done",
-                "sequence_number": 0,
-                "output_index": 0,
-                "item": {
-                    "type": "message",
-                    "id": "msg_1",
-                    "role": "assistant",
-                    "status": "completed",
-                    "content": [{"type": "output_text", "text": "Search answer.", "annotations": []}],
-                },
-            }),
-        )
-        .await
-        .unwrap();
-    envelope.finish(&tx).await.unwrap();
-    drop(tx);
-
-    let mut chunks = Vec::new();
-    while let Some(item) = rx.recv().await {
-        chunks.push(item.unwrap());
-    }
-    let events = parse_events_from_bytes(&chunks);
-    let event_names = events
-        .iter()
-        .map(|(event, _)| event.as_str())
-        .collect::<Vec<_>>();
-
-    assert!(event_names.contains(&"response.created"));
-    assert!(event_names.contains(&"response.in_progress"));
-    // A web-search call is a single non-streamed item: only added + done. The
-    // intermediate progress events the Codex client ignores are not emitted.
-    assert!(!event_names.contains(&"response.web_search_call.in_progress"));
-    assert!(!event_names.contains(&"response.web_search_call.searching"));
-    assert!(!event_names.contains(&"response.web_search_call.completed"));
-    let added = events
-        .iter()
-        .find(|(event, data)| {
-            event == "response.output_item.added" && data["item"]["type"] == "web_search_call"
-        })
-        .unwrap();
-    assert_eq!(added.1["item"]["status"], "in_progress");
-    assert!(added.1["item"].get("action").is_none());
-
-    let done = events
-        .iter()
-        .find(|(event, data)| {
-            event == "response.output_item.done" && data["item"]["type"] == "web_search_call"
-        })
-        .unwrap();
-    assert_eq!(done.1["item"]["status"], "completed");
-    assert_eq!(done.1["item"]["action"]["query"], "World Cup 2026 results");
-    assert_eq!(
-        done.1["item"]["action"]["queries"][0],
-        "World Cup 2026 results"
-    );
-
-    let completed = events
-        .iter()
-        .find(|(event, _)| event == "response.completed")
-        .unwrap();
-    let output = completed.1["response"]["output"].as_array().unwrap();
-    // Terminal response should carry both the injected web-search call and the
-    // streamed message, in order.
-    assert_eq!(output.len(), 2);
-    assert_eq!(output[0]["type"], "web_search_call");
-    assert_eq!(output[1]["type"], "message");
-
-    // A single envelope: exactly one created/in_progress/completed.
-    assert_eq!(
-        event_names
-            .iter()
-            .filter(|e| **e == "response.created")
-            .count(),
-        1
-    );
-    assert_eq!(
-        event_names
-            .iter()
-            .filter(|e| **e == "response.completed")
-            .count(),
-        1
     );
 }
 
@@ -2383,7 +2448,7 @@ fn converts_glm_web_search_prime_response() {
         "id": "msg_123",
         "type": "message",
         "role": "assistant",
-        "model": "glm-5.2",
+        "model": "glm-5.3",
         "content": [
             {
                 "type": "server_tool_use",
@@ -2426,7 +2491,7 @@ fn filters_glm_private_web_search_text_from_response() {
         "id": "msg_123",
         "type": "message",
         "role": "assistant",
-        "model": "glm-5.2",
+        "model": "glm-5.3",
         "content": [
             {
                 "type": "text",
@@ -3077,7 +3142,7 @@ async fn streams_skip_empty_anthropic_internal_web_search_sse() {
 async fn streams_glm_web_search_prime_as_responses_sse() {
     let input = stream::iter(vec![
             Ok::<_, std::io::Error>(Bytes::from_static(
-                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.2\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
             )),
             Ok(Bytes::from_static(
                 b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"server_tool_use\",\"id\":\"call_search_1\",\"name\":\"web_search_prime\",\"input\":{\"search_query\":\"OpenAI June 2026\"}}}\n\n",
@@ -3137,7 +3202,7 @@ async fn streams_glm_web_search_prime_as_responses_sse() {
 async fn streams_glm_private_web_search_text_is_filtered() {
     let input = stream::iter(vec![
             Ok::<_, std::io::Error>(Bytes::from_static(
-                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.2\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+                b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
             )),
             Ok(Bytes::from_static(
                 b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
@@ -3207,7 +3272,7 @@ fn request_defaults_max_tokens_when_codex_omits_it() {
 async fn streams_glm_plain_text_token_by_token() {
     let input = stream::iter(vec![
         Ok::<_, std::io::Error>(Bytes::from_static(
-            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.2\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
+            b"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"glm-5.3\",\"content\":[],\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n",
         )),
         Ok(Bytes::from_static(
             b"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",

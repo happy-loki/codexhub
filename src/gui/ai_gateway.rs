@@ -230,7 +230,7 @@ pub(super) fn provider_protocol_display(
         ProviderType::GrokResponses => "Grok Responses".to_string(),
         ProviderType::ChatCompletions => "Chat Completions".to_string(),
         ProviderType::AnthropicMessages => match compatibility {
-            Some("glm_anthropic" | "zhipu_anthropic") => "GLM Anthropic Messages".to_string(),
+            Some("glm_anthropic" | "zhipu_anthropic") => "Z.AI Anthropic".to_string(),
             _ => "Anthropic Messages".to_string(),
         },
     }

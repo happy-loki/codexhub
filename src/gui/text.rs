@@ -2714,10 +2714,10 @@ impl GuiText {
     pub(super) fn ai_gw_channel_editor_help(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "选择 OpenAI、Grok、DeepSeek Responses、其他 Chat 兼容厂商、Anthropic 或智谱 GLM，并填写大模型厂商接入信息。"
+                "选择 OpenAI、Grok、DeepSeek Responses、智谱 Anthropic、Anthropic 或其它兼容厂商，并填写大模型厂商接入信息。"
             }
             GuiLocale::EnUs => {
-                "Choose OpenAI, Grok, DeepSeek Responses, another Chat-compatible provider, Anthropic, or GLM and fill in the channel connection details."
+                "Choose OpenAI, Grok, DeepSeek Responses, Z.AI Anthropic, Anthropic, or another compatible provider and fill in the channel connection details."
             }
         }
     }
@@ -2800,19 +2800,46 @@ impl GuiText {
         }
     }
 
+    pub(super) fn ai_gw_service_zai_anthropic(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "智谱 Anthropic",
+            GuiLocale::EnUs => "Z.AI Anthropic",
+        }
+    }
+
+    pub(super) fn ai_gw_zai_access_mode(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "服务类型",
+            GuiLocale::EnUs => "Service type",
+        }
+    }
+
+    pub(super) fn ai_gw_zai_api(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "智谱 API",
+            GuiLocale::EnUs => "Z.AI API",
+        }
+    }
+
+    pub(super) fn ai_gw_zai_coding_plan(self) -> &'static str {
+        "GLM Coding Plan"
+    }
+
+    pub(super) fn ai_gw_zai_access_mode_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "两种模式都使用 Anthropic 接口；这里决定额度类型和模型目录。",
+            GuiLocale::EnUs => {
+                "Both modes use the Anthropic endpoint; this selects the quota type and model catalog."
+            }
+        }
+    }
+
     pub(super) fn ai_gw_service_deepseek_responses(self) -> &'static str {
         "DeepSeek Responses"
     }
 
     pub(super) fn ai_gw_service_anthropic(self) -> &'static str {
         "Anthropic"
-    }
-
-    pub(super) fn ai_gw_service_glm(self) -> &'static str {
-        match self.locale {
-            GuiLocale::ZhCn => "智谱 GLM",
-            GuiLocale::EnUs => "GLM",
-        }
     }
 
     pub(super) fn ai_gw_col_base_url(self) -> &'static str {
@@ -2829,16 +2856,23 @@ impl GuiText {
     pub(super) fn ai_gw_models_url_help(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => {
-                "留空会根据 Base URL 自动尝试常见模型列表接口；如果获取失败，再填写完整的 /models 地址。"
+                "留空会根据上面选择的服务类型获取对应模型目录，并自动携带 API Key。智谱对话仍使用 Anthropic 接口。"
             }
             GuiLocale::EnUs => {
-                "Leave blank to try common model-list endpoints from Base URL. Fill the full /models URL only if fetching fails."
+                "Leave blank to use the catalog for the selected service type with the API key. Z.AI conversations still use the Anthropic endpoint."
             }
         }
     }
 
     pub(super) fn ai_gw_col_api_key(self) -> &'static str {
         "API Key"
+    }
+
+    pub(super) fn ai_gw_api_key_empty(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "请先填写 API Key，再获取模型列表。",
+            GuiLocale::EnUs => "Enter the API key before fetching the model list.",
+        }
     }
 
     pub(super) fn ai_gw_weight(self) -> &'static str {
@@ -3018,7 +3052,7 @@ impl GuiText {
     }
 
     pub(super) fn provider_type_glm_anthropic_messages(self) -> &'static str {
-        "GLM Anthropic Messages"
+        "Z.AI Anthropic Messages"
     }
 
     pub(super) fn ai_gw_saved(self) -> &'static str {

@@ -3142,7 +3142,8 @@ mod tests {
             "grok-4.6",
             "deepseek-v4-pro",
             "deepseek-v4-flash",
-            "GLM-5.2",
+            "GLM-5.3",
+            "GLM-5.3-Flash",
             "Opus-4.8",
             "Sonnet-4.6",
         ]
@@ -3152,7 +3153,7 @@ mod tests {
         let report = launch_and_inject(models, "http://127.0.0.1:3847/backend-api")
             .await
             .expect("live enhanced injection");
-        assert_eq!(report.available_models.len(), 12);
+        assert_eq!(report.available_models.len(), 13);
         assert!(!report.use_hidden_models);
         assert_eq!(report.key_gates_enabled, SUPPORTED_FEATURE_GATES.len());
         assert!(report.i18n_enabled);
