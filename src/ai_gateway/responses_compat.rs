@@ -8,7 +8,9 @@ use std::{
 };
 
 use super::encrypted_content::{EncryptedContentScope, encode_response_object};
-use super::tool_names::{ToolCallKind, ToolNameMap};
+use super::tool_names::{
+    GROK_READ_FILE_TOOL_NAME, ToolCallKind, ToolNameMap, VIEW_IMAGE_TOOL_NAME,
+};
 
 /// Applies narrow, idempotent compatibility rules to a Responses payload while
 /// preserving fields that CodexHub does not know about yet.
@@ -435,8 +437,44 @@ fn restore_provider_tool_call(
             object.insert("arguments".to_string(), tool_search_arguments(arguments));
             changed = true;
         }
+    } else if target.kind == ToolCallKind::Function
+        && target.namespace.is_none()
+        && target.name == VIEW_IMAGE_TOOL_NAME
+        && let Some(arguments) = object.get_mut("arguments")
+    {
+        changed |= restore_view_image_arguments(arguments);
     }
     changed
+}
+
+fn restore_view_image_arguments(arguments: &mut Value) -> bool {
+    match arguments {
+        Value::String(arguments_text) => {
+            let Ok(mut parsed) = serde_json::from_str::<Value>(arguments_text) else {
+                return false;
+            };
+            if !restore_view_image_argument_object(&mut parsed) {
+                return false;
+            }
+            let Ok(restored) = serde_json::to_string(&parsed) else {
+                return false;
+            };
+            *arguments_text = restored;
+            true
+        }
+        arguments => restore_view_image_argument_object(arguments),
+    }
+}
+
+fn restore_view_image_argument_object(arguments: &mut Value) -> bool {
+    let Some(arguments) = arguments.as_object_mut() else {
+        return false;
+    };
+    let Some(target_file) = arguments.remove("target_file") else {
+        return false;
+    };
+    arguments.entry("path".to_string()).or_insert(target_file);
+    true
 }
 
 fn set_string_field(object: &mut serde_json::Map<String, Value>, key: &str, value: &str) -> bool {
@@ -767,6 +805,49 @@ mod tests {
     }
 
     #[test]
+    fn json_body_restores_grok_read_file_as_view_image() {
+        let mut tool_names = ToolNameMap::default();
+        let read_file_name =
+            tool_names.encode_function_as(None, VIEW_IMAGE_TOOL_NAME, GROK_READ_FILE_TOOL_NAME);
+        let body = Bytes::from(
+            json!({
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_image_string",
+                        "name": read_file_name,
+                        "arguments": "{\"target_file\":\"C:/tmp/one.png\"}"
+                    },
+                    {
+                        "type": "function_call",
+                        "call_id": "call_image_object",
+                        "name": read_file_name,
+                        "arguments": {"target_file":"C:/tmp/two.png"}
+                    }
+                ]
+            })
+            .to_string(),
+        );
+
+        let (_, parsed) = normalize_json_body_with_scope_and_tool_names(
+            body,
+            Some(&grok_scope()),
+            Some(&tool_names),
+        );
+        let parsed = parsed.unwrap();
+
+        assert_eq!(parsed["output"][0]["name"], VIEW_IMAGE_TOOL_NAME);
+        let string_arguments: Value =
+            serde_json::from_str(parsed["output"][0]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(string_arguments, json!({"path":"C:/tmp/one.png"}));
+        assert_eq!(parsed["output"][1]["name"], VIEW_IMAGE_TOOL_NAME);
+        assert_eq!(
+            parsed["output"][1]["arguments"],
+            json!({"path":"C:/tmp/two.png"})
+        );
+    }
+
+    #[test]
     fn tool_search_limit_normalizes_only_non_negative_integral_floats() {
         assert_eq!(
             tool_search_arguments(json!({"query": "agents", "limit": 10.0})),
@@ -899,6 +980,59 @@ mod tests {
             json!({"query": "repo tools", "limit": 10})
         );
         assert!(item.get("name").is_none());
+    }
+
+    #[tokio::test]
+    async fn stream_restores_grok_read_file_added_and_done_items() {
+        let mut tool_names = ToolNameMap::default();
+        let read_file_name =
+            tool_names.encode_function_as(None, VIEW_IMAGE_TOOL_NAME, GROK_READ_FILE_TOOL_NAME);
+        let chunks = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::from(format!(
+            "data: {}\n\ndata: {}\n\n",
+            json!({
+                "type": "response.output_item.added",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_image",
+                    "call_id": "call_image",
+                    "name": read_file_name,
+                    "arguments": ""
+                }
+            }),
+            json!({
+                "type": "response.output_item.done",
+                "item": {
+                    "type": "function_call",
+                    "id": "fc_image",
+                    "call_id": "call_image",
+                    "name": read_file_name,
+                    "arguments": "{\"target_file\":\"C:/tmp/image.png\"}"
+                }
+            })
+        )))]);
+
+        let output = ResponsesCompatSseStream::with_compatibility(
+            Box::pin(chunks),
+            grok_scope(),
+            Some(tool_names),
+        )
+        .collect::<Vec<Result<Bytes, std::io::Error>>>()
+        .await
+        .into_iter()
+        .map(|item| String::from_utf8(item.unwrap().to_vec()).unwrap())
+        .collect::<String>();
+
+        let events = output
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .map(|data| serde_json::from_str::<Value>(data).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(events[0]["item"]["name"], VIEW_IMAGE_TOOL_NAME);
+        assert_eq!(events[0]["item"]["arguments"], "");
+        assert_eq!(events[1]["item"]["name"], VIEW_IMAGE_TOOL_NAME);
+        let arguments: Value =
+            serde_json::from_str(events[1]["item"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(arguments, json!({"path":"C:/tmp/image.png"}));
     }
 
     #[tokio::test]

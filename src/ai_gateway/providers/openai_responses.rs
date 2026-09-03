@@ -20,7 +20,7 @@ use crate::ai_gateway::request_log::{
 use crate::ai_gateway::responses_compat::{
     ResponsesCompatSseStream, normalize_json_body_with_scope_and_tool_names,
 };
-use crate::ai_gateway::tool_names::ToolNameMap;
+use crate::ai_gateway::tool_names::{GROK_READ_FILE_TOOL_NAME, ToolNameMap, VIEW_IMAGE_TOOL_NAME};
 
 use super::{
     apply_total_request_timeout, ensure_success_response, execute_stream_start,
@@ -214,6 +214,7 @@ async fn passthrough_to_endpoint(
             structured_outputs = grok_compatibility.structured_outputs,
             removed_phase_fields = grok_compatibility.removed_phase_fields,
             namespaced_calls = grok_compatibility.namespaced_calls,
+            view_image_calls = grok_compatibility.view_image_calls,
             "normalized Codex tool history for Grok ModelInput"
         );
     }
@@ -534,6 +535,7 @@ struct GrokModelInputStats {
     structured_outputs: usize,
     removed_phase_fields: usize,
     namespaced_calls: usize,
+    view_image_calls: usize,
     tool_search_calls: usize,
     tool_search_outputs: usize,
 }
@@ -690,6 +692,7 @@ impl GrokModelInputStats {
             || self.structured_outputs > 0
             || self.removed_phase_fields > 0
             || self.namespaced_calls > 0
+            || self.view_image_calls > 0
             || self.tool_search_calls > 0
             || self.tool_search_outputs > 0
     }
@@ -770,15 +773,34 @@ fn normalize_grok_model_input_with_tool_names(
                     .get("name")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string);
-                if let (Some(namespace), Some(name), Some(tool_names)) =
-                    (namespace, name, tool_names.as_deref_mut())
-                {
-                    item.insert(
-                        "name".to_string(),
-                        json!(tool_names.encode_function(Some(&namespace), &name)),
-                    );
-                    item.remove("namespace");
-                    stats.namespaced_calls += 1;
+                if let (Some(namespace), Some(name)) = (namespace.as_deref(), name.as_deref()) {
+                    if let Some(tool_names) = tool_names.as_deref_mut() {
+                        item.insert(
+                            "name".to_string(),
+                            json!(tool_names.encode_function(Some(namespace), name)),
+                        );
+                        item.remove("namespace");
+                        stats.namespaced_calls += 1;
+                    }
+                } else if namespace.is_none() && name.as_deref() == Some(VIEW_IMAGE_TOOL_NAME) {
+                    let encoded_name = tool_names
+                        .as_deref_mut()
+                        .map(|tool_names| {
+                            tool_names.encode_function_as(
+                                None,
+                                VIEW_IMAGE_TOOL_NAME,
+                                GROK_READ_FILE_TOOL_NAME,
+                            )
+                        })
+                        .unwrap_or_else(|| GROK_READ_FILE_TOOL_NAME.to_string());
+                    item.insert("name".to_string(), json!(encoded_name));
+                    if let Some(arguments) = item.remove("arguments") {
+                        item.insert(
+                            "arguments".to_string(),
+                            json!(grok_view_image_arguments_text(arguments)),
+                        );
+                    }
+                    stats.view_image_calls += 1;
                 }
             }
             "tool_search_call" => {
@@ -851,6 +873,36 @@ fn grok_function_arguments_text(arguments: serde_json::Value) -> String {
     }
 }
 
+fn grok_view_image_arguments_text(arguments: serde_json::Value) -> String {
+    match arguments {
+        serde_json::Value::String(arguments) => {
+            let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&arguments) else {
+                return arguments;
+            };
+            if !normalize_grok_view_image_argument_object(&mut parsed) {
+                return arguments;
+            }
+            serde_json::to_string(&parsed).unwrap_or(arguments)
+        }
+        mut arguments => {
+            normalize_grok_view_image_argument_object(&mut arguments);
+            serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string())
+        }
+    }
+}
+
+fn normalize_grok_view_image_argument_object(arguments: &mut serde_json::Value) -> bool {
+    let Some(arguments) = arguments.as_object_mut() else {
+        return false;
+    };
+    let mut changed = arguments.remove("detail").is_some();
+    if let Some(path) = arguments.remove("path") {
+        arguments.entry("target_file".to_string()).or_insert(path);
+        changed = true;
+    }
+    changed
+}
+
 fn normalize_grok_tool_output(item: &mut serde_json::Map<String, serde_json::Value>) -> bool {
     let Some(output) = item.get_mut("output") else {
         return false;
@@ -910,7 +962,9 @@ mod tests {
 
     use crate::ai_gateway::config::{ProviderConfig, ProviderType};
     use crate::ai_gateway::context::GatewayContext;
-    use crate::ai_gateway::tool_names::ToolNameMap;
+    use crate::ai_gateway::tool_names::{
+        GROK_READ_FILE_TOOL_NAME, ToolNameMap, VIEW_IMAGE_TOOL_NAME,
+    };
 
     use super::{
         is_failed_to_read_request_body_error, is_invalid_encrypted_content_error,
@@ -1328,6 +1382,63 @@ mod tests {
         assert_eq!(body["input"][0]["name"], "exec");
         assert_eq!(body["input"][1]["name"], browser_name);
         assert!(body["input"][1].get("namespace").is_none());
+    }
+
+    #[test]
+    fn grok_model_input_maps_view_image_history_to_read_file() {
+        let mut body = json!({
+            "input": [
+                {
+                    "type": "function_call",
+                    "call_id": "call_image_string",
+                    "name": "view_image",
+                    "arguments": "{\"path\":\"C:/tmp/one.png\",\"detail\":\"original\"}"
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_image_object",
+                    "name": "view_image",
+                    "arguments": {"path":"C:/tmp/two.png","detail":"high"}
+                }
+            ]
+        });
+        let mut tool_names = ToolNameMap::default();
+        tool_names.encode_function_as(None, VIEW_IMAGE_TOOL_NAME, GROK_READ_FILE_TOOL_NAME);
+
+        let stats = normalize_grok_model_input_with_tool_names(
+            &mut body,
+            &grok_provider(),
+            Some(&mut tool_names),
+        );
+
+        assert_eq!(stats.view_image_calls, 2);
+        for (index, expected_path) in ["C:/tmp/one.png", "C:/tmp/two.png"].iter().enumerate() {
+            let call = &body["input"][index];
+            assert_eq!(call["name"], GROK_READ_FILE_TOOL_NAME);
+            let arguments: serde_json::Value =
+                serde_json::from_str(call["arguments"].as_str().unwrap()).unwrap();
+            assert_eq!(arguments["target_file"], *expected_path);
+            assert!(arguments.get("path").is_none());
+            assert!(arguments.get("detail").is_none());
+        }
+    }
+
+    #[test]
+    fn non_grok_model_input_keeps_view_image_history_unchanged() {
+        let mut body = json!({
+            "input": [{
+                "type": "function_call",
+                "call_id": "call_image",
+                "name": "view_image",
+                "arguments": "{\"path\":\"C:/tmp/image.png\"}"
+            }]
+        });
+        let original = body.clone();
+
+        let stats = normalize_grok_model_input(&mut body, &openai_responses_provider());
+
+        assert!(!stats.changed());
+        assert_eq!(body, original);
     }
 
     #[test]

@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 pub const TOOL_SEARCH_NAME: &str = "tool_search";
+pub const VIEW_IMAGE_TOOL_NAME: &str = "view_image";
+pub const GROK_READ_FILE_TOOL_NAME: &str = "read_file";
 const NAMESPACE_MARKER: &str = "__codexns__";
 const LEGACY_NAMESPACE_MARKER: &str = "responses_unit__";
 
@@ -72,6 +74,15 @@ impl ToolNameMap {
         self.encode(ToolCallTarget::function(namespace, name))
     }
 
+    pub fn encode_function_as(
+        &mut self,
+        namespace: Option<&str>,
+        name: &str,
+        preferred_name: &str,
+    ) -> String {
+        self.encode_as(ToolCallTarget::function(namespace, name), preferred_name)
+    }
+
     pub fn encode_custom(&mut self, name: &str) -> String {
         self.encode(ToolCallTarget::custom(name))
     }
@@ -81,10 +92,6 @@ impl ToolNameMap {
     }
 
     pub fn encode(&mut self, target: ToolCallTarget) -> String {
-        if let Some(encoded) = self.target_to_encoded.get(&target) {
-            return encoded.clone();
-        }
-
         let preferred = match target.kind {
             ToolCallKind::Function => {
                 encode_provider_tool_name(target.namespace.as_deref(), &target.name)
@@ -92,7 +99,15 @@ impl ToolNameMap {
             ToolCallKind::ToolSearch => TOOL_SEARCH_NAME.to_string(),
             ToolCallKind::Custom => target.name.clone(),
         };
-        let encoded = self.allocate_encoded_name(&preferred, &target);
+        self.encode_as(target, &preferred)
+    }
+
+    fn encode_as(&mut self, target: ToolCallTarget, preferred: &str) -> String {
+        if let Some(encoded) = self.target_to_encoded.get(&target) {
+            return encoded.clone();
+        }
+
+        let encoded = self.allocate_encoded_name(preferred, &target);
         self.insert(encoded.clone(), target);
         encoded
     }
@@ -277,6 +292,25 @@ mod tests {
         assert_eq!(
             map.decode(&long).namespace.as_deref(),
             Some("very_long_namespace_with_many_segments_and_symbols")
+        );
+    }
+
+    #[test]
+    fn preferred_function_name_reserves_name_and_keeps_collision_roundtrip() {
+        let mut map = ToolNameMap::default();
+        let view_image =
+            map.encode_function_as(None, VIEW_IMAGE_TOOL_NAME, GROK_READ_FILE_TOOL_NAME);
+        let original_read_file = map.encode_function(None, GROK_READ_FILE_TOOL_NAME);
+
+        assert_eq!(view_image, GROK_READ_FILE_TOOL_NAME);
+        assert_ne!(original_read_file, GROK_READ_FILE_TOOL_NAME);
+        assert_eq!(
+            map.decode(&view_image),
+            ToolCallTarget::function(None, VIEW_IMAGE_TOOL_NAME)
+        );
+        assert_eq!(
+            map.decode(&original_read_file),
+            ToolCallTarget::function(None, GROK_READ_FILE_TOOL_NAME)
         );
     }
 }

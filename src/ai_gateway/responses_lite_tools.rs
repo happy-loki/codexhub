@@ -4,7 +4,7 @@ use super::apply_patch_tool::{
     APPLY_PATCH_TOOL_NAME, GROK_APPLY_PATCH_INPUT_DESCRIPTION, grok_apply_patch_description,
 };
 use super::config::ProviderType;
-use super::tool_names::ToolNameMap;
+use super::tool_names::{GROK_READ_FILE_TOOL_NAME, ToolNameMap, VIEW_IMAGE_TOOL_NAME};
 
 #[derive(Debug, Default)]
 pub struct ResponsesToolPreparation {
@@ -243,6 +243,12 @@ fn convert_grok_tools(
     let mut converted = Vec::with_capacity(original.len());
     let mut stats = GrokToolPreparation::default();
 
+    // Reserve Grok's familiar read_file spelling for Codex view_image before
+    // converting any real read_file tool that may also be present.
+    if original.iter().any(is_top_level_view_image_tool) {
+        tool_names.encode_function_as(None, VIEW_IMAGE_TOOL_NAME, GROK_READ_FILE_TOOL_NAME);
+    }
+
     for tool in original {
         match tool.get("type").and_then(Value::as_str) {
             Some("custom") => {
@@ -266,8 +272,10 @@ fn convert_grok_tools(
                 }
             }
             Some("function") => {
+                let adapted_view_image = is_top_level_view_image_tool(&tool);
                 if let Some(tool) = grok_function_tool(&tool, None, tool_names) {
                     converted.push(tool);
+                    stats.converted += usize::from(adapted_view_image);
                 }
             }
             Some("web_search") | Some("web_search_preview") => {
@@ -339,11 +347,13 @@ fn grok_function_tool(
 ) -> Option<Value> {
     let object = tool.as_object()?;
     let function = object.get("function").and_then(Value::as_object);
-    let name = function
-        .and_then(|function| function.get("name"))
-        .or_else(|| object.get("name"))
-        .and_then(Value::as_str)?;
-    let encoded_name = tool_names.encode_function(namespace, name);
+    let name = function_tool_name(tool)?;
+    let adapt_view_image = namespace.is_none() && name == VIEW_IMAGE_TOOL_NAME;
+    let encoded_name = if adapt_view_image {
+        tool_names.encode_function_as(namespace, name, GROK_READ_FILE_TOOL_NAME)
+    } else {
+        tool_names.encode_function(namespace, name)
+    };
 
     let mut result = object.clone();
     result.remove("function");
@@ -364,7 +374,60 @@ fn grok_function_tool(
     {
         result.insert("parameters".to_string(), schema);
     }
+    if adapt_view_image && let Some(parameters) = result.get_mut("parameters") {
+        normalize_grok_view_image_parameters(parameters);
+    }
     Some(Value::Object(result))
+}
+
+fn function_tool_name(tool: &Value) -> Option<&str> {
+    let object = tool.as_object()?;
+    object
+        .get("function")
+        .and_then(Value::as_object)
+        .and_then(|function| function.get("name"))
+        .or_else(|| object.get("name"))
+        .and_then(Value::as_str)
+}
+
+fn is_top_level_view_image_tool(tool: &Value) -> bool {
+    tool.get("type").and_then(Value::as_str) == Some("function")
+        && function_tool_name(tool) == Some(VIEW_IMAGE_TOOL_NAME)
+}
+
+fn normalize_grok_view_image_parameters(parameters: &mut Value) {
+    let Some(parameters) = parameters.as_object_mut() else {
+        return;
+    };
+
+    if let Some(properties) = parameters
+        .get_mut("properties")
+        .and_then(Value::as_object_mut)
+    {
+        let path = properties.remove("path");
+        properties.remove("detail");
+        if !properties.contains_key("target_file")
+            && let Some(path) = path
+        {
+            properties.insert("target_file".to_string(), path);
+        }
+    }
+
+    if let Some(required) = parameters.get_mut("required").and_then(Value::as_array_mut) {
+        let mut normalized = Vec::with_capacity(required.len());
+        for mut field in std::mem::take(required) {
+            if field.as_str() == Some("detail") {
+                continue;
+            }
+            if field.as_str() == Some("path") {
+                field = json!("target_file");
+            }
+            if !normalized.contains(&field) {
+                normalized.push(field);
+            }
+        }
+        *required = normalized;
+    }
 }
 
 fn grok_tool_search_tool(tool: &Value, tool_names: &mut ToolNameMap) -> Option<Value> {
@@ -480,10 +543,12 @@ fn normalize_grok_tool_choice(raw_body: &mut Value, tool_names: &mut ToolNameMap
                 .get("namespace")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            choice.insert(
-                "name".to_string(),
-                json!(tool_names.encode_function(namespace.as_deref(), &name)),
-            );
+            let encoded_name = if namespace.is_none() && name == VIEW_IMAGE_TOOL_NAME {
+                tool_names.encode_function_as(None, VIEW_IMAGE_TOOL_NAME, GROK_READ_FILE_TOOL_NAME)
+            } else {
+                tool_names.encode_function(namespace.as_deref(), &name)
+            };
+            choice.insert("name".to_string(), json!(encoded_name));
             choice.remove("function");
             choice.remove("namespace");
         }
@@ -769,5 +834,100 @@ mod tests {
         assert_eq!(preparation.grok_hosted_tools_normalized, 1);
         assert_eq!(body["tools"][0]["type"], "web_search");
         assert!(body["tools"][0].get("enable_image_search").is_none());
+    }
+
+    #[test]
+    fn grok_maps_view_image_to_read_file_without_colliding_with_real_tool() {
+        let mut body = json!({
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "read_file",
+                    "description": "Read text",
+                    "parameters": {"type":"object"}
+                },
+                {
+                    "type": "function",
+                    "name": "view_image",
+                    "description": "View a local image",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type":"string"},
+                            "detail": {"type":"string","enum":["high","original"]}
+                        },
+                        "required": ["path"],
+                        "additionalProperties": false
+                    }
+                },
+                {
+                    "type": "function",
+                    "name": "lookup",
+                    "parameters": {"type":"object"}
+                }
+            ],
+            "tool_choice": {"type":"function","name":"view_image"}
+        });
+
+        let preparation = prepare_for_provider(&mut body, &ProviderType::GrokResponses).unwrap();
+
+        assert_eq!(preparation.grok_tools_converted, 1);
+        let map = preparation.grok_tool_names.unwrap();
+        let tools = body["tools"].as_array().unwrap();
+        let view_image_target = ToolCallTarget::function(None, VIEW_IMAGE_TOOL_NAME);
+        let view_image = tools
+            .iter()
+            .find(|tool| {
+                tool["name"]
+                    .as_str()
+                    .is_some_and(|name| map.decode(name) == view_image_target)
+            })
+            .expect("mapped view_image tool");
+        let real_read_file = tools
+            .iter()
+            .find(|tool| {
+                tool["name"].as_str().is_some_and(|name| {
+                    map.decode(name) == ToolCallTarget::function(None, GROK_READ_FILE_TOOL_NAME)
+                })
+            })
+            .expect("original read_file tool");
+
+        assert_eq!(view_image["name"], GROK_READ_FILE_TOOL_NAME);
+        assert_eq!(view_image["description"], "View a local image");
+        assert_eq!(view_image["parameters"]["required"], json!(["target_file"]));
+        assert_eq!(
+            view_image["parameters"]["properties"]["target_file"]["type"],
+            "string"
+        );
+        assert!(view_image["parameters"]["properties"].get("path").is_none());
+        assert!(
+            view_image["parameters"]["properties"]
+                .get("detail")
+                .is_none()
+        );
+        assert_ne!(real_read_file["name"], GROK_READ_FILE_TOOL_NAME);
+        assert!(tools.iter().any(|tool| tool["name"] == "lookup"));
+        assert_eq!(body["tool_choice"]["name"], GROK_READ_FILE_TOOL_NAME);
+    }
+
+    #[test]
+    fn non_grok_provider_keeps_view_image_declaration_unchanged() {
+        let mut body = json!({
+            "tools": [{
+                "type": "function",
+                "name": "view_image",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path":{"type":"string"}},
+                    "required": ["path"]
+                }
+            }]
+        });
+        let original = body.clone();
+
+        let preparation = prepare_for_provider(&mut body, &ProviderType::OpenAiResponses).unwrap();
+
+        assert!(!preparation.changed());
+        assert_eq!(body, original);
     }
 }
