@@ -1,3 +1,26 @@
+CodexHub v0.4.26
+
+本次版本修复 Grok 无法稳定使用 Codex 图片查看工具的问题。
+
+## Grok 图片查看
+
+- 发往 Grok 时，将 Codex 的 `view_image(path)` 自动适配为 Grok 更熟悉的 `read_file(target_file)`。
+- Grok 返回工具调用后，再还原为 Codex 原生的 `view_image(path)`，支持流式和非流式响应。
+- 多轮会话中的历史工具调用会同步转换，避免后续请求因工具名称或参数不一致而失败。
+- 当会话中同时存在真正的 `read_file` 工具时，会自动分配无冲突名称并保持双向还原。
+- 适配仅作用于 Grok Responses，不改变 OpenAI、DeepSeek 和 Anthropic 的工具协议。
+
+## 范围说明
+
+- 保留 Codex 原始 `view_image` 工具说明，不额外修改提示词。
+- 未加入 `ReasoningOnly` 或空响应自动重试，避免网关擅自发起额外模型请求。
+
+## 验证
+
+- 完整测试通过：689 passed，2 ignored。
+- Grok 工具声明、历史回放、JSON/SSE 返回和名称冲突测试通过。
+- `git diff --check` 通过。
+
 CodexHub v0.4.25
 
 本次版本同步 GLM 5.3 模型目录，并修复恢复 Codex 原有配置后历史会话无法继续打开的问题。

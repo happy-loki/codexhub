@@ -1,3 +1,3 @@
-- 同步 GLM-5.3 和 GLM-5.3-Flash 模型。
-- 恢复 Codex 原有配置后，历史 ai-gateway 会话仍可打开。
-- 保留原有模型和渠道配置，减少恢复配置后的会话报错。
+- 修复 Grok 无法稳定调用 Codex 图片查看工具的问题。
+- 图片工具会在 Grok 与 Codex 之间自动适配，多轮会话也可继续使用。
+- OpenAI、DeepSeek 和 Anthropic 渠道保持不变。
