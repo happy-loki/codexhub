@@ -1,3 +1,3 @@
-- 修复 Grok 无法稳定调用 Codex 图片查看工具的问题。
-- 图片工具会在 Grok 与 Codex 之间自动适配，多轮会话也可继续使用。
-- OpenAI、DeepSeek 和 Anthropic 渠道保持不变。
+- 新增 GPT-6-Astra，同步 GPT-5.5 和 GPT-5.6 系列最新模型配置。
+- 整理 GPT 模型列表，移除 GPT-5.4 和 GPT-5.4-mini。
+- 修复遗留实验渠道配置导致启动失败的问题，原渠道配置仍会保留。

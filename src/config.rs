@@ -283,11 +283,38 @@ impl AppConfig {
         }
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config {}", path.display()))?;
-        toml::from_str(&raw).with_context(|| format!("failed to parse config {}", path.display()))
+        let mut document: toml::Value = toml::from_str(&raw)
+            .with_context(|| format!("failed to parse config {}", path.display()))?;
+        let skipped = take_unsupported_providers(&mut document);
+        if !skipped.is_empty() {
+            tracing::warn!(
+                count = skipped.len(),
+                "unsupported gateway channels skipped; original configuration retained on disk"
+            );
+        }
+        document
+            .try_into()
+            .with_context(|| format!("failed to parse config {}", path.display()))
     }
 
     pub fn save(&self, path: &PathBuf) -> anyhow::Result<()> {
-        let raw = toml::to_string_pretty(self)?;
+        let mut document = toml::Value::try_from(self)?;
+        // The GUI only edits supported providers. Preserve unknown entries from
+        // disk when it saves, including fields introduced by a newer version.
+        if path.exists() {
+            let existing = std::fs::read_to_string(path)
+                .with_context(|| format!("failed to read config {}", path.display()))?;
+            let mut existing: toml::Value = toml::from_str(&existing)
+                .with_context(|| format!("failed to parse config {}", path.display()))?;
+            let unsupported = take_unsupported_providers(&mut existing);
+            if !unsupported.is_empty() {
+                document["aiGateway"]["providers"]
+                    .as_array_mut()
+                    .expect("serialized providers must be an array")
+                    .extend(unsupported);
+            }
+        }
+        let raw = toml::to_string_pretty(&document)?;
         if let Some(parent) = path.parent().filter(|path| !path.as_os_str().is_empty()) {
             std::fs::create_dir_all(parent).with_context(|| {
                 format!("failed to create config directory {}", parent.display())
@@ -675,6 +702,33 @@ fn find_account<T: Clone>(
         .cloned()
 }
 
+fn take_unsupported_providers(document: &mut toml::Value) -> Vec<toml::Value> {
+    let Some(providers) = document
+        .get_mut("aiGateway")
+        .and_then(|gateway| gateway.get_mut("providers"))
+        .and_then(toml::Value::as_array_mut)
+    else {
+        return Vec::new();
+    };
+    let mut unsupported = Vec::new();
+    providers.retain(|provider| {
+        let unknown = provider
+            .get("providerType")
+            .and_then(toml::Value::as_str)
+            .is_some_and(|kind| {
+                serde_json::from_value::<crate::ai_gateway::config::ProviderType>(
+                    serde_json::Value::String(kind.to_owned()),
+                )
+                .is_err()
+            });
+        if unknown {
+            unsupported.push(provider.clone());
+        }
+        !unknown
+    });
+    unsupported
+}
+
 fn non_empty(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_string())
@@ -683,6 +737,58 @@ fn non_empty(value: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{AppConfig, OutboundProxyMode, TelegramChatAllowResult, TelegramConfig};
+
+    #[test]
+    fn unsupported_channels_survive_config_save_without_entering_runtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let raw = r#"
+[[aiGateway.providers]]
+name = "future"
+providerType = "gemini_generate_content"
+enabled = true
+apiKey = "test-key"
+models = ["gemini-test"]
+[aiGateway.providers.futureOptions]
+flag = true
+[[aiGateway.providers]]
+name = "working"
+providerType = "open_ai_responses"
+models = ["gpt-test"]
+"#;
+        std::fs::write(&path, raw).unwrap();
+        let original: toml::Value = toml::from_str(raw).unwrap();
+        let mut config = AppConfig::load_or_default(&path).unwrap();
+        assert_eq!(config.ai_gateway.providers.len(), 1);
+        assert_eq!(config.ai_gateway.providers[0].name, "working");
+        assert!(config.ai_gateway.select_provider("gemini-test").is_none());
+        config.ai_gateway.providers[0].name = "edited".into();
+        for _ in 0..2 {
+            config.save(&path).unwrap();
+            let saved: toml::Value =
+                toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let providers = saved["aiGateway"]["providers"].as_array().unwrap();
+            assert_eq!(providers.len(), 2);
+            assert_eq!(providers[0]["name"].as_str(), Some("edited"));
+            assert_eq!(providers[1], original["aiGateway"]["providers"][0]);
+            config = AppConfig::load_or_default(&path).unwrap();
+            assert_eq!(config.ai_gateway.providers.len(), 1);
+        }
+    }
+
+    #[test]
+    fn unsupported_channels_do_not_hide_invalid_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for raw in [
+            "[[aiGateway.providers]]\nproviderType = 123",
+            "[[aiGateway.providers]]\nproviderType = 'open_ai_responses'\nenabled = 'bad'",
+            "[[aiGateway.providers]]\nproviderType = 'gemini_generate_content'\ninvalid = [",
+        ] {
+            std::fs::write(&path, raw).unwrap();
+            assert!(AppConfig::load_or_default(&path).is_err());
+        }
+    }
 
     #[test]
     fn missing_outbound_proxy_config_defaults_to_system() {
