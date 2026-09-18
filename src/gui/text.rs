@@ -2838,6 +2838,10 @@ impl GuiText {
         "DeepSeek Responses"
     }
 
+    pub(super) fn ai_gw_service_kimi(self) -> &'static str {
+        "Kimi"
+    }
+
     pub(super) fn ai_gw_service_anthropic(self) -> &'static str {
         "Anthropic"
     }
@@ -3037,6 +3041,10 @@ impl GuiText {
 
     pub(super) fn provider_type_deepseek_responses(self) -> &'static str {
         "DeepSeek Responses"
+    }
+
+    pub(super) fn provider_type_kimi_responses(self) -> &'static str {
+        "Kimi Responses"
     }
 
     pub(super) fn provider_type_grok_responses(self) -> &'static str {

@@ -32,6 +32,7 @@ packaging/brand/providers/
 - OpenAI：`packaging/brand/providers/openai.svg`
 - Grok：`packaging/brand/providers/grok.svg`
 - DeepSeek：`packaging/brand/providers/deepseek.svg`
+- Kimi：`packaging/brand/providers/kimi.svg`
 - Anthropic：`packaging/brand/providers/anthropic.svg`
 - 智谱：`packaging/brand/providers/zhipu.svg`
 - 来源记录：`packaging/brand/providers/SOURCES.md`

@@ -370,6 +370,7 @@ mod tests {
     #[test]
     fn codexhub_third_party_models_use_372k_context_window() {
         for slug in [
+            "kimi-k3",
             "grok-4.6",
             "GLM-5.3",
             "GLM-5.3-Flash",
@@ -384,6 +385,63 @@ mod tests {
             assert_eq!(model["context_window"], 372_000, "model {slug}");
             assert_eq!(model["max_context_window"], 372_000, "model {slug}");
         }
+    }
+
+    #[test]
+    fn kimi_model_uses_official_efforts_and_native_responses_tools() {
+        let response = configured_models_response(&config(&["kimi-k3"]));
+        let model = &response["models"][0];
+        assert_eq!(model["slug"], "kimi-k3");
+        assert_eq!(model["context_window"], 372_000);
+        assert_eq!(model["max_context_window"], 372_000);
+        assert_eq!(model["effective_context_window_percent"], 95);
+        assert_eq!(model["default_reasoning_level"], "high");
+        let efforts: Vec<_> = model["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|effort| effort["effort"].as_str().unwrap())
+            .collect();
+        assert_eq!(efforts, ["low", "high", "max"]);
+        assert_eq!(model["input_modalities"], json!(["text", "image"]));
+        assert_eq!(model["shell_type"], "shell_command");
+        assert_eq!(
+            model["truncation_policy"],
+            json!({"mode":"bytes", "limit":10000})
+        );
+        assert_eq!(model["support_verbosity"], false);
+        assert_eq!(model["supports_reasoning_summaries"], true);
+        assert_eq!(model["default_reasoning_summary"], "none");
+        assert!(
+            !model["base_instructions"]
+                .as_str()
+                .unwrap()
+                .trim()
+                .is_empty()
+        );
+        for slug in ["deepseek-v4-pro", "deepseek-v4-flash"] {
+            let deepseek = catalog_models()
+                .iter()
+                .find(|model| model_slug(model) == Some(slug))
+                .expect("DeepSeek catalog model should exist");
+            assert_eq!(model["base_instructions"], deepseek["base_instructions"]);
+        }
+        assert_eq!(model["prefer_websockets"], false);
+        assert_eq!(model["use_responses_lite"], false);
+        assert_eq!(model["supports_search_tool"], false);
+        assert_eq!(model["apply_patch_tool_type"], "freeform");
+        assert_eq!(model["web_search_tool_type"], "text");
+        assert_eq!(model["comp_hash"], "codexhub-kimi-summary-v1");
+        assert!(
+            visible_catalog_model_options()
+                .iter()
+                .any(|option| option.slug == "kimi-k3")
+        );
+        assert!(
+            !visible_catalog_model_options()
+                .iter()
+                .any(|option| { matches!(option.slug.as_str(), "k3-256k" | "kimi-k3-256k") })
+        );
     }
 
     #[test]

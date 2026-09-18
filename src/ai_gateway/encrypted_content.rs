@@ -48,6 +48,7 @@ impl EncryptedContentScope {
         let protocol = match provider.provider_type {
             ProviderType::OpenAiResponses => "openai",
             ProviderType::DeepSeekResponses => "deepseek_responses",
+            ProviderType::KimiResponses => "kimi_responses",
             ProviderType::GrokResponses => "grok",
             ProviderType::ChatCompletions => "chat_completions",
             ProviderType::AnthropicMessages => "anthropic",

@@ -2559,6 +2559,14 @@ fn show_ai_gw_channel_dialog(
         false,
         true,
     );
+    let radio_kimi = ai_gw_service_option(
+        &service_panel,
+        &service_sizer,
+        text.ai_gw_service_kimi(),
+        Some(ProviderLogoKind::Kimi),
+        false,
+        true,
+    );
     let radio_anthropic = ai_gw_service_option(
         &service_panel,
         &service_sizer,
@@ -2819,6 +2827,7 @@ fn show_ai_gw_channel_dialog(
         &radio_grok,
         &radio_deepseek,
         &radio_deepseek_responses,
+        &radio_kimi,
         &radio_anthropic,
         &radio_glm,
         &zai_access_controls,
@@ -2850,6 +2859,7 @@ fn show_ai_gw_channel_dialog(
             &radio_grok,
             &radio_deepseek,
             &radio_deepseek_responses,
+            &radio_kimi,
             &radio_anthropic,
             &radio_glm,
             &type_input,
@@ -2878,6 +2888,7 @@ fn show_ai_gw_channel_dialog(
                     &radio_grok,
                     &radio_deepseek,
                     &radio_deepseek_responses,
+                    &radio_kimi,
                     &radio_anthropic,
                     &radio_glm,
                     &zai_access_controls,
@@ -2918,6 +2929,7 @@ fn show_ai_gw_channel_dialog(
                     &radio_grok,
                     &radio_deepseek,
                     &radio_deepseek_responses,
+                    &radio_kimi,
                     &radio_anthropic,
                     &radio_glm,
                     &zai_access_controls,
@@ -2958,6 +2970,7 @@ fn show_ai_gw_channel_dialog(
                     &radio_grok,
                     &radio_deepseek,
                     &radio_deepseek_responses,
+                    &radio_kimi,
                     &radio_anthropic,
                     &radio_glm,
                     &zai_access_controls,
@@ -2998,6 +3011,48 @@ fn show_ai_gw_channel_dialog(
                     &radio_grok,
                     &radio_deepseek,
                     &radio_deepseek_responses,
+                    &radio_kimi,
+                    &radio_anthropic,
+                    &radio_glm,
+                    &zai_access_controls,
+                    &type_input,
+                    &name_input,
+                    &base_url_input,
+                    &models_url_input,
+                    &key_input,
+                    &models_list,
+                    &model_mapping_rows,
+                    &model_mapping_model,
+                    &weight_input,
+                    &service_template_applying,
+                );
+                *current_ai_gw_provider_template.borrow_mut() = provider;
+            }
+        });
+    }
+    if initial.is_none() {
+        let type_input = type_input;
+        let name_input = name_input;
+        let base_url_input = base_url_input;
+        let models_url_input = models_url_input;
+        let key_input = key_input;
+        let models_list = models_list;
+        let model_mapping_rows = model_mapping_rows.clone();
+        let model_mapping_model = model_mapping_model.clone();
+        let weight_input = weight_input;
+        let service_template_applying = service_template_applying.clone();
+        let current_ai_gw_provider_template = current_ai_gw_provider_template.clone();
+        radio_kimi.on_selected(move |_| {
+            if radio_kimi.get_value() && !*service_template_applying.borrow() {
+                let provider = default_ai_gw_service_provider(ProviderType::KimiResponses);
+                apply_ai_gw_service_template(
+                    text,
+                    provider.clone(),
+                    &radio_openai,
+                    &radio_grok,
+                    &radio_deepseek,
+                    &radio_deepseek_responses,
+                    &radio_kimi,
                     &radio_anthropic,
                     &radio_glm,
                     &zai_access_controls,
@@ -3038,6 +3093,7 @@ fn show_ai_gw_channel_dialog(
                     &radio_grok,
                     &radio_deepseek,
                     &radio_deepseek_responses,
+                    &radio_kimi,
                     &radio_anthropic,
                     &radio_glm,
                     &zai_access_controls,
@@ -3078,6 +3134,7 @@ fn show_ai_gw_channel_dialog(
                     &radio_grok,
                     &radio_deepseek,
                     &radio_deepseek_responses,
+                    &radio_kimi,
                     &radio_anthropic,
                     &radio_glm,
                     &zai_access_controls,
@@ -3312,6 +3369,7 @@ fn show_ai_gw_channel_dialog(
                         &radio_grok,
                         &radio_deepseek,
                         &radio_deepseek_responses,
+                        &radio_kimi,
                         &radio_anthropic,
                         &radio_glm,
                     )
@@ -3379,6 +3437,7 @@ fn apply_ai_gw_dialog_template(
     radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
     radio_deepseek_responses: &RadioButton,
+    radio_kimi: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
     zai_access_controls: &ZaiAccessControls,
@@ -3405,6 +3464,7 @@ fn apply_ai_gw_dialog_template(
         radio_grok,
         radio_deepseek,
         radio_deepseek_responses,
+        radio_kimi,
         radio_anthropic,
         radio_glm,
         type_input,
@@ -3434,6 +3494,7 @@ fn apply_ai_gw_service_template(
     radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
     radio_deepseek_responses: &RadioButton,
+    radio_kimi: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
     zai_access_controls: &ZaiAccessControls,
@@ -3456,6 +3517,7 @@ fn apply_ai_gw_service_template(
         radio_grok,
         radio_deepseek,
         radio_deepseek_responses,
+        radio_kimi,
         radio_anthropic,
         radio_glm,
         zai_access_controls,
@@ -3480,6 +3542,7 @@ fn bind_locked_ai_gw_service_selection(
     radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
     radio_deepseek_responses: &RadioButton,
+    radio_kimi: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
     type_input: &TextCtrl,
@@ -3494,6 +3557,7 @@ fn bind_locked_ai_gw_service_selection(
         radio_grok,
         radio_deepseek,
         radio_deepseek_responses,
+        radio_kimi,
         radio_anthropic,
         radio_glm,
         type_input,
@@ -3508,6 +3572,7 @@ fn bind_locked_ai_gw_service_selection(
         radio_grok,
         radio_deepseek,
         radio_deepseek_responses,
+        radio_kimi,
         radio_anthropic,
         radio_glm,
         type_input,
@@ -3522,6 +3587,7 @@ fn bind_locked_ai_gw_service_selection(
         radio_grok,
         radio_deepseek,
         radio_deepseek_responses,
+        radio_kimi,
         radio_anthropic,
         radio_glm,
         type_input,
@@ -3536,6 +3602,22 @@ fn bind_locked_ai_gw_service_selection(
         radio_grok,
         radio_deepseek,
         radio_deepseek_responses,
+        radio_kimi,
+        radio_anthropic,
+        radio_glm,
+        type_input,
+        service_template_applying.clone(),
+    );
+    bind_locked_ai_gw_service_radio(
+        text,
+        provider_type.clone(),
+        compatibility.clone(),
+        radio_kimi,
+        radio_openai,
+        radio_grok,
+        radio_deepseek,
+        radio_deepseek_responses,
+        radio_kimi,
         radio_anthropic,
         radio_glm,
         type_input,
@@ -3550,6 +3632,7 @@ fn bind_locked_ai_gw_service_selection(
         radio_grok,
         radio_deepseek,
         radio_deepseek_responses,
+        radio_kimi,
         radio_anthropic,
         radio_glm,
         type_input,
@@ -3564,6 +3647,7 @@ fn bind_locked_ai_gw_service_selection(
         radio_grok,
         radio_deepseek,
         radio_deepseek_responses,
+        radio_kimi,
         radio_anthropic,
         radio_glm,
         type_input,
@@ -3580,6 +3664,7 @@ fn bind_locked_ai_gw_service_radio(
     radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
     radio_deepseek_responses: &RadioButton,
+    radio_kimi: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
     type_input: &TextCtrl,
@@ -3590,6 +3675,7 @@ fn bind_locked_ai_gw_service_radio(
     let radio_grok = *radio_grok;
     let radio_deepseek = *radio_deepseek;
     let radio_deepseek_responses = *radio_deepseek_responses;
+    let radio_kimi = *radio_kimi;
     let radio_anthropic = *radio_anthropic;
     let radio_glm = *radio_glm;
     let type_input = *type_input;
@@ -3606,6 +3692,7 @@ fn bind_locked_ai_gw_service_radio(
             &radio_grok,
             &radio_deepseek,
             &radio_deepseek_responses,
+            &radio_kimi,
             &radio_anthropic,
             &radio_glm,
             &type_input,
@@ -3633,6 +3720,13 @@ fn default_ai_gw_service_provider(provider_type: ProviderType) -> ProviderConfig
             provider_type: ProviderType::DeepSeekResponses,
             base_url: "https://api.deepseek.com/v1".to_string(),
             models: vec!["deepseek-v4-pro".to_string()],
+            ..Default::default()
+        },
+        ProviderType::KimiResponses => ProviderConfig {
+            name: "kimi".to_string(),
+            provider_type: ProviderType::KimiResponses,
+            base_url: "https://api.moonshot.cn/v1".to_string(),
+            models: vec!["kimi-k3".to_string()],
             ..Default::default()
         },
         ProviderType::ChatCompletions => ProviderConfig {
@@ -3777,6 +3871,7 @@ fn set_ai_gw_dialog_provider_type(
     radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
     radio_deepseek_responses: &RadioButton,
+    radio_kimi: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
     type_input: &TextCtrl,
@@ -3785,6 +3880,7 @@ fn set_ai_gw_dialog_provider_type(
     radio_grok.set_value(false);
     radio_deepseek.set_value(false);
     radio_deepseek_responses.set_value(false);
+    radio_kimi.set_value(false);
     radio_anthropic.set_value(false);
     radio_glm.set_value(false);
     match provider_type {
@@ -3799,6 +3895,10 @@ fn set_ai_gw_dialog_provider_type(
         ProviderType::DeepSeekResponses => {
             radio_deepseek_responses.set_value(true);
             type_input.change_value(text.provider_type_deepseek_responses());
+        }
+        ProviderType::KimiResponses => {
+            radio_kimi.set_value(true);
+            type_input.change_value(text.provider_type_kimi_responses());
         }
         ProviderType::GrokResponses => {
             radio_grok.set_value(true);
@@ -3833,6 +3933,7 @@ fn selected_ai_gw_dialog_provider_type(
     radio_grok: &RadioButton,
     radio_deepseek: &RadioButton,
     radio_deepseek_responses: &RadioButton,
+    radio_kimi: &RadioButton,
     radio_anthropic: &RadioButton,
     radio_glm: &RadioButton,
 ) -> ProviderType {
@@ -3844,6 +3945,8 @@ fn selected_ai_gw_dialog_provider_type(
         ProviderType::ChatCompletions
     } else if radio_deepseek_responses.get_value() {
         ProviderType::DeepSeekResponses
+    } else if radio_kimi.get_value() {
+        ProviderType::KimiResponses
     } else {
         ProviderType::OpenAiResponses
     }
@@ -4126,6 +4229,63 @@ fn inferred_model_alias_key(model: &str) -> Option<String> {
 mod model_mapping_tests {
     use super::api::RemoteControlConnectionStatus;
     use super::*;
+
+    #[test]
+    fn kimi_defaults_to_responses_with_editable_endpoint_and_custom_models() {
+        let mut provider = default_ai_gw_service_provider(ProviderType::KimiResponses);
+        assert_eq!(provider.base_url, "https://api.moonshot.cn/v1");
+        assert_eq!(provider.models, ["kimi-k3"]);
+        assert!(provider.compatibility.is_none());
+        for endpoint in [
+            "https://api.kimi.com/coding/v1",
+            "https://example.com/proxy/v1",
+        ] {
+            provider.base_url = endpoint.into();
+            assert!(known_models_urls_for_provider(&provider).is_empty());
+            assert_eq!(
+                normalize_provider_models_url(provider.clone()).base_url,
+                endpoint
+            );
+            let candidates = model_list_candidates(endpoint, None, &[]);
+            assert_eq!(candidates.len(), 1);
+            assert_eq!(candidates[0].url, format!("{endpoint}/models"));
+            assert_eq!(candidates[0].normalized_base_url, endpoint);
+        }
+        let models = vec!["kimi-k3".into(), "k3".into(), "vendor/k3".into()];
+        assert_eq!(
+            filter_fetched_models_for_provider(&provider.provider_type, models.clone()),
+            models
+        );
+        assert_eq!(
+            provider_protocol_display(&provider.provider_type, None),
+            "Kimi Responses"
+        );
+    }
+
+    #[test]
+    fn kimi_model_discovery_excludes_256k_variants_only_for_kimi() {
+        let models: Vec<String> = [
+            "kimi-k3",
+            "k3",
+            "k3-256k",
+            "K3-256K",
+            "vendor/k3-256k",
+            "kimi-k3-256k",
+            "vendor/Kimi-K3-256K",
+            "vendor/k3",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        assert_eq!(
+            filter_fetched_models_for_provider(&ProviderType::KimiResponses, models.clone()),
+            ["kimi-k3", "k3", "vendor/k3"]
+        );
+        assert_eq!(
+            filter_fetched_models_for_provider(&ProviderType::OpenAiResponses, models.clone()),
+            models
+        );
+    }
 
     #[test]
     fn infers_anthropic_claude_model_aliases() {
@@ -4724,6 +4884,15 @@ fn filter_fetched_models_for_provider(
     provider_type: &ProviderType,
     models: Vec<String>,
 ) -> Vec<String> {
+    if provider_type == &ProviderType::KimiResponses {
+        return models
+            .into_iter()
+            .filter(|model| {
+                let slug = model.trim().rsplit('/').next().unwrap_or_default();
+                !slug.eq_ignore_ascii_case("k3-256k") && !slug.eq_ignore_ascii_case("kimi-k3-256k")
+            })
+            .collect();
+    }
     if provider_type != &ProviderType::DeepSeekResponses {
         return models;
     }

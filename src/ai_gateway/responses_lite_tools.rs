@@ -33,7 +33,10 @@ pub fn prepare_for_provider(
     raw_body: &mut Value,
     provider_type: &ProviderType,
 ) -> Result<ResponsesToolPreparation, String> {
-    if provider_type == &ProviderType::OpenAiResponses {
+    if matches!(
+        provider_type,
+        ProviderType::OpenAiResponses | ProviderType::KimiResponses
+    ) {
         return Ok(ResponsesToolPreparation::default());
     }
 
@@ -570,6 +573,28 @@ mod tests {
 
         let preparation = prepare_for_provider(&mut body, &ProviderType::OpenAiResponses).unwrap();
 
+        assert!(!preparation.changed());
+        assert_eq!(body, original);
+    }
+
+    #[test]
+    fn kimi_keeps_native_tool_declarations_and_history() {
+        let mut body = json!({
+            "tools": [{"type":"web_search","search_context_size":"medium"}],
+            "input": [
+                {"type":"additional_tools","role":"developer","tools":[
+                    {"type":"namespace","name":"fs","tools":[
+                        {"type":"function","name":"read","parameters":{"type":"object"}}
+                    ]},
+                    {"type":"custom","name":"apply_patch","format":{"type":"grammar"}}
+                ]},
+                {"type":"function_call","namespace":"fs","name":"read","call_id":"c1","arguments":"{}"},
+                {"type":"function_call_output","call_id":"c1","output":"contents"}
+            ],
+            "future_field": {"keep":true}
+        });
+        let original = body.clone();
+        let preparation = prepare_for_provider(&mut body, &ProviderType::KimiResponses).unwrap();
         assert!(!preparation.changed());
         assert_eq!(body, original);
     }

@@ -131,6 +131,7 @@ impl ProviderType {
         match self {
             Self::OpenAiResponses => "openai_responses",
             Self::DeepSeekResponses => "deepseek_responses",
+            Self::KimiResponses => "kimi_responses",
             Self::GrokResponses => "grok_responses",
             Self::ChatCompletions => "chat_completions",
             Self::AnthropicMessages => "anthropic_messages",
@@ -193,7 +194,7 @@ pub struct ProviderConfig {
     pub name: String,
     /// 是否启用该 provider。
     pub enabled: bool,
-    /// provider 类型：OpenAI/DeepSeek/Grok Responses、Chat Completions 或 Anthropic Messages。
+    /// provider 类型：OpenAI/DeepSeek/Kimi/Grok Responses、Chat Completions 或 Anthropic Messages。
     pub provider_type: ProviderType,
     /// provider 兼容 profile。Anthropic Messages 兼容厂商优先使用该字段表达差异。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -287,6 +288,8 @@ pub enum ProviderType {
     /// DeepSeek Responses API 原生透传。
     #[serde(rename = "deepseek_responses")]
     DeepSeekResponses,
+    /// Kimi native Responses API, with a user-configured endpoint.
+    KimiResponses,
     /// Grok/xAI Responses API 透传，带 Grok 专用兼容处理。
     GrokResponses,
     /// Chat Completions API（DeepSeek 等）。
@@ -322,6 +325,24 @@ mod tests {
         assert_eq!(encoded, r#""deepseek_responses""#);
         let decoded: ProviderType = serde_json::from_str(r#""deepseek_responses""#).unwrap();
         assert_eq!(decoded, ProviderType::DeepSeekResponses);
+    }
+
+    #[test]
+    fn kimi_responses_provider_preserves_custom_endpoint_and_model_mapping() {
+        let provider = ProviderConfig {
+            name: "kimi".into(),
+            provider_type: ProviderType::KimiResponses,
+            base_url: "https://example.com/coding/v1".into(),
+            models: vec!["k3".into()],
+            model_aliases: BTreeMap::from([("kimi-k3".into(), "k3".into())]),
+            ..Default::default()
+        };
+        let encoded = serde_json::to_value(&provider).unwrap();
+        assert_eq!(encoded["providerType"], "kimi_responses");
+        let decoded: ProviderConfig = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.provider_type, ProviderType::KimiResponses);
+        assert_eq!(decoded.base_url, provider.base_url);
+        assert_eq!(decoded.resolve_upstream_model("kimi-k3"), Some("k3"));
     }
 
     #[test]

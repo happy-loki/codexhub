@@ -61,6 +61,7 @@ pub(super) enum ProviderLogoKind {
     OpenAi,
     Grok,
     DeepSeek,
+    Kimi,
     Anthropic,
     Zhipu,
 }
@@ -708,6 +709,10 @@ fn render_provider_logo_bitmap(kind: ProviderLogoKind, size: i32) -> Bitmap {
         ProviderLogoKind::DeepSeek => (
             "deepseek.svg",
             include_bytes!("../../packaging/brand/providers/deepseek.svg").as_slice(),
+        ),
+        ProviderLogoKind::Kimi => (
+            "kimi.svg",
+            include_bytes!("../../packaging/brand/providers/kimi.svg").as_slice(),
         ),
         ProviderLogoKind::Anthropic => (
             "anthropic.svg",

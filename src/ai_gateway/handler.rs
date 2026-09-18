@@ -580,6 +580,7 @@ pub async fn handle_responses(
     match provider.provider_type {
         ProviderType::OpenAiResponses
         | ProviderType::DeepSeekResponses
+        | ProviderType::KimiResponses
         | ProviderType::GrokResponses => {
             let result = openai_responses::passthrough_with_tool_names(
                 &http_client,
@@ -1232,6 +1233,7 @@ fn provider_type_key(provider_type: &ProviderType) -> &'static str {
     match provider_type {
         ProviderType::OpenAiResponses => "responses",
         ProviderType::DeepSeekResponses => "deepseek_responses",
+        ProviderType::KimiResponses => "kimi_responses",
         ProviderType::GrokResponses => "grok_responses",
         ProviderType::ChatCompletions => "chat_completions",
         ProviderType::AnthropicMessages => "anthropic_messages",

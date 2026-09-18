@@ -30,6 +30,40 @@ use super::{
 const UPSTREAM_REQUEST_BODY_READ_MAX_RETRIES: usize = 2;
 const DEEPSEEK_FLASH_VISION_MODEL: &str = "deepseek-v4-flash-vision-exp";
 
+fn normalize_kimi_web_search(body: &mut serde_json::Value) {
+    fn normalize_tools(container: &mut serde_json::Value) {
+        let Some(tools) = container
+            .get_mut("tools")
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            return;
+        };
+        for tool in tools {
+            match tool.get("type").and_then(serde_json::Value::as_str) {
+                Some("web_search") => {
+                    if let Some(object) = tool.as_object_mut() {
+                        object.remove("search_context_size");
+                    }
+                }
+                Some("namespace") => normalize_tools(tool),
+                _ => {}
+            }
+        }
+    }
+
+    normalize_tools(body);
+    if let Some(input) = body
+        .get_mut("input")
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for item in input {
+            if item.get("type").and_then(serde_json::Value::as_str) == Some("additional_tools") {
+                normalize_tools(item);
+            }
+        }
+    }
+}
+
 fn resolve_deepseek_upstream_model(provider: &ProviderConfig, upstream_model: &str) -> String {
     if provider.provider_type == ProviderType::DeepSeekResponses
         && upstream_model.eq_ignore_ascii_case("deepseek-v4-flash")
@@ -152,9 +186,11 @@ async fn passthrough_to_endpoint(
         grok_tool_names = Some(ToolNameMap::default());
     }
 
-    // DeepSeek manages prompt caching automatically and documents these fields
-    // as unsupported. Keep its native Responses request free of injected cache knobs.
-    if provider.provider_type != ProviderType::DeepSeekResponses {
+    // Do not inject OpenAI cache controls into other vendors' native APIs.
+    if !matches!(
+        provider.provider_type,
+        ProviderType::DeepSeekResponses | ProviderType::KimiResponses
+    ) {
         let existing_key = raw_body
             .get("prompt_cache_key")
             .and_then(|v| v.as_str())
@@ -171,6 +207,9 @@ async fn passthrough_to_endpoint(
         }
     }
     raw_body["model"] = json!(resolve_deepseek_upstream_model(provider, upstream_model));
+    if provider.provider_type == ProviderType::KimiResponses {
+        normalize_kimi_web_search(&mut raw_body);
+    }
     let encrypted_content_scope = EncryptedContentScope::for_provider(provider);
     let encrypted_content_stats =
         prepare_responses_request(&mut raw_body, &encrypted_content_scope);
@@ -969,8 +1008,8 @@ mod tests {
     use super::{
         is_failed_to_read_request_body_error, is_invalid_encrypted_content_error,
         normalize_grok_model_input, normalize_grok_model_input_with_tool_names,
-        normalize_grok_reasoning_replay, passthrough, passthrough_compact,
-        repair_deepseek_tool_history,
+        normalize_grok_reasoning_replay, normalize_kimi_web_search, passthrough,
+        passthrough_compact, repair_deepseek_tool_history,
     };
 
     struct RetryServerState {
@@ -1775,6 +1814,147 @@ mod tests {
         assert_eq!(upstream["tools"][1]["type"], "custom");
 
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn kimi_responses_preserves_native_requests_and_json_or_sse_responses() {
+        for (prefix, stream) in [("", false), ("/coding", true), ("/third-party", false)] {
+            let native_output = json!([
+                {"id":"ws_kimi", "type":"web_search_call", "status":"completed",
+                 "action":{"type":"search", "query":"Kimi", "sources":[{"type":"url", "url":"https://kimi.com", "title":"Kimi"}]}},
+                {"id":"rs_kimi", "type":"reasoning", "summary":[], "encrypted_content":"native-kimi-state"},
+                {"id":"ct_kimi", "type":"custom_tool_call", "call_id":"patch_2", "name":"apply_patch", "input":"*** Begin Patch\n*** End Patch"}
+            ]);
+            let native_response = json!({
+                "id":"resp_kimi", "object":"response", "model":"k3", "status":"completed",
+                "output": native_output,
+                "usage":{"input_tokens":100, "input_tokens_details":{"cached_tokens":60}, "output_tokens":20, "total_tokens":120}
+            });
+            let wire_response = native_response.clone();
+            let (sender, mut receiver) = mpsc::unbounded_channel();
+            let app = Router::new().route(
+                &format!("{prefix}/v1/responses"),
+                post(move |headers: HeaderMap, Json(body): Json<serde_json::Value>| {
+                    let sender = sender.clone();
+                    let response = wire_response.clone();
+                    async move {
+                        sender.send((headers, body)).unwrap();
+                        if stream {
+                            let item_event = json!({"type":"response.output_item.done", "output_index":1, "item":response["output"][1]});
+                            let completed = json!({"type":"response.completed", "response":response});
+                            ([ ("content-type", "text/event-stream") ],
+                             format!("event: response.output_item.done\ndata: {item_event}\n\nevent: response.completed\ndata: {completed}\n\n")).into_response()
+                        } else {
+                            Json(response).into_response()
+                        }
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let provider = ProviderConfig {
+                name: "kimi-test".into(),
+                provider_type: ProviderType::KimiResponses,
+                base_url: format!("http://{address}{prefix}/v1/"),
+                api_key: "kimi-secret".into(),
+                prompt_cache_retention: Some("24h".into()),
+                timeout_secs: 10,
+                ..Default::default()
+            };
+            let request = json!({
+                "model":"kimi-k3", "stream":stream,
+                "reasoning":{"effort":"max", "summary":"none"},
+                "input":[
+                    {"type":"reasoning", "id":"rs_old", "summary":[], "encrypted_content":"native-history"},
+                    {"type":"custom_tool_call", "call_id":"patch_1", "name":"apply_patch", "input":"*** Begin Patch\n*** End Patch"},
+                    {"type":"custom_tool_call_output", "call_id":"patch_1", "output":"ok"},
+                    {"type":"function_call", "call_id":"read_1", "namespace":"fs", "name":"read", "arguments":"{}"},
+                    {"type":"function_call_output", "call_id":"read_1", "output":[{"type":"input_text", "text":"image"}, {"type":"input_image", "image_url":"data:image/png;base64,AA=="}]},
+                    {"type":"additional_tools", "role":"developer", "tools":[{"type":"function", "name":"wait", "parameters":{"type":"object"}}]},
+                    {"type":"message", "role":"user", "content":"continue"}
+                ],
+                "tools":[
+                    {"type":"web_search", "search_context_size":"medium", "filters":{"allowed_domains":["kimi.com"]}},
+                    {"type":"custom", "name":"apply_patch", "format":{"type":"text"}},
+                    {"type":"namespace", "name":"fs", "tools":[{"type":"function", "name":"read", "parameters":{"type":"object"}}]}
+                ],
+                "future_field":{"keep":true}
+            });
+            let mut expected = request.clone();
+            expected["model"] = json!("k3");
+            expected["tools"][0]
+                .as_object_mut()
+                .unwrap()
+                .remove("search_context_size");
+            let context = GatewayContext::extract(&HeaderMap::new(), Some("kimi-session"));
+            let client = reqwest::Client::builder().no_proxy().build().unwrap();
+            let response = passthrough(&client, &context, request, "k3", &provider, None)
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let (headers, upstream) = receiver.recv().await.unwrap();
+            assert_eq!(headers["authorization"], "Bearer kimi-secret");
+            assert_eq!(upstream, expected);
+            assert!(upstream.get("prompt_cache_key").is_none());
+            assert!(upstream.get("prompt_cache_retention").is_none());
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            if stream {
+                let text = String::from_utf8(bytes.to_vec()).unwrap();
+                let events: Vec<serde_json::Value> = text
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("data: "))
+                    .filter_map(|data| serde_json::from_str(data).ok())
+                    .collect();
+                let done = events
+                    .iter()
+                    .find(|event| event["type"] == "response.completed")
+                    .unwrap();
+                assert_eq!(done["response"]["output"], native_output);
+                assert_eq!(done["response"]["usage"], native_response["usage"]);
+                assert_eq!(events[0]["item"]["encrypted_content"], "native-kimi-state");
+            } else {
+                let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                assert_eq!(body["output"], native_output);
+                assert_eq!(body["usage"], native_response["usage"]);
+            }
+            server.abort();
+            let _ = server.await;
+        }
+    }
+
+    #[test]
+    fn kimi_search_cleanup_only_changes_tool_declarations() {
+        let mut body = json!({
+            "tools":[
+                {"type":"web_search", "search_context_size":"high", "future_option":true},
+                {"type":"function", "name":"example", "parameters":{"type":"object", "properties":{"tools":{"default":[{"type":"web_search", "search_context_size":"user-data"}]}}}}
+            ],
+            "input":[
+                {"type":"additional_tools", "tools":[{"type":"namespace", "name":"browser", "tools":[{"type":"web_search", "search_context_size":"low"}]}]},
+                {"type":"function_call_output", "call_id":"call1", "output":{"tools":[{"type":"web_search", "search_context_size":"user-data"}]}}
+            ],
+            "prompt_cache_key":"explicit-key", "prompt_cache_retention":"explicit-value"
+        });
+        let original = body.clone();
+        normalize_kimi_web_search(&mut body);
+        assert_eq!(
+            body["tools"][0],
+            json!({"type":"web_search", "future_option":true})
+        );
+        assert_eq!(
+            body["input"][0]["tools"][0]["tools"][0],
+            json!({"type":"web_search"})
+        );
+        assert_eq!(body["tools"][1], original["tools"][1]);
+        assert_eq!(body["input"][1], original["input"][1]);
+        assert_eq!(body["prompt_cache_key"], "explicit-key");
+        assert_eq!(body["prompt_cache_retention"], "explicit-value");
+        let once = body.clone();
+        normalize_kimi_web_search(&mut body);
+        assert_eq!(body, once);
     }
 
     #[tokio::test]
