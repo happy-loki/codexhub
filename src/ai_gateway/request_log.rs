@@ -74,6 +74,7 @@ pub struct RequestLogUpdate {
     pub upstream_request_body_bytes: Option<i64>,
     pub upstream_request_headers_json: Option<String>,
     pub upstream_request_json: Option<String>,
+    pub upstream_response_headers_json: Option<String>,
     pub upstream_response_sse: Option<String>,
     pub response_json: Option<String>,
 }
@@ -116,6 +117,7 @@ pub struct RequestLogDetail {
     pub request_json: Option<String>,
     pub upstream_request_headers_json: Option<String>,
     pub upstream_request_json: Option<String>,
+    pub upstream_response_headers_json: Option<String>,
     pub upstream_response_sse: Option<String>,
     pub response_json: Option<String>,
 }
@@ -601,6 +603,19 @@ pub fn headers_to_redacted_json(headers: &HeaderMap) -> Option<String> {
     })
 }
 
+pub fn record_upstream_response_headers(context: Option<&RequestLogContext>, headers: &HeaderMap) {
+    let Some(context) = context.filter(|context| context.details_enabled) else {
+        return;
+    };
+    let update = RequestLogUpdate {
+        upstream_response_headers_json: headers_to_redacted_json(headers),
+        ..RequestLogUpdate::default()
+    };
+    if let Err(error) = context.store.update_record(context.log_id, &update) {
+        log_update_error(error);
+    }
+}
+
 fn headers_to_json_with(
     headers: &HeaderMap,
     sanitize: impl Fn(&str, String) -> String,
@@ -792,7 +807,8 @@ fn update_record_with_conn(
             upstream_response_sse = ?15,
             response_json = ?16,
             write_cache_5m_tokens = ?18,
-            write_cache_1h_tokens = ?19
+            write_cache_1h_tokens = ?19,
+            upstream_response_headers_json = COALESCE(?20, upstream_response_headers_json)
          WHERE id = ?17",
         params![
             update.status.as_deref().unwrap_or(&existing.0),
@@ -814,6 +830,7 @@ fn update_record_with_conn(
             id,
             usage.write_cache_5m_tokens,
             usage.write_cache_1h_tokens,
+            &update.upstream_response_headers_json,
         ],
     )?;
     Ok(())
@@ -939,7 +956,7 @@ fn get_detail_with_conn(conn: &Connection, id: i64) -> rusqlite::Result<Option<R
             error_message, request_headers_json, request_json,
             upstream_request_body_bytes, upstream_request_headers_json, upstream_request_json,
             upstream_response_sse, response_json,
-            write_cache_5m_tokens, write_cache_1h_tokens
+            write_cache_5m_tokens, write_cache_1h_tokens, upstream_response_headers_json
          FROM ai_gateway_request_logs
          WHERE id = ?1",
         params![id],
@@ -973,6 +990,7 @@ fn get_detail_with_conn(conn: &Connection, id: i64) -> rusqlite::Result<Option<R
                 request_json: row.get(20)?,
                 upstream_request_headers_json: row.get(22)?,
                 upstream_request_json: row.get(23)?,
+                upstream_response_headers_json: row.get(28)?,
                 upstream_response_sse: row.get(24)?,
                 response_json: row.get(25)?,
             })
@@ -1364,6 +1382,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
             upstream_request_body_bytes INTEGER,
             upstream_request_headers_json TEXT,
             upstream_request_json TEXT,
+            upstream_response_headers_json TEXT,
             upstream_response_sse TEXT,
             response_json TEXT
         );
@@ -1374,6 +1393,7 @@ fn init_schema(conn: &Connection) -> rusqlite::Result<()> {
     add_integer_column_if_missing(conn, "upstream_request_body_bytes")?;
     add_text_column_if_missing(conn, "upstream_request_headers_json")?;
     add_text_column_if_missing(conn, "upstream_request_json")?;
+    add_text_column_if_missing(conn, "upstream_response_headers_json")?;
     add_text_column_if_missing(conn, "upstream_response_sse")?;
     add_integer_column_if_missing(conn, "write_cache_5m_tokens")?;
     add_integer_column_if_missing(conn, "write_cache_1h_tokens")?;
@@ -1707,6 +1727,198 @@ mod tests {
         assert_eq!(value["x-api-key"], "<redacted>");
         assert_eq!(value["x-openai-actor-authorization"], "<redacted>");
         assert_eq!(value["x-debug"], "visible");
+    }
+
+    #[test]
+    fn response_headers_survive_log_updates_and_redact_secrets() {
+        let temp = tempfile::tempdir().unwrap();
+        let context = insert_running_test_log(&temp.path().join("logs.sqlite"), "response-headers");
+        let mut headers = HeaderMap::new();
+        headers.insert("x-codex-turn-state", "opaque-state".parse().unwrap());
+        headers.insert("x-request-id", "upstream-id".parse().unwrap());
+        headers.insert("authorization", "Bearer secret".parse().unwrap());
+        headers.append("set-cookie", "session=secret-one".parse().unwrap());
+        headers.append("set-cookie", "session2=secret-two".parse().unwrap());
+        record_upstream_response_headers(Some(&context), &headers);
+        context
+            .store
+            .update_record(
+                context.log_id,
+                &RequestLogUpdate {
+                    status: Some("completed".into()),
+                    response_json: Some(r#"{"status":"completed"}"#.into()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let detail = context.store.get_detail(context.log_id).unwrap().unwrap();
+        let stored = detail.upstream_response_headers_json.as_ref().unwrap();
+        let value: Value = serde_json::from_str(stored).unwrap();
+        assert_eq!(value["x-codex-turn-state"], "opaque-state");
+        assert_eq!(value["x-request-id"], "upstream-id");
+        assert_eq!(value["authorization"], "<redacted>");
+        assert_eq!(value["set-cookie"], json!(["<redacted>", "<redacted>"]));
+        assert!(!stored.contains("secret"));
+        assert_eq!(
+            serde_json::to_value(&detail).unwrap()["upstreamResponseHeadersJson"],
+            stored.as_str()
+        );
+        assert_eq!(headers["authorization"], "Bearer secret");
+
+        let mut latest = HeaderMap::new();
+        latest.insert("x-request-id", "retry-id".parse().unwrap());
+        record_upstream_response_headers(Some(&context), &latest);
+        let detail = context.store.get_detail(context.log_id).unwrap().unwrap();
+        let value: Value =
+            serde_json::from_str(detail.upstream_response_headers_json.as_deref().unwrap())
+                .unwrap();
+        assert_eq!(value["x-request-id"], "retry-id");
+        assert!(value.get("x-codex-turn-state").is_none());
+    }
+
+    #[test]
+    fn response_header_migration_preserves_existing_logs_and_is_repeatable() {
+        let conn = Connection::open_in_memory().unwrap();
+        init_schema(&conn).unwrap();
+        conn.execute("INSERT INTO ai_gateway_request_logs (id,request_id,model_id,stream,channel,provider_type,status,created_at_ms,response_json) VALUES (1,'old','gpt-test',0,'openai','responses','completed',1,'{\"output\":[]}')", []).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE ai_gateway_request_logs DROP COLUMN upstream_response_headers_json",
+        )
+        .unwrap();
+        init_schema(&conn).unwrap();
+        init_schema(&conn).unwrap();
+        let old = get_detail_with_conn(&conn, 1).unwrap().unwrap();
+        assert_eq!(old.response_json.as_deref(), Some(r#"{"output":[]}"#));
+        assert!(old.upstream_response_headers_json.is_none());
+        update_record_with_conn(
+            &conn,
+            1,
+            &RequestLogUpdate {
+                upstream_response_headers_json: Some(r#"{"x-request-id":"new"}"#.into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let updated = get_detail_with_conn(&conn, 1).unwrap().unwrap();
+        assert_eq!(
+            updated.upstream_response_headers_json.as_deref(),
+            Some(r#"{"x-request-id":"new"}"#)
+        );
+        assert_eq!(updated.response_json, old.response_json);
+    }
+
+    #[tokio::test]
+    async fn response_headers_capture_sse_json_and_errors_before_consuming_body() {
+        use crate::ai_gateway::{
+            config::{ProviderConfig, ProviderType},
+            context::GatewayContext,
+            providers::openai_responses,
+        };
+        use axum::{
+            Json, Router,
+            body::{Body, to_bytes},
+            http::StatusCode,
+            response::Response,
+            routing::post,
+        };
+
+        for (streaming, status, details_enabled) in [
+            (true, StatusCode::OK, true),
+            (false, StatusCode::OK, true),
+            (true, StatusCode::BAD_REQUEST, true),
+            (false, StatusCode::TOO_MANY_REQUESTS, true),
+            (true, StatusCode::OK, false),
+        ] {
+            let payload = if !status.is_success() {
+                r#"{"error":{"message":"quota unavailable"}}"#.to_string()
+            } else if streaming {
+                "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_test\",\"status\":\"completed\",\"output\":[]}}\n\n".into()
+            } else {
+                r#"{"id":"resp_test","status":"completed","output":[]}"#.into()
+            };
+            let app = Router::new().route(
+                "/v1/responses",
+                post(move |Json(body): Json<Value>| {
+                    let payload = payload.clone();
+                    async move {
+                        assert_eq!(body["stream"], streaming);
+                        let mut response = Response::new(Body::from(payload));
+                        *response.status_mut() = status;
+                        response.headers_mut().insert(
+                            "content-type",
+                            if streaming && status.is_success() {
+                                "text/event-stream"
+                            } else {
+                                "application/json"
+                            }
+                            .parse()
+                            .unwrap(),
+                        );
+                        response
+                            .headers_mut()
+                            .insert("x-codex-turn-state", "server-state".parse().unwrap());
+                        response
+                            .headers_mut()
+                            .insert("set-cookie", "session=private".parse().unwrap());
+                        response
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let temp = tempfile::tempdir().unwrap();
+            let context = insert_running_test_log_with_details(
+                &temp.path().join("logs.sqlite"),
+                "headers-integration",
+                details_enabled,
+            );
+            let provider = ProviderConfig {
+                name: "mock".into(),
+                provider_type: ProviderType::OpenAiResponses,
+                base_url: format!("http://{address}"),
+                api_key: "test".into(),
+                timeout_secs: 5,
+                ..Default::default()
+            };
+            let client = reqwest::Client::builder().no_proxy().build().unwrap();
+            let gateway_context = GatewayContext::extract(&HeaderMap::new(), None);
+            let response = openai_responses::passthrough(
+                &client,
+                &gateway_context,
+                json!({"model":"gpt-test", "stream":streaming,"input":[]}),
+                "gpt-test",
+                &provider,
+                Some(context.clone()),
+            )
+            .await;
+            let before_body = context
+                .store
+                .get_detail(context.log_id)
+                .unwrap()
+                .unwrap()
+                .upstream_response_headers_json;
+            if details_enabled {
+                let headers: Value = serde_json::from_str(before_body.as_deref().unwrap()).unwrap();
+                assert_eq!(headers["x-codex-turn-state"], "server-state");
+                assert_eq!(headers["set-cookie"], "<redacted>");
+            } else {
+                assert!(before_body.is_none());
+            }
+            if status.is_success() {
+                let response = response.unwrap();
+                assert_eq!(response.headers()["x-codex-turn-state"], "server-state");
+                let _ = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+                let after_body = context.store.get_detail(context.log_id).unwrap().unwrap();
+                assert_eq!(after_body.upstream_response_headers_json, before_body);
+            } else {
+                assert_eq!(response.unwrap_err().status, status);
+            }
+            server.abort();
+            let _ = server.await;
+        }
     }
 
     #[test]

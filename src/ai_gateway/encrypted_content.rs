@@ -46,7 +46,7 @@ enum ScopedContent<'a> {
 impl EncryptedContentScope {
     pub(crate) fn for_provider(provider: &ProviderConfig) -> Self {
         let protocol = match provider.provider_type {
-            ProviderType::OpenAiResponses => "openai",
+            ProviderType::OpenAiResponses | ProviderType::ChatGptResponses => "openai",
             ProviderType::DeepSeekResponses => "deepseek_responses",
             ProviderType::KimiResponses => "kimi_responses",
             ProviderType::GrokResponses => "grok",

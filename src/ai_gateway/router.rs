@@ -48,6 +48,8 @@ pub fn resolve_provider_with_state_for_type<'a>(
 ) -> Result<(&'a ProviderConfig, String), GatewayError> {
     resolve_provider_with_state_matching(model, session_id, config, state, now, |provider| {
         &provider.provider_type == provider_type
+            || (provider_type == &ProviderType::OpenAiResponses
+                && provider.provider_type.is_openai())
     })
 }
 

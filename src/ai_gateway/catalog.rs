@@ -42,6 +42,29 @@ pub fn visible_catalog_model_options() -> Vec<CatalogModelOption> {
         .collect()
 }
 
+/// The model-list protocol version follows the embedded official GPT catalog,
+/// independently of CodexHub's application version.
+pub(crate) fn codex_compatibility_version() -> String {
+    catalog_models()
+        .iter()
+        .filter(|model| model_slug(model).is_some_and(|slug| slug.starts_with("gpt-")))
+        .filter_map(|model| model.get("minimal_client_version").and_then(Value::as_str))
+        .filter_map(|value| {
+            let segments = value
+                .split('.')
+                .map(str::parse::<u64>)
+                .collect::<Result<Vec<_>, _>>()
+                .ok()?;
+            let [major, minor, patch] = segments.as_slice() else {
+                return None;
+            };
+            Some((*major, *minor, *patch))
+        })
+        .max()
+        .map(|(major, minor, patch)| format!("{major}.{minor}.{patch}"))
+        .expect("official GPT catalog must include a minimum Codex version")
+}
+
 #[cfg(test)]
 pub fn configured_models_response(config: &AiGatewayConfig) -> Value {
     build_configured_models_response(config)

@@ -39,6 +39,38 @@ pub fn router(state: SharedState) -> Router {
         .route("/api/shutdown", post(shutdown))
         .route("/api/config", get(get_config).post(save_config))
         .route(
+            "/api/chatgpt/login/start",
+            post(crate::ai_gateway::chatgpt_auth::start_login_api),
+        )
+        .route(
+            "/api/chatgpt/login/status",
+            post(crate::ai_gateway::chatgpt_auth::login_status_api),
+        )
+        .route(
+            "/api/chatgpt/login/cancel",
+            post(crate::ai_gateway::chatgpt_auth::cancel_login_api),
+        )
+        .route(
+            "/api/chatgpt/account/import",
+            post(crate::ai_gateway::chatgpt_auth::import_account_api),
+        )
+        .route(
+            "/api/chatgpt/account/usage",
+            post(crate::ai_gateway::chatgpt_auth::account_usage_api),
+        )
+        .route(
+            "/api/chatgpt/account/status",
+            post(crate::ai_gateway::chatgpt_auth::account_status_api),
+        )
+        .route(
+            "/api/chatgpt/account/models",
+            post(crate::ai_gateway::chatgpt_auth::account_models_api),
+        )
+        .route(
+            "/api/chatgpt/account/logout",
+            post(crate::ai_gateway::chatgpt_auth::logout_api),
+        )
+        .route(
             "/api/codex-app/configure",
             post(codex_app::configure_codex_app),
         )

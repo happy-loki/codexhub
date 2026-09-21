@@ -52,7 +52,11 @@ pub(super) fn save_ai_gw_provider(
     api: &ApiClient,
     mut provider: ProviderConfig,
 ) -> Result<(), String> {
-    provider.base_url = provider_display_base_url(&provider.base_url);
+    provider.base_url = if provider.provider_type == ProviderType::ChatGptResponses {
+        crate::ai_gateway::chatgpt_auth::BASE_URL.into()
+    } else {
+        provider_display_base_url(&provider.base_url)
+    };
     let mut config = api.get_app_config()?;
     if let Some(existing) = config
         .ai_gateway
@@ -209,7 +213,7 @@ pub(super) fn provider_logo_variant(row: &AiGwProviderRow) -> Variant {
 
 fn provider_logo_kind(row: &AiGwProviderRow) -> ProviderLogoKind {
     match row.provider_type {
-        ProviderType::OpenAiResponses => ProviderLogoKind::OpenAi,
+        ProviderType::OpenAiResponses | ProviderType::ChatGptResponses => ProviderLogoKind::OpenAi,
         ProviderType::DeepSeekResponses => ProviderLogoKind::DeepSeek,
         ProviderType::KimiResponses => ProviderLogoKind::Kimi,
         ProviderType::GrokResponses => ProviderLogoKind::Grok,
@@ -227,6 +231,7 @@ pub(super) fn provider_protocol_display(
 ) -> String {
     match provider_type {
         ProviderType::OpenAiResponses => "OpenAI Responses".to_string(),
+        ProviderType::ChatGptResponses => "ChatGPT OAuth".to_string(),
         ProviderType::DeepSeekResponses => "DeepSeek Responses".to_string(),
         ProviderType::KimiResponses => "Kimi Responses".to_string(),
         ProviderType::GrokResponses => "Grok Responses".to_string(),

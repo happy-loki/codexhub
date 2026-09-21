@@ -35,7 +35,9 @@ pub fn prepare_for_provider(
 ) -> Result<ResponsesToolPreparation, String> {
     if matches!(
         provider_type,
-        ProviderType::OpenAiResponses | ProviderType::KimiResponses
+        ProviderType::OpenAiResponses
+            | ProviderType::ChatGptResponses
+            | ProviderType::KimiResponses
     ) {
         return Ok(ResponsesToolPreparation::default());
     }

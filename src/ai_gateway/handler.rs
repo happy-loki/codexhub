@@ -579,6 +579,7 @@ pub async fn handle_responses(
     let http_client = crate::outbound_http::get();
     match provider.provider_type {
         ProviderType::OpenAiResponses
+        | ProviderType::ChatGptResponses
         | ProviderType::DeepSeekResponses
         | ProviderType::KimiResponses
         | ProviderType::GrokResponses => {
@@ -892,7 +893,7 @@ fn strip_hosted_web_search_from_lite_request_tools(
     raw_body: &mut serde_json::Value,
     provider_type: &ProviderType,
 ) -> usize {
-    if provider_type != &ProviderType::OpenAiResponses || !is_responses_lite_request(raw_body) {
+    if !provider_type.is_openai() || !is_responses_lite_request(raw_body) {
         return 0;
     }
 
@@ -1232,6 +1233,7 @@ fn update_failed_log(log_context: &Option<RequestLogContext>, message: &str) {
 fn provider_type_key(provider_type: &ProviderType) -> &'static str {
     match provider_type {
         ProviderType::OpenAiResponses => "responses",
+        ProviderType::ChatGptResponses => "chatgpt_responses",
         ProviderType::DeepSeekResponses => "deepseek_responses",
         ProviderType::KimiResponses => "kimi_responses",
         ProviderType::GrokResponses => "grok_responses",

@@ -135,6 +135,7 @@ struct ImAccountToggle {
 
 mod ai_gateway;
 mod api;
+mod chatgpt;
 mod codex_tab;
 mod daemon;
 mod im_accounts;
@@ -1371,7 +1372,7 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
             if ai_gw_action_in_flight.load(Ordering::SeqCst) {
                 return;
             }
-            if let Some(provider) = show_ai_gw_channel_dialog(&frame, handles.text, None) {
+            if let Some(provider) = show_ai_gw_channel_dialog(&frame, handles.text, &api, None) {
                 start_ai_gw_provider_save(
                     &api,
                     &dashboard_refresh,
@@ -1399,7 +1400,8 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                 show_error(&frame, handles.text.ai_gw_select_channel());
                 return;
             };
-            if let Some(provider) = show_ai_gw_channel_dialog(&frame, handles.text, Some(&provider))
+            if let Some(provider) =
+                show_ai_gw_channel_dialog(&frame, handles.text, &api, Some(&provider))
             {
                 start_ai_gw_provider_save(
                     &api,
@@ -1463,7 +1465,8 @@ fn build_ui(app: App, single_instance_guard: GuiSingleInstanceGuard) {
                 show_error(&frame, handles.text.ai_gw_select_channel());
                 return;
             };
-            if let Some(provider) = show_ai_gw_channel_dialog(&frame, handles.text, Some(&provider))
+            if let Some(provider) =
+                show_ai_gw_channel_dialog(&frame, handles.text, &api, Some(&provider))
             {
                 start_ai_gw_provider_save(
                     &api,
@@ -2486,8 +2489,13 @@ fn start_ai_gw_provider_save(
 fn show_ai_gw_channel_dialog(
     parent: &Frame,
     text: GuiText,
+    api: &ApiClient,
     initial: Option<&ProviderConfig>,
 ) -> Option<ProviderConfig> {
+    if initial.is_some_and(|p| p.provider_type == ProviderType::ChatGptResponses) {
+        return chatgpt::show_channel_dialog(parent, text, api.clone(), initial);
+    }
+    const CHATGPT_DIALOG: i32 = 19028;
     let dialog = Dialog::builder(parent, text.ai_gw_channel_editor())
         .with_style(DialogStyle::DefaultDialogStyle | DialogStyle::ResizeBorder)
         .with_size(1120, 760)
@@ -2535,6 +2543,21 @@ fn show_ai_gw_channel_dialog(
         true,
         true,
     );
+    if initial.is_none() {
+        let radio_chatgpt = ai_gw_service_option(
+            &service_panel,
+            &service_sizer,
+            text.chatgpt_channel(),
+            Some(ProviderLogoKind::OpenAi),
+            false,
+            true,
+        );
+        radio_chatgpt.on_selected(move |_| {
+            if radio_chatgpt.get_value() {
+                dialog.end_modal(CHATGPT_DIALOG);
+            }
+        });
+    }
     let radio_grok = ai_gw_service_option(
         &service_panel,
         &service_sizer,
@@ -3410,6 +3433,7 @@ fn show_ai_gw_channel_dialog(
                 base_url: template.base_url,
                 models_url,
                 api_key: strip_nul(&key_input.get_value()).trim().to_string(),
+                chatgpt_auth_id: None,
                 model_aliases,
                 models,
                 prompt_cache_retention: initial
@@ -3427,6 +3451,9 @@ fn show_ai_gw_channel_dialog(
     fetch_models_closed.store(true, Ordering::SeqCst);
     fetch_models_timer.stop();
     dialog.destroy();
+    if result == CHATGPT_DIALOG {
+        return chatgpt::show_channel_dialog(parent, text, api.clone(), None);
+    }
     provider
 }
 
@@ -3703,6 +3730,12 @@ fn bind_locked_ai_gw_service_radio(
 
 fn default_ai_gw_service_provider(provider_type: ProviderType) -> ProviderConfig {
     match provider_type {
+        ProviderType::ChatGptResponses => ProviderConfig {
+            name: "chatgpt".into(),
+            provider_type: ProviderType::ChatGptResponses,
+            base_url: crate::ai_gateway::chatgpt_auth::BASE_URL.into(),
+            ..Default::default()
+        },
         ProviderType::OpenAiResponses => ProviderConfig {
             name: "openai".to_string(),
             provider_type: ProviderType::OpenAiResponses,
@@ -3888,7 +3921,7 @@ fn set_ai_gw_dialog_provider_type(
             radio_deepseek.set_value(true);
             type_input.change_value(text.provider_type_chat_completions());
         }
-        ProviderType::OpenAiResponses => {
+        ProviderType::OpenAiResponses | ProviderType::ChatGptResponses => {
             radio_openai.set_value(true);
             type_input.change_value(text.provider_type_openai_responses());
         }

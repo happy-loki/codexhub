@@ -99,6 +99,7 @@ pub async fn handle(
         .await?
     };
 
+    request_log::record_upstream_response_headers(log_context.as_ref(), upstream_resp.headers());
     let upstream_resp = ensure_success_response(&provider.name, upstream_resp).await?;
 
     // 3. 流式 vs 非流式

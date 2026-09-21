@@ -958,19 +958,22 @@ mod update_tests {
     }
 }
 
-fn open_url_in_browser(text: GuiText, url: &str) -> Result<(), String> {
+pub(super) fn open_url_in_browser(text: GuiText, url: &str) -> Result<(), String> {
     let url = url.trim();
     if url.is_empty() {
         return Err(text.empty_download_url().to_string());
     }
 
     #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "start", "", url]);
-        hide_command_window(&mut command);
-        command
-    };
+    {
+        // OAuth URLs contain '&' and percent escapes; cmd /C start interprets them.
+        // Hand the complete URL to the platform browser launcher without a shell.
+        return if launch_default_browser(url, BrowserLaunchFlags::Default) {
+            Ok(())
+        } else {
+            Err(text.open_browser_failed("Windows could not open the default browser", url))
+        };
+    }
     #[cfg(target_os = "macos")]
     let mut command = {
         let mut command = Command::new("open");
@@ -984,6 +987,7 @@ fn open_url_in_browser(text: GuiText, url: &str) -> Result<(), String> {
         command
     };
 
+    #[cfg(not(target_os = "windows"))]
     command
         .spawn()
         .map(|_| ())

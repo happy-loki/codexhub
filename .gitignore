@@ -3,6 +3,7 @@
 /outputs
 .DS_Store
 config.toml
+chatgpt-auth/
 codexhub-state.json
 *.log
 .im/

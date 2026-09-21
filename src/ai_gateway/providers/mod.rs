@@ -10,8 +10,63 @@ use axum::http::StatusCode;
 use tracing::{error, warn};
 
 use crate::ai_gateway::error::GatewayError;
+use crate::ai_gateway::{
+    chatgpt_auth,
+    config::{ProviderConfig, ProviderType},
+};
 
 const UPSTREAM_TRANSPORT_MAX_RETRIES: usize = 2;
+
+pub(crate) async fn execute_openai_request(
+    client: &reqwest::Client,
+    request: reqwest::Request,
+    provider: &ProviderConfig,
+    error_log: &'static str,
+) -> Result<reqwest::Response, GatewayError> {
+    execute_openai_request_with_auth(
+        client,
+        request,
+        provider,
+        error_log,
+        chatgpt_auth::manager(),
+    )
+    .await
+}
+
+pub(super) async fn execute_openai_request_with_auth(
+    client: &reqwest::Client,
+    request: reqwest::Request,
+    provider: &ProviderConfig,
+    error_log: &'static str,
+    auth: &chatgpt_auth::AuthManager,
+) -> Result<reqwest::Response, GatewayError> {
+    let retry = (provider.provider_type == ProviderType::ChatGptResponses)
+        .then(|| request.try_clone())
+        .flatten();
+    let response =
+        execute_upstream_request(client, request, provider.timeout_secs, error_log).await?;
+    if response.status() == StatusCode::UNAUTHORIZED
+        && let Some(mut request) = retry
+    {
+        let rejected = request
+            .headers()
+            .get("authorization")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .map(str::to_owned);
+        drop(response);
+        chatgpt_auth::authorize_with_manager(
+            auth,
+            client,
+            &mut request,
+            provider,
+            rejected.as_deref(),
+        )
+        .await?;
+        return execute_upstream_request(client, request, provider.timeout_secs, error_log).await;
+    }
+    Ok(response)
+}
 
 pub(super) fn apply_total_request_timeout(
     builder: reqwest::RequestBuilder,

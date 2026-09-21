@@ -1,5 +1,6 @@
 pub mod apply_patch_tool;
 pub mod catalog;
+pub mod chatgpt_auth;
 #[allow(dead_code)]
 pub mod codec;
 pub mod config;

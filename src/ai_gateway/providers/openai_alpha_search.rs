@@ -6,12 +6,12 @@ use axum::{
 use serde_json::Value;
 use tracing::{debug, error};
 
-use crate::ai_gateway::config::{ProviderConfig, provider_api_root};
 use crate::ai_gateway::context::{GatewayContext, apply_upstream_headers};
 use crate::ai_gateway::error::GatewayError;
 use crate::ai_gateway::request_log::{self, RequestLogContext, RequestLogUpdate};
+use crate::ai_gateway::{chatgpt_auth, config::ProviderConfig};
 
-use super::{apply_total_request_timeout, execute_upstream_request};
+use super::{apply_total_request_timeout, execute_openai_request};
 
 #[derive(Debug)]
 pub struct AlphaSearchRequestInspection {
@@ -65,16 +65,13 @@ pub async fn passthrough(
         GatewayError::bad_request(format!("serialize alpha search request: {error}"))
     })?;
 
-    let mut url = reqwest::Url::parse(&format!(
-        "{}/v1/alpha/search",
-        provider_api_root(&provider.base_url)
-    ))
-    .map_err(|error| {
-        GatewayError::upstream(
-            StatusCode::BAD_GATEWAY,
-            format!("invalid alpha search upstream URL: {error}"),
-        )
-    })?;
+    let mut url = reqwest::Url::parse(&chatgpt_auth::endpoint(provider, "/v1/alpha/search"))
+        .map_err(|error| {
+            GatewayError::upstream(
+                StatusCode::BAD_GATEWAY,
+                format!("invalid alpha search upstream URL: {error}"),
+            )
+        })?;
     if let Some(query) = raw_query.map(str::trim).filter(|query| !query.is_empty()) {
         url.set_query(Some(query));
     }
@@ -86,7 +83,7 @@ pub async fn passthrough(
     if !ctx.upstream_headers.contains_key("accept") {
         request_builder = request_builder.header("accept", "application/json");
     }
-    let request = apply_upstream_headers(
+    let mut request = apply_upstream_headers(
         apply_total_request_timeout(request_builder, provider.timeout_secs, false)
             .body(request_body.clone()),
         &ctx.upstream_headers,
@@ -99,6 +96,8 @@ pub async fn passthrough(
             format!("build upstream alpha search request: {error}"),
         )
     })?;
+
+    chatgpt_auth::authorize(client, &mut request, provider, None).await?;
 
     if let Some(log_context) = &log_context {
         let update = RequestLogUpdate {
@@ -125,13 +124,17 @@ pub async fn passthrough(
         "proxying alpha search request"
     );
 
-    let upstream_response = execute_upstream_request(
+    let upstream_response = execute_openai_request(
         client,
         request,
-        provider.timeout_secs,
+        provider,
         "upstream alpha search request failed",
     )
     .await?;
+    request_log::record_upstream_response_headers(
+        log_context.as_ref(),
+        upstream_response.headers(),
+    );
     let status = StatusCode::from_u16(upstream_response.status().as_u16())
         .unwrap_or(StatusCode::BAD_GATEWAY);
     let content_type = upstream_response.headers().get(CONTENT_TYPE).cloned();

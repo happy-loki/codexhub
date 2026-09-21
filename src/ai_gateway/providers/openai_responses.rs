@@ -8,7 +8,8 @@ use serde_json::json;
 use tracing::{debug, error, warn};
 
 use crate::ai_gateway::apply_patch_tool::APPLY_PATCH_TOOL_NAME;
-use crate::ai_gateway::config::{ProviderConfig, ProviderType, provider_api_root};
+use crate::ai_gateway::chatgpt_auth;
+use crate::ai_gateway::config::{ProviderConfig, ProviderType};
 use crate::ai_gateway::context::{GatewayContext, apply_upstream_headers};
 use crate::ai_gateway::encrypted_content::{
     EncryptedContentScope, prepare_responses_request, remove_all_responses_encrypted_content,
@@ -23,8 +24,8 @@ use crate::ai_gateway::responses_compat::{
 use crate::ai_gateway::tool_names::{GROK_READ_FILE_TOOL_NAME, ToolNameMap, VIEW_IMAGE_TOOL_NAME};
 
 use super::{
-    apply_total_request_timeout, ensure_success_response, execute_stream_start,
-    execute_upstream_request, upstream_transport_retry_delay,
+    apply_total_request_timeout, ensure_success_response, execute_openai_request,
+    upstream_transport_retry_delay,
 };
 
 const UPSTREAM_REQUEST_BODY_READ_MAX_RETRIES: usize = 2;
@@ -264,11 +265,7 @@ async fn passthrough_to_endpoint(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-    let url = format!(
-        "{}{}",
-        provider_api_root(&provider.base_url),
-        endpoint.path()
-    );
+    let url = chatgpt_auth::endpoint(provider, endpoint.path());
     let mut invalid_encrypted_content_retry = false;
     let mut request_body_read_retry_count = 0usize;
     let upstream_resp = loop {
@@ -295,11 +292,19 @@ async fn passthrough_to_endpoint(
             );
         }
 
+        chatgpt_auth::authorize(client, &mut upstream_req, provider, None).await?;
+
         if let Some(log_context) = &log_context {
             let update = RequestLogUpdate {
                 upstream_request_headers_json: log_context
                     .details_enabled
-                    .then(|| request_log::headers_to_json(upstream_req.headers()))
+                    .then(|| {
+                        if provider.provider_type == ProviderType::ChatGptResponses {
+                            request_log::headers_to_redacted_json(upstream_req.headers())
+                        } else {
+                            request_log::headers_to_json(upstream_req.headers())
+                        }
+                    })
                     .flatten(),
                 upstream_request_body_bytes: request_log::json_body_size_bytes(&raw_body),
                 upstream_request_json: log_context
@@ -321,23 +326,13 @@ async fn passthrough_to_endpoint(
             "proxying to openai responses endpoint"
         );
 
-        let upstream_resp = if is_stream {
-            execute_stream_start(
-                client,
-                upstream_req,
-                provider.timeout_secs,
-                "upstream request failed",
-            )
-            .await?
-        } else {
-            execute_upstream_request(
-                client,
-                upstream_req,
-                provider.timeout_secs,
-                "upstream request failed",
-            )
-            .await?
-        };
+        let upstream_resp =
+            execute_openai_request(client, upstream_req, provider, "upstream request failed")
+                .await?;
+        request_log::record_upstream_response_headers(
+            log_context.as_ref(),
+            upstream_resp.headers(),
+        );
 
         if upstream_resp.status() == StatusCode::BAD_REQUEST {
             let body_text = upstream_resp.text().await.unwrap_or_default();

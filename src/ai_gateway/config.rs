@@ -127,9 +127,14 @@ pub(crate) fn provider_route_id(provider: &ProviderConfig) -> String {
 }
 
 impl ProviderType {
+    pub fn is_openai(&self) -> bool {
+        matches!(self, Self::OpenAiResponses | Self::ChatGptResponses)
+    }
+
     fn route_key(&self) -> &'static str {
         match self {
             Self::OpenAiResponses => "openai_responses",
+            Self::ChatGptResponses => "chatgpt_responses",
             Self::DeepSeekResponses => "deepseek_responses",
             Self::KimiResponses => "kimi_responses",
             Self::GrokResponses => "grok_responses",
@@ -209,6 +214,9 @@ pub struct ProviderConfig {
     pub models_url: Option<String>,
     /// API key。
     pub api_key: String,
+    /// Reference to credentials stored separately by CodexHub.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chatgpt_auth_id: Option<String>,
     /// 该 provider 支持的 model 列表（精确匹配用）。
     pub models: Vec<String>,
     /// Codex 侧 model 到上游 provider model 的映射。
@@ -236,6 +244,7 @@ impl Default for ProviderConfig {
             base_url: String::new(),
             models_url: None,
             api_key: String::new(),
+            chatgpt_auth_id: None,
             models: Vec::new(),
             model_aliases: BTreeMap::new(),
             prompt_cache_retention: None,
@@ -285,6 +294,9 @@ impl ProviderConfig {
 pub enum ProviderType {
     /// OpenAI Responses API 透传。
     OpenAiResponses,
+    /// ChatGPT subscription login, using the official Codex backend.
+    #[serde(rename = "chatgpt_responses")]
+    ChatGptResponses,
     /// DeepSeek Responses API 原生透传。
     #[serde(rename = "deepseek_responses")]
     DeepSeekResponses,

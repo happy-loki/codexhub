@@ -3145,7 +3145,7 @@ fn rfc3339_now() -> String {
     }
 }
 
-fn format_rfc3339_utc(timestamp: u64) -> String {
+pub(crate) fn format_rfc3339_utc(timestamp: u64) -> String {
     // Valid for normal contemporary timestamps. This avoids adding a time crate
     // just to stamp the local auth file.
     let days = (timestamp / 86_400) as i64;

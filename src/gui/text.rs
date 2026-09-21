@@ -35,6 +35,13 @@ pub(super) struct GuiText {
 }
 
 impl GuiText {
+    pub(super) fn chatgpt_channel(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "ChatGPT（账号登录）",
+            GuiLocale::EnUs => "ChatGPT (Sign in)",
+        }
+    }
+
     pub(super) fn new(locale: GuiLocale) -> Self {
         Self { locale }
     }
@@ -1194,6 +1201,13 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => "上游请求",
             GuiLocale::EnUs => "Upstream Request",
+        }
+    }
+
+    pub(super) fn request_log_detail_upstream_response_headers(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "上游响应头",
+            GuiLocale::EnUs => "Upstream Response Headers",
         }
     }
 

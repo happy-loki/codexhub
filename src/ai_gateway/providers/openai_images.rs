@@ -9,12 +9,12 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 use tracing::{debug, error};
 
-use crate::ai_gateway::config::{ProviderConfig, provider_api_root};
 use crate::ai_gateway::context::{GatewayContext, apply_upstream_headers};
 use crate::ai_gateway::error::GatewayError;
 use crate::ai_gateway::request_log::{self, RequestLogContext, RequestLogUpdate};
+use crate::ai_gateway::{chatgpt_auth, config::ProviderConfig};
 
-use super::{apply_total_request_timeout, ensure_success_response, execute_upstream_request};
+use super::{apply_total_request_timeout, ensure_success_response};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageEndpoint {
@@ -165,12 +165,8 @@ pub async fn passthrough(
     let request_body = rewrite_model_if_needed(raw_body, request_model, upstream_model)?;
     let request_body_bytes = byte_len(request_body.len());
 
-    let url = format!(
-        "{}/v1/{}",
-        provider_api_root(&provider.base_url),
-        endpoint.path()
-    );
-    let request = apply_upstream_headers(
+    let url = chatgpt_auth::endpoint(provider, &format!("/v1/{}", endpoint.path()));
+    let mut request = apply_upstream_headers(
         apply_total_request_timeout(
             client
                 .post(&url)
@@ -190,6 +186,8 @@ pub async fn passthrough(
             format!("build upstream image request: {error}"),
         )
     })?;
+
+    chatgpt_auth::authorize(client, &mut request, provider, None).await?;
 
     if let Some(log_context) = &log_context {
         let update = RequestLogUpdate {
@@ -221,13 +219,13 @@ pub async fn passthrough(
         "proxying image request"
     );
 
-    let upstream_response = execute_upstream_request(
-        client,
-        request,
-        provider.timeout_secs,
-        "upstream image request failed",
-    )
-    .await?;
+    let upstream_response =
+        super::execute_openai_request(client, request, provider, "upstream image request failed")
+            .await?;
+    request_log::record_upstream_response_headers(
+        log_context.as_ref(),
+        upstream_response.headers(),
+    );
     let upstream_response = ensure_success_response(&provider.name, upstream_response).await?;
     let status = upstream_response.status();
     let content_type = upstream_response.headers().get(CONTENT_TYPE).cloned();
