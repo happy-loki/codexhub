@@ -1,10 +1,124 @@
 # Codex App 模型显示与 `web.run` Provider 取舍
 
-日期：2026-07-15
+首次记录：2026-07-15；源码复核：2026-09-22。
 
-状态：方案 1 的 Codex App 模型显示已通过可选增强启动解决；普通启动模型显示和账号态相关市场仍有边界。
+状态（2026-09-24）：新版源码已增加独立搜索能力配置，旧版“`requires_openai_auth=true` 与自定义 Provider 的 `web.run` 无法兼得”限制已解除。但本机 `true + chatgptAuthTokens` 实测触发 `account/read` 的 `workspace routing discovery missing backend origin`，App 显示登录页；默认配置已恢复 `false + Actor Authorization`，保留独立搜索能力和模型目录发现配置。
 
-本文记录 CodexHub 接入 Codex App 时，自定义模型显示、原生 `web.run` 和本地压缩之间的条件冲突。该结论基于 `references/codex-main` 最新源码和 Codex App `26.707.9981` 的实际 renderer bundle 分析。
+本文区分本地最新 `references/codex-main` 的源码结论与 Codex App 的实机结果。源码更新不代表用户安装的 Codex App 已包含相同实现；恢复后的全部工具功能仍需客户端联调。
+
+## 2026-09-22：新版接入方案
+
+### 搜索与本地压缩可以兼得
+
+新版 `codex-rs/ext/web-search/src/extension.rs` 的 provider 条件为：
+
+```rust
+(provider.is_openai()
+    || provider.uses_openai_actor_authorization()
+    || provider.supports_standalone_web_search)
+    && web_search_mode != WebSearchMode::Disabled
+```
+
+因此可以保留 `name = "ai-gateway"`，设置 `requires_openai_auth = true`，再显式声明 `supports_standalone_web_search = true`。Actor Authorization 本身仍要求 `requires_openai_auth=false`，但已不再是自定义 Provider 开启 `web.run` 的唯一入口。
+
+这是扩展可用条件。最终注册还要求 `namespace_tools`、`web_search` provider capabilities，以及 `use_responses_lite=true` 或 `[features].standalone_web_search=true`。app-server 的 `extensions.rs` 安装了搜索扩展；仅由 Gateway 注入工具描述仍不能代替客户端 executor。
+
+远程压缩独立判断：`model-provider/src/provider.rs` 中，普通配置 Provider 只有 `is_openai()` 或 Azure Responses 身份才获得 `RemoteCompactionSupport::V2`。`ai-gateway` 和本地 base URL 不满足这些条件，`requires_openai_auth=true` 与搜索能力开关不会改变它，仍走本地摘要压缩。“本地压缩”仍会调用模型生成摘要，并非完全离线运行。
+
+### 模型目录还有一个新增条件
+
+不能只修改 `requires_openai_auth`：
+
+- `account_state()` 在 `true` 时读取现有登录信息；没有凭证时不会自动产生 ChatGPT 账号态。CodexHub 管理的本地 `chatgptAuthTokens` 认证与上游 ChatGPT OAuth 渠道凭证是两回事。新版 workspace routing discovery 仍可能使 `account/read` 失败，不能把凭证存在等同于账号读取成功。
+- 新版 `models-manager/src/manager.rs` 把 provider 上的 `env_key` 或 `experimental_bearer_token` 也视为 API Key 模式。默认的 `dummy-token` 同样命中该判断，即使 AuthManager 里另有 ChatGPT 账号态。
+- 自定义 `base_url` 下，这条目录发现路径需要 provider 的 `model_catalog_url` 和 `[features].api_key_model_discovery=true`；否则可能在读取远程目录、甚至使用其缓存前直接返回。
+- `model_catalog_url` 必须返回 Codex 模型元数据目录，CodexHub 的 `/ai-gateway/v1/models` 可提供该结构。这是网络目录 URL，不是本地 JSON 文件路径。
+
+这些条件解决 Core/app-server 的账号响应和目录获取，不足以证明最新 App renderer 一定展示全部模型。历史 Statsig 白名单、模型可见性和账号过滤必须另做实机验证。
+
+### 已实现的配置写入
+
+以下组合已由 `src/codex_app_config.rs` 的默认初始化流程写入，尚未发布。手动合并时不能重复创建 `[features]` 或同名 provider 表。
+
+```toml
+model_provider = "ai-gateway"
+chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
+web_search = "live"
+
+[features]
+standalone_web_search = true
+api_key_model_discovery = true
+
+[model_providers.ai-gateway]
+name = "ai-gateway"
+wire_api = "responses"
+requires_openai_auth = false
+http_headers = { x-openai-actor-authorization = "codexhub-local" }
+supports_standalone_web_search = true
+base_url = "http://127.0.0.1:3847/ai-gateway/v1"
+model_catalog_url = "http://127.0.0.1:3847/ai-gateway/v1/models"
+experimental_bearer_token = "dummy-token"
+```
+
+说明：
+
+1. `standalone_web_search` 对 Lite 模型不是必需项；显式开启可让非 Lite 模型也走 `web.run`。真正注册 standalone executor 后，Core 不再同时声明 hosted `web_search`。该 feature 当前仍标为 `UnderDevelopment`。
+2. `api_key_model_discovery` 当前也标为 `UnderDevelopment`，需要客户端确实包含该功能。保留 `dummy-token` 是为了保持 Gateway 请求认证独立；不要为了拉目录直接删除它、意外改变凭证发送路径。
+3. 更新时恢复本地 Actor header，保留用户其他 headers。`false + Actor` 满足搜索和生图的认证分支；`true` 下 Actor 判断不生效。
+4. `supports_websockets` 是独立的传输配置，沿用用户现有选择，不作为本方案的前提。
+5. `chatgpt_base_url` 保持本地后端配置。这个方案不意味着我们已经支持全部 ChatGPT 官方账号功能，也不代表可以撤掉所有增强启动适配。
+6. 不覆盖用户的 `features.image_generation`。最新 Codex 默认开启生图；用户已有 `false` 时保留，Gateway 生图过滤也保持原设置。
+
+已初始化用户在新版 CodexHub 点击“更新 Codex 配置”，即可写入新配置，不必先恢复配置。随后自行重新打开 Codex 客户端以加载新配置。仅升级 CodexHub 可执行文件不会自动改写正在使用的配置。
+
+初始化会单独备份原来的 `standalone_web_search`、`api_key_model_discovery` 值，重复初始化不覆盖首份备份。恢复时还原这些值；用户后来关闭或删除的开关不强行改回。旧版备份缺少这部分信息时，在首次写入新开关前补记。恢复仍保留 `ai-gateway` provider 表，便于打开历史会话。
+
+### 生图不能只看 Provider 名称
+
+当前 Core 的 `image_generation_available()` 还要求：
+
+- 有效运行时 `Feature::ImageGeneration=true`，目前默认开启。
+- 缓存账号套餐不是明确的 `Free`。
+- provider 支持 `image_generation` 和 `namespace_tools`。
+- 当前模型 `input_modalities` 包含 `image`。
+- Actor Authorization 生效，或 `requires_openai_auth=true` 且 AuthManager 的认证使用 Codex backend。普通 API Key 登录不满足后一项；`chatgpt`、`chatgptAuthTokens` 等 backend 认证可满足。
+
+因此当前默认恢复 `false + Actor`，生图走 Actor 认证分支，`auth.json` 保留本地 `chatgptAuthTokens` 供远程控制使用。`true` 实验未解决新版账号路由错误和 Chrome/Computer Use 的认证兼容；不能把 `experimental_bearer_token` 本身当成生图资格。这些本地兼容信息不代表上游真实授权，上游搜索、生图仍需其各自有效凭证与接口支持。详情见 [认证说明](auth-notes.zh-CN.md)。
+
+新版 Core 确实会在有效 feature 为 false 时跳过 `image_gen.imagegen`。旧文档关于 App 忽略配置的观察不能推广成所有新版的结论；App 是否覆盖 feature、是否加载了新配置仍要验证。
+
+### 对比与验证边界
+
+| 组合 | 原生 `web.run` | 本地压缩 | 账号与生图 |
+| --- | --- | --- | --- |
+| `false + Actor`，当前默认 | provider 条件满足 | 保持 | provider account 仍为空；生图走 Actor 分支，仍有 feature、模型和套餐限制 |
+| `true`，不加新能力配置 | 自定义名称下仍不满足 | 保持 | 读取已有账号；生图需 backend 认证 |
+| `true + supports_standalone_web_search=true`，已撤回的实验 | provider 条件满足 | 保持 | 本机账号读取被 workspace routing discovery 阻断；生图需 backend 认证 |
+
+当前使用第一种组合，并保留新增的搜索和目录发现配置。增强启动的模型显示适配仍然需要，不能据此宣称普通启动的模型显示已经修复。客户端验证顺序：
+
+1. 确认实际运行的 app-server 包含这些字段和 feature。
+2. 确认 `account/read` 的实际账号类型，以及本地 `/models` 请求和 `model/list`。
+3. 检查 App 下拉框是否展示自定义模型，再决定是否仍需增强模式。
+4. 检查模型请求确实声明 `web.run`，工具调用到本地 `/alpha/search`，且上游完成搜索。
+5. 检查 `image_gen` 注册及独立 Images API 请求；确认 Gateway 的生图过滤未开启。
+6. 确认压缩走摘要请求，没有生成 Remote Compact V2 请求。
+
+2026-09-24 已同步恢复配置生成和更新按钮判断，并备份、修改本机实时配置；没有重启客户端或编译 Codex。按模型家族选择远程/本地压缩的后续研究记录在 [todolist.md](../todolist.md)，本次不实现。主要源码依据：
+
+- `codex-rs/model-provider-info/src/lib.rs`：新 capability、Actor 判断与 Provider 身份。
+- `codex-rs/ext/web-search/src/extension.rs`、`app-server/src/extensions.rs`：扩展条件和安装。
+- `codex-rs/core/src/tools/spec_plan.rs`：搜索选择、生图完整条件和 hosted/standalone 互斥。
+- `codex-rs/model-provider/src/provider.rs`：账号状态和远程压缩能力。
+- `codex-rs/model-provider/src/models_endpoint.rs`、`models-manager/src/manager.rs`：目录发现条件。
+- `codex-rs/features/src/lib.rs`：feature 名称、默认值和开发状态。
+- `codex-rs/app-server/tests/suite/v2/web_search.rs`：已有自定义 Provider + standalone capability 的搜索回合测试；该测试使用 `requires_openai_auth=false`，不等于本候选组合已实测。
+
+2026-09-24 实现验证：`cargo test --locked --features gui --bin codexhub --quiet` 为 779 项通过、2 项忽略、0 项失败；`cargo fmt --all -- --check` 和 `git diff --check` 通过。回归覆盖重复初始化后的开关恢复、用户后续改动保留、旧备份补记、内联 TOML 配置保留，以及从 `true` 恢复 Actor 配置后保留其他 headers、生图和 WebSocket 偏好。真实客户端工具注册、上游搜索及生图结果仍需联调。
+
+## 历史记录范围
+
+以下第 1 至 8 节保留 2026 年 7 月的取舍和当时 App 实机记录，其中“当前”“最新”均指当时版本。涉及“只能二选一”“true 无法注册 web.run”“一定能显示模型”的说法，不再作为新版结论；以以上复核为准。
 
 ## 1. 当前决策
 

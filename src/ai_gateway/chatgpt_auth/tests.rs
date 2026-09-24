@@ -371,6 +371,141 @@ async fn credentials_cannot_be_sent_to_configured_or_untrusted_hosts() {
     );
 }
 
+#[tokio::test]
+async fn websocket_handshake_refreshes_once_and_reuses_authenticated_connection() {
+    use axum::{
+        extract::ws::{Message, WebSocketUpgrade},
+        routing::get,
+    };
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let refreshes = Arc::new(AtomicUsize::new(0));
+    let refreshed_token = jwt("account-1", now() + 7200);
+    let seen = attempts.clone();
+    let refresh_seen = refreshes.clone();
+    let new_token = refreshed_token.clone();
+    let (base, task) = server(
+        Router::new()
+            .route(
+                "/oauth/token",
+                post(move || {
+                    let count = refresh_seen.clone();
+                    let token = new_token.clone();
+                    async move {
+                        count.fetch_add(1, Ordering::SeqCst);
+                        Json(json!({"access_token":token}))
+                    }
+                }),
+            )
+            .route(
+                "/backend-api/codex/responses",
+                get(move |headers: HeaderMap, ws: WebSocketUpgrade| {
+                    let count = seen.clone();
+                    let token = refreshed_token.clone();
+                    async move {
+                        assert_eq!(headers["chatgpt-account-id"], "account-1");
+                        assert_eq!(headers["session_id"], "stable-session");
+                        assert!(!headers.contains_key("openai-organization"));
+                        assert!(!headers.contains_key("sec-websocket-extensions"));
+                        assert_ne!(headers["sec-websocket-key"], "client-key");
+                        assert!(
+                            headers["openai-beta"]
+                                .to_str()
+                                .unwrap()
+                                .contains("responses_websockets=")
+                        );
+                        if count.fetch_add(1, Ordering::SeqCst) == 0 {
+                            return StatusCode::UNAUTHORIZED.into_response();
+                        }
+                        assert_eq!(headers["authorization"], format!("Bearer {token}"));
+                        let mut response = ws
+                            .on_upgrade(|mut socket| async move {
+                                for _ in 0..2 {
+                                    let Some(Ok(Message::Text(text))) = socket.recv().await else {
+                                        panic!("missing create");
+                                    };
+                                    socket.send(Message::Text(text)).await.unwrap();
+                                }
+                            })
+                            .into_response();
+                        response
+                            .headers_mut()
+                            .insert("x-codex-turn-state", "mock-state".parse().unwrap());
+                        response
+                    }
+                }),
+            ),
+    )
+    .await;
+    let temp = tempfile::tempdir().unwrap();
+    let mut auth = AuthManager::new(temp.path().into(), base.clone());
+    auth.backend = format!("{base}/backend-api/codex");
+    let id = uuid::Uuid::new_v4().to_string();
+    auth.write(&id, &credential(now() + 3600)).unwrap();
+    let provider = ProviderConfig {
+        provider_type: ProviderType::ChatGptResponses,
+        chatgpt_auth_id: Some(id),
+        ..Default::default()
+    };
+    let mut headers = HeaderMap::new();
+    for (key, value) in [
+        ("authorization", "Bearer wrong"),
+        ("chatgpt-account-id", "wrong"),
+        ("openai-organization", "wrong"),
+        ("session_id", "stable-session"),
+        ("sec-websocket-key", "client-key"),
+        ("sec-websocket-extensions", "permessage-deflate"),
+    ] {
+        headers.insert(
+            axum::http::HeaderName::from_static(key),
+            value.parse().unwrap(),
+        );
+    }
+    let context = super::super::context::GatewayContext::extract(&headers, None);
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let mut connection = super::super::websocket::native::connect_with_auth(
+        &client,
+        &context,
+        &provider,
+        &format!("{}/responses", auth.backend),
+        &auth,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        connection.response_headers["x-codex-turn-state"],
+        "mock-state"
+    );
+    for index in 0..2 {
+        let request =
+            json!({"type":"response.create","model":"test","input":[],"future_field":index})
+                .to_string();
+        connection
+            .socket
+            .send(WsMessage::Text(request.clone()))
+            .await
+            .unwrap();
+        assert_eq!(
+            connection
+                .socket
+                .next()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_text()
+                .unwrap(),
+            request
+        );
+    }
+    assert_eq!(attempts.load(Ordering::SeqCst), 2);
+    assert_eq!(refreshes.load(Ordering::SeqCst), 1);
+    drop(connection);
+    task.abort();
+    let _ = task.await;
+}
+
 #[test]
 fn refresh_cannot_switch_account_and_config_contains_no_tokens() {
     let old = credential(now() + 3600);

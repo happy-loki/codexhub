@@ -2,7 +2,9 @@
 
 日期：2026-07-14
 
-状态：`/alpha/search` 透明代理已落地；**已撤销** Lite 顶层 hosted `web_search` 注入（上游现明确拒绝）。更新后的 Codex 已正式支持 actor-authorized 自定义 Provider 注册 `web.run`，默认 provider 改为 `name = "ai-gateway" + requires_openai_auth = false + x-openai-actor-authorization`。模型目录继续从 CodexHub `/models` 拉取。
+2026-09-22 源码复核及实现：新版新增 provider 配置 `supports_standalone_web_search=true`，可与 `requires_openai_auth=true` 同时使用，且不要求改名 OpenAI。2026-09-24 本机 `true + chatgptAuthTokens` 触发账号路由错误和登录页，默认配置已恢复 `false + Actor Authorization`，保留新增搜索能力、模型目录 URL 和发现开关。完整配置、模型目录新条件和生图限制见 [Provider 取舍文档](codex-app-web-run-model-visibility-tradeoff.zh-CN.md)。本文的 7 月 App、模型和 Sub2API 观察不代表所有新版行为。
+
+状态：`/alpha/search` 透明代理已落地；**已撤销** Lite 顶层 hosted `web_search` 注入（上游明确拒绝）。2026-09-24 默认 provider 恢复为 `name = "ai-gateway" + requires_openai_auth = false + Actor Authorization`，保留 `supports_standalone_web_search = true`。模型目录继续从 CodexHub `/models` 拉取。
 
 本文记录 Codex 新版 Responses Lite 请求形态、工具注册与执行边界、当前 CodexHub/Sub2API 的兼容策略，以及原生 `web.run` 的剩余验证工作。本文以本仓库 2026-07-14 更新后的 `references/codex-main`、`references/sub2api-main` 和既有真实请求验证为准。
 
@@ -21,7 +23,7 @@
 2. Responses Lite 把客户端执行工具放进 `input[].additional_tools`，而不是顶层 `tools`。
 3. Codex 原生 Lite 搜索工具是客户端工具 `web.run`，不是托管工具 `web_search`。
 4. `web.run` 执行时会独立请求 provider 的 `/alpha/search`，不会在当前 `/responses` 请求中完成搜索。
-5. CodexHub 默认 provider 使用 `name="ai-gateway"`、`requires_openai_auth=false` 和本地 Actor Authorization header；满足独立工具 gate，但不满足 `provider.is_openai()`，因此不会触发 OpenAI 远程压缩。
+5. CodexHub 默认 provider 使用 `name="ai-gateway"`、`requires_openai_auth=false`、Actor Authorization 和 `supports_standalone_web_search=true`；满足搜索扩展条件，但不满足 `provider.is_openai()`，因此不会触发 OpenAI 远程压缩。
 6. CodexHub 已提供 `/ai-gateway/v1/alpha/search`，当前 Sub2API `0.1.152` 也已提供 `/v1/alpha/search`；搜索请求可以按 OpenAI Responses Provider 路由并透明转发。
 7. 把托管 `{"type":"web_search"}` 塞进 `additional_tools.tools` 会被当前上游静默忽略。这不是 Codex 原生 Lite 结构。
 8. **不要**再向 Responses Lite 请求顶层 `tools` 注入 hosted `web_search`。上游会返回 `unsupported_value`：`X-OpenAI-Internal-Codex-Responses-Lite only supports function tools, custom tools, and client-executed tool search.`
@@ -371,9 +373,12 @@ Codex App
 Codex Web Search extension 的可用条件是：
 
 ```text
-(provider.is_openai() OR provider.uses_openai_actor_authorization())
+(provider.is_openai() OR provider.uses_openai_actor_authorization()
+ OR provider.supports_standalone_web_search)
 AND web_search_mode != disabled
 ```
+
+以上按 2026-09-22 本地源码更新。这只是扩展可用条件；Core 还检查 namespace/web-search capabilities，并要求 Lite 模型或 `[features].standalone_web_search=true`。新 capability 不改变 Actor 自身要求 `requires_openai_auth=false` 的规则。
 
 CodexHub 默认写入的本地 provider：
 
@@ -381,16 +386,22 @@ CodexHub 默认写入的本地 provider：
 chatgpt_base_url = "http://127.0.0.1:3847/backend-api"
 web_search = "live"
 
+[features]
+standalone_web_search = true
+api_key_model_discovery = true
+
 [model_providers.ai-gateway]
 name = "ai-gateway"
 wire_api = "responses"
 requires_openai_auth = false
-base_url = "http://127.0.0.1:3847/ai-gateway/v1"
-experimental_bearer_token = "dummy-token"
 http_headers = { x-openai-actor-authorization = "codexhub-local" }
+supports_standalone_web_search = true
+base_url = "http://127.0.0.1:3847/ai-gateway/v1"
+model_catalog_url = "http://127.0.0.1:3847/ai-gateway/v1/models"
+experimental_bearer_token = "dummy-token"
 ```
 
-表键和身份字段都保持 `ai-gateway`，因此 `provider.is_openai()` 为假，不会仅因本地 Gateway 身份而启用 OpenAI 私有协议行为。Actor header 只作为 Codex 本地 capability gate；CodexHub 将其列为敏感 header，不会转发给 Sub2API。
+表键和身份字段都保持 `ai-gateway`，因此 `provider.is_openai()` 为假。初始化恢复本地 Actor header，同时保留显式搜索 capability。CodexHub 将 Actor header 列为敏感 header，不会转发给 Sub2API。
 
 ### 6.1 Actor Authorization 的判定
 
@@ -420,17 +431,19 @@ Codex App 26.707.9981 前端仍会使用 Statsig `107580212` 的 `available_mode
 - model-switch compaction。
 - reasoning summary 并发/流式行为。
 
-这些行为与开启搜索无关，却扩大了所有渠道的协议面，尤其会把 Grok、Anthropic 和 DeepSeek 会话也带入 OpenAI remote compaction 判断。因此默认配置既不伪装 OpenAI，也不使用 Actor Authorization，而是保留 hosted `web_search` 兼容链路。
+这些行为与开启搜索无关，却扩大了所有渠道的协议面，尤其会把 Grok、Anthropic 和 DeepSeek 会话也带入 OpenAI remote compaction 判断。因此默认配置保持 `ai-gateway` 身份，通过独立搜索 capability 注册原生 `web.run`；不向 Lite 注入 hosted `web_search`。
 
 其中一个立即可见的差异是请求压缩。Codex 的 `enable_request_compression` 默认开启；当认证使用 Codex backend 且 `provider.is_openai()` 为真时，流式 `/responses` body 会使用 zstd，并携带 `Content-Encoding: zstd`。默认 `ai-gateway` 身份不再触发该分支，但 CodexHub 仍保留 zstd 解压支持，以兼容旧配置和用户显式配置的 OpenAI provider。
 
 ### 6.3 Image generation 与 Web Search 使用不同 gate
 
-Codex 当前对 image generation 和 web search 的 runtime gate 并不完全相同。Image generation 接受 OpenAI provider、`requires_openai_auth=true` 或 Actor Authorization；Web Search extension 接受 OpenAI provider或 Actor Authorization。
+2026-09-22 源码中，两者条件仍不相同。Image generation extension 接受 OpenAI provider、`requires_openai_auth=true` 或 Actor Authorization；Web Search extension 另可接受 `supports_standalone_web_search=true`。生图最终注册还检查有效 feature、非 Free 套餐、模型图像输入能力和 provider capabilities，并要求 Actor 生效，或 `requires_openai_auth=true` 加 Codex backend 认证。仅通过 extension 条件不代表最终工具一定可见。
 
-当前默认配置通过 Actor Authorization 同时满足 image generation 和 Web Search extension gate。两者仍使用不同执行路由：`image_gen` 请求 Images API，`web.run` 请求 `/alpha/search`。
+当前默认配置通过 Actor Authorization 和独立 capability 满足搜索扩展条件，生图认证走 Actor 分支；生图仍受上述其他条件限制。两者使用不同执行路由：`image_gen` 请求 Images API，`web.run` 请求 `/alpha/search`。
 
-### 6.4 不要依赖 `[features].image_generation` 控制 Codex App
+### 6.4 生图 feature 与 Gateway 过滤的边界
+
+2026-09-22 源码确认：Core 的 `image_generation_available()` 会检查 `Feature::ImageGeneration`，有效值为 false 时不注册 `image_gen.imagegen`。以下是旧 App 的观察和 Gateway 过滤设计，不表示最新 App 必定忽略该配置；需要区分磁盘配置、App 的运行时覆盖和是否已加载配置。
 
 历史版本中，`[features].image_generation = false` 对 Codex CLI 有效，但不能作为 Codex App 的可靠控制面。Codex App 使用 app-server、runtime feature enablement 和自身工具注册流程；不同版本还可能存在配置覆盖或不立即 reload 的差异。
 

@@ -35,7 +35,7 @@ Important fields:
 If `connected=false`, check the Codex App side:
 
 1. Codex App config contains `chatgpt_base_url = "http://127.0.0.1:3847/backend-api"`.
-2. Codex App auth is local `chatgptAuthTokens`, not API-key-only auth.
+2. Codex App auth is local `chatgptAuthTokens`, with `requires_openai_auth=false` and `x-openai-actor-authorization="codexhub-local"`, not API-key-only auth. Updating the configuration migrates the previous managed `chatgpt` format without replacing the original backup. The `true` experiment was reverted after `account/read` failed with `workspace routing discovery missing backend origin` and the App showed the login page. Enhanced startup still supplies model visibility; this is not a fix for Chrome authentication.
 3. The `codexhub daemon` process is running before remote control is enabled.
 4. Remote control is enabled in Codex App.
 
@@ -66,6 +66,14 @@ Use a local ChatGPT-shaped auth record:
 ```
 
 The third-party model key does not satisfy this check. It belongs in the model provider config and is used later for model calls.
+
+`chatgpt_base_url` does not redirect OAuth refresh requests. Codex defaults to
+`https://auth.openai.com/oauth/token`; the existing local `/oauth/token` endpoint
+only handles step-up authorization-code exchange. The current `chatgptAuthTokens`
+mode uses externally managed tokens rather than managed ChatGPT OAuth refresh.
+The previous local `chatgpt` mode can still attempt refresh on a 401 before migration.
+Neither mode bypasses workspace routing or plugin authentication checks.
+See [authentication notes](auth-notes.zh-CN.md) for these limitations.
 
 ## Feishu Does Not Receive Messages
 

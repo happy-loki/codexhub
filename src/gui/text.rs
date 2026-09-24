@@ -968,8 +968,26 @@ impl GuiText {
 
     pub(super) fn provider_websocket(self) -> &'static str {
         match self.locale {
-            GuiLocale::ZhCn => "启用 WebSocket",
-            GuiLocale::EnUs => "Enable WebSocket",
+            GuiLocale::ZhCn => "优先使用 WebSocket",
+            GuiLocale::EnUs => "Prefer WebSocket",
+        }
+    }
+
+    pub(super) fn provider_websocket_help(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => {
+                "适用于 OpenAI 和 ChatGPT 登录渠道。不支持时，Codex 会尝试重连并回退至普通连接。保存后请重新打开 Codex 客户端。"
+            }
+            GuiLocale::EnUs => {
+                "For OpenAI and ChatGPT account channels. Codex may retry before falling back to a standard connection. Reopen your Codex client after saving."
+            }
+        }
+    }
+
+    pub(super) fn provider_websocket_saved(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "连接设置已保存，重新打开 Codex 客户端后生效。",
+            GuiLocale::EnUs => "Connection setting saved. Reopen your Codex client to apply it.",
         }
     }
 
@@ -1001,10 +1019,24 @@ impl GuiText {
         }
     }
 
+    pub(super) fn update_codex_access(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "更新 Codex 配置",
+            GuiLocale::EnUs => "Update Codex Config",
+        }
+    }
+
     pub(super) fn injecting_codex_access(self) -> &'static str {
         match self.locale {
             GuiLocale::ZhCn => "初始化中...",
             GuiLocale::EnUs => "Setting up...",
+        }
+    }
+
+    pub(super) fn codex_config_up_to_date(self) -> &'static str {
+        match self.locale {
+            GuiLocale::ZhCn => "配置已更新",
+            GuiLocale::EnUs => "Config Up to Date",
         }
     }
 

@@ -1,5 +1,28 @@
 # CodexHub 待办事项
 
+## 按模型家族选择压缩方式
+
+状态：待研究，暂不实现。2026-09-22 记录；当前优先完成原生搜索和生图接入。
+
+目标：GPT 模型使用上游原生 Remote Compact V2，其他模型使用 Codex 本地摘要压缩，同时保留在同一会话中切换模型的体验。
+
+已确认限制：
+
+- 最新 Codex 按 Provider capability 选择压缩方式，不按模型名称选择。统一 `ai-gateway` 当前走本地压缩。
+- `requires_openai_auth`、`supports_standalone_web_search` 和模型 `comp_hash` 都不能按模型选择压缩协议。
+- 拆成两个 Codex Provider 可以分别配置，但模型下拉框切换模型不会自动切换 Provider。
+- GPT 的 V2 压缩密文不能直接供其他模型读取，切换模型触发压缩也不保证自动得到可移植文本摘要。
+
+后续待办：
+
+- [ ] 跟踪 Codex 是否新增按模型声明 remote compaction capability 的配置。
+- [ ] 评估在保留统一模型列表的前提下，能否可靠地同步切换客户端 Provider。
+- [ ] 验证 GPT 转其他模型时，已经压缩的上下文如何无损转成可读摘要。
+- [ ] 覆盖自动压缩、手动压缩、`comp_hash_changed`、`model_downshift` 和历史会话恢复。
+- [ ] 确认各 GPT 上游支持原生 V2，而不只是普通 Responses 接口。
+
+本阶段不模拟 V2 密文、不改名 OpenAI 来全局开启远程压缩。相关依据见 [Provider 取舍文档](docs/codex-app-web-run-model-visibility-tradeoff.zh-CN.md)。
+
 ## Anthropic 工具结果图片兼容模式
 
 状态：已实现，并完成真实 LLMX 大图 A/B 验证。

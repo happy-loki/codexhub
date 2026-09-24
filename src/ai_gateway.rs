@@ -19,6 +19,7 @@ pub mod router;
 pub mod routing_state;
 pub mod tool_names;
 pub mod transform;
+mod websocket;
 
 use axum::{
     Router,
@@ -31,7 +32,10 @@ use crate::app_state::SharedState;
 /// 构建 AI Gateway 子路由（state 由父 Router 提供）。
 pub fn router() -> Router<SharedState> {
     Router::new()
-        .route("/v1/responses", post(handler::handle_responses))
+        .route(
+            "/v1/responses",
+            post(handler::handle_responses).get(websocket::handle_upgrade),
+        )
         .route(
             "/v1/responses/compact",
             post(handler::handle_responses_compact),

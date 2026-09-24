@@ -227,6 +227,25 @@ impl ApiClient {
         self.get_with_timeout("/api/codex-app/status", GUI_CONFIG_TIMEOUT)
     }
 
+    pub(super) fn set_codex_websocket(&self, enabled: bool) -> Result<bool, String> {
+        #[derive(Deserialize)]
+        struct Updated {
+            status: CodexAppStatus,
+        }
+        let response: Updated = self.post_json_with_timeout(
+            "/api/codex-app/provider/websocket",
+            &serde_json::json!({"providerName":"ai-gateway", "enabled":enabled}),
+            GUI_CONFIG_TIMEOUT,
+        )?;
+        response
+            .status
+            .gateway_websocket_enabled()
+            .filter(|actual| *actual == enabled)
+            .ok_or_else(|| {
+                "WebSocket setting could not be verified; refresh and try again".to_string()
+            })
+    }
+
     pub(super) fn move_codex_app_session_provider(
         &self,
         request: &MoveCodexAppSessionProviderRequest,
@@ -491,12 +510,24 @@ pub(super) struct RemoteControlConnectionStatus {
 #[serde(rename_all = "camelCase")]
 pub(super) struct CodexAppStatus {
     pub(super) configured: bool,
+    #[serde(default)]
+    pub(super) config_up_to_date: bool,
     pub(super) provider: Option<CodexAppProviderStatus>,
     #[serde(default)]
     pub(super) providers: Vec<CodexAppProviderStatus>,
     #[serde(default = "default_true")]
     #[allow(dead_code)]
     pub(super) image_generation_enabled: bool,
+}
+
+impl CodexAppStatus {
+    pub(super) fn gateway_websocket_enabled(&self) -> Option<bool> {
+        self.providers
+            .iter()
+            .chain(self.provider.iter())
+            .find(|provider| provider.name == "ai-gateway")
+            .map(|provider| provider.supports_websockets)
+    }
 }
 
 #[derive(Clone, Deserialize)]
@@ -592,6 +623,7 @@ mod tests {
         };
         let codex_app = CodexAppStatus {
             configured: true,
+            config_up_to_date: true,
             provider: None,
             providers: Vec::new(),
             image_generation_enabled: true,
@@ -684,7 +716,8 @@ pub(super) struct ConfigureRequest {
     pub(super) activate: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) image_generation_enabled: Option<bool>,
-    pub(super) supports_websockets: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(super) supports_websockets: Option<bool>,
 }
 
 #[derive(Serialize)]

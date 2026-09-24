@@ -729,7 +729,7 @@ impl Drop for AiGatewayInFlightGuard {
 /// 上游调用结果对熔断的分类。从 `Result<Response, _>` 提炼成只含 Send 信息的值，
 /// 避免把 `!Sync` 的 axum Response body 跨 await 持有。
 #[derive(Clone, Copy)]
-enum RoutingOutcome {
+pub(super) enum RoutingOutcome {
     /// 成功：清零失败计数、解除拉黑。
     Success,
     /// 上游故障（5xx / 429 / 408 / 504）：计入熔断。
@@ -738,7 +738,7 @@ enum RoutingOutcome {
     Ignore,
 }
 
-fn classify_outcome<T>(result: &Result<T, GatewayError>) -> RoutingOutcome {
+pub(super) fn classify_outcome<T>(result: &Result<T, GatewayError>) -> RoutingOutcome {
     match result {
         Ok(_) => RoutingOutcome::Success,
         Err(e) if is_circuit_breaker_failure(e.status) => RoutingOutcome::UpstreamFailure,
@@ -757,7 +757,11 @@ fn classify_response_status(status: axum::http::StatusCode) -> RoutingOutcome {
 }
 
 /// 根据上游调用结果更新渠道熔断健康：成功清零、可熔断失败累加。
-async fn record_routing_outcome(state: &SharedState, route_id: &str, outcome: RoutingOutcome) {
+pub(super) async fn record_routing_outcome(
+    state: &SharedState,
+    route_id: &str,
+    outcome: RoutingOutcome,
+) {
     let mut routing = state.ai_gateway_routing.lock().await;
     match outcome {
         RoutingOutcome::Success => routing.record_success(route_id),
@@ -778,7 +782,10 @@ fn deserialize_gateway_request(raw_body: serde_json::Value) -> Result<GatewayReq
     serde_path_to_error::deserialize(deserializer).map_err(|err| err.to_string())
 }
 
-fn filter_image_generation_tools(raw_body: &mut serde_json::Value, filter_enabled: bool) {
+pub(super) fn filter_image_generation_tools(
+    raw_body: &mut serde_json::Value,
+    filter_enabled: bool,
+) {
     if !filter_enabled {
         return;
     }
@@ -889,7 +896,7 @@ fn remove_markdown_h2_section(text: &str, heading: &str) -> Option<String> {
 /// Strip any hosted web_search entries from both top-level `tools` and Lite
 /// `input[].additional_tools.tools`.
 /// Do not inject hosted web_search as a compatibility path for Lite.
-fn strip_hosted_web_search_from_lite_request_tools(
+pub(super) fn strip_hosted_web_search_from_lite_request_tools(
     raw_body: &mut serde_json::Value,
     provider_type: &ProviderType,
 ) -> usize {
@@ -948,12 +955,12 @@ fn is_hosted_web_search_tool(tool: &serde_json::Value) -> bool {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct GatewayRequestEnvelope {
-    model: String,
+pub(super) struct GatewayRequestEnvelope {
+    pub(super) model: String,
     #[serde(default)]
-    stream: bool,
+    pub(super) stream: bool,
     #[serde(default)]
-    prompt_cache_key: Option<String>,
+    pub(super) prompt_cache_key: Option<String>,
 }
 
 /// GET /ai-gateway/v1/models
@@ -1056,7 +1063,7 @@ pub async fn handle_request_log_detail(
     }
 }
 
-fn insert_initial_log(
+pub(super) fn insert_initial_log(
     store: &RequestLogStore,
     ctx: &GatewayContext,
     headers: &HeaderMap,

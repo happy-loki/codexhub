@@ -1,10 +1,12 @@
 # Codex 5.5 与 5.6 Responses Lite 生图协议变化
 
+2026-09-22 复核：独立 Images API 链路仍在，当前工具请求模型为 `gpt-image-2`。工具可见性不能只依据 `requires_openai_auth`：Core 还检查有效生图 feature、非 Free 套餐、模型图像输入能力、provider capabilities，以及 Actor 或 Codex backend 认证。最新配置条件见 [Provider 取舍文档](codex-app-web-run-model-visibility-tradeoff.zh-CN.md)。下文模型版本对比保留历史迁移背景，不表示只要切换到 5.6 就自动获得生图能力。
+
 ## 1. 文档目的
 
 本文记录 Codex App 生图能力从旧版 Responses 托管工具迁移到新版独立 `image_gen` 工具后的协议变化，以及 CodexHub AI Gateway 必须提供的兼容接口。
 
-本文基于仓库中的最新 Codex 源码：
+本文记录迁移时的 Codex 源码路径；配置条件以文首所链接的最新复核为准：
 
 - `references/codex-main/codex-rs/models-manager/models.json`
 - `references/codex-main/codex-rs/ext/image-generation/src/tool.rs`

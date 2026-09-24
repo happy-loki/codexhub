@@ -5629,9 +5629,17 @@ fn update_dashboard(handles: &UiHandles, snapshot: &DashboardSnapshot, daemon_st
     set_actions_enabled(handles, true);
 
     if let Some(codex_status) = &snapshot.codex_app {
-        codex_tab::refresh_configured(&handles.codex_tab, codex_status.configured);
+        codex_tab::refresh_configured(
+            &handles.codex_tab,
+            codex_status.configured,
+            codex_status.config_up_to_date,
+        );
+        codex_tab::refresh_websocket(
+            &handles.codex_tab,
+            codex_status.gateway_websocket_enabled().unwrap_or(false),
+        );
     } else {
-        codex_tab::refresh_configured(&handles.codex_tab, false);
+        codex_tab::refresh_configured(&handles.codex_tab, false, false);
     }
     codex_tab::refresh_local_connection_mode(&handles.codex_tab, snapshot.local_connection_mode);
     if let Some(gw) = &snapshot.ai_gateway {
