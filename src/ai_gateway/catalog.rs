@@ -197,6 +197,8 @@ mod tests {
             "deepseek-v4-flash",
             "GLM-5.3",
             "GLM-5.3-Flash",
+            "gpt-6-sol",
+            "gpt-6-luna",
             "custom-model",
             "codex-auto-review",
         ]);
@@ -220,7 +222,9 @@ mod tests {
                 "deepseek-v4-pro",
                 "deepseek-v4-flash",
                 "GLM-5.3",
-                "GLM-5.3-Flash"
+                "GLM-5.3-Flash",
+                "gpt-6-sol",
+                "gpt-6-luna"
             ]
         );
         assert_eq!(response["models"][3]["display_name"], "Grok-4.6");
@@ -532,7 +536,9 @@ mod tests {
     fn gpt_lite_models_use_current_official_capabilities() {
         for (slug, priority) in [
             ("gpt-6-astra", 1),
-            ("gpt-5.6-sol", 6),
+            ("gpt-6-sol", 2),
+            ("gpt-6-luna", 3),
+            ("gpt-5.6-sol", 4),
             ("gpt-5.6-terra", 7),
             ("gpt-5.6-luna", 8),
         ] {
@@ -544,6 +550,7 @@ mod tests {
             assert_eq!(model["context_window"], 272_000, "model {slug}");
             assert_eq!(model["max_context_window"], 872_000, "model {slug}");
             assert_eq!(model["use_responses_lite"], true, "model {slug}");
+            assert_eq!(model["shell_type"], "shell_command", "model {slug}");
             assert_eq!(
                 model["supports_reasoning_summary_parameter"], true,
                 "model {slug}"
@@ -560,6 +567,7 @@ mod tests {
             .find(|model| model_slug(model) == Some("gpt-5.5"))
             .expect("gpt-5.5 should exist");
         assert_eq!(gpt_5_5["visibility"], "list");
+        assert_eq!(gpt_5_5["shell_type"], "shell_command");
         assert_eq!(gpt_5_5["supports_reasoning_summary_parameter"], true);
         assert_eq!(gpt_5_5.get("availability_nux"), Some(&Value::Null));
 
@@ -586,6 +594,8 @@ mod tests {
             "grok-4.6",
             "gpt-5.5",
             "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6-luna",
             "GLM-5.3",
             "GLM-5.3-Flash",
         ] {
