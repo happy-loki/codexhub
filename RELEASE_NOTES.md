@@ -1,3 +1,48 @@
+CodexHub v0.4.29
+
+本次版本新增 ChatGPT 账号渠道和 Responses WebSocket，同步最新 GPT 模型目录，并完善 Codex 配置更新与请求诊断。
+
+## ChatGPT 账号渠道
+
+- 新增 ChatGPT（账号登录）渠道，支持浏览器官方 OAuth 授权及导入 Codex `auth.json`；可为多个账号分别创建渠道。
+- 凭证单独存储于 CodexHub 用户数据目录，导入时保存副本，不覆盖来源文件；支持令牌刷新及认证失败后的有限重试。
+- 支持拉取账号可用模型、查看套餐、额度窗口及重置时间，包括官方返回的 5 小时、7 天及额外模型额度。
+- 缺失的额度和套餐到期信息明确显示为未提供，不用令牌过期时间替代套餐到期日。
+- 修复 Windows 打开 OAuth 授权页面时 URL 参数可能被截断的问题。
+
+## Responses WebSocket
+
+- OpenAI Responses API Key 渠道和 ChatGPT 账号渠道新增原生 WebSocket 转发，保留 Responses Lite、工具调用及增量上下文字段。
+- 在「Codex 接入 → Codex 初始化」增加「优先使用 WebSocket」选项，默认关闭；上游需支持该连接方式，保存后重新打开 Codex 客户端生效。
+- 继续按已有渠道优先级和会话粘性路由，不同时向多个渠道发送推理请求；连接失败后的重试和 HTTP/SSE 回退由 Codex 处理。
+- 每轮 WebSocket 请求独立记录用量、响应事件和结束状态；其他厂商专用渠道继续使用原有 HTTP/SSE 链路。
+
+## GPT 模型目录
+
+- 新增 `gpt-6-sol`、`gpt-6-luna`，最低客户端版本为 `0.155.0`；默认上下文 272,000，最大上下文 872,000。
+- 完整同步 GPT-5.5、GPT-5.6-Sol/Terra/Luna、GPT-6-Astra/Sol/Luna 的官方目录信息；其他厂商模型配置保持不变。
+- GPT-6-Astra 和 GPT-6-Sol 支持 `low` 至 `ultra` 六档思考等级，GPT-6-Luna 支持 `low` 至 `max` 五档；默认档位分别为 `low`、`medium`、`medium`。
+- 同步 `shell_command` 工具配置、`model_messages` 指令、模型升级提示、服务档位及能力字段。
+
+## 配置与诊断
+
+- 补齐独立搜索能力及模型目录发现配置，模型列表协议版本随内置 GPT 目录更新。
+- 完善「更新 Codex 配置」状态判断，符合当前配置要求时显示灰色「配置已更新」；保留用户已有的 WebSocket 等选项。
+- 请求详情新增脱敏后的上游响应头，便于排查路由与响应元数据；不包含 turn-state 采集、筛选或注入策略。
+
+## 验证
+
+- 完整 GUI 功能测试：779 项通过、2 项忽略、0 项失败；格式和差异检查通过。
+- 7 个 GPT 条目与本次同步的官方目录逐字段一致，9 个非 GPT 条目保持原样。
+- OAuth、账号用量、原生 WebSocket 转发及配置更新有本地模拟回归覆盖；真实上游权限和传输能力仍以各渠道实际返回为准。
+
+## 使用提示
+
+- 升级后按需点击「更新 Codex 配置」，并重新打开 Codex 客户端；新增模型需在可见模型列表中勾选，实际调用能力取决于所选上游。
+- ChatGPT 上游渠道的账号凭证与 Codex 客户端本地认证配置相互独立。当前仍保留 `requires_openai_auth=false + Actor Authorization` 和本地 `chatgptAuthTokens` 方案。
+- Chrome 插件的认证兼容尚未解决，本次没有修改官方插件或引入浏览器补丁。
+- 导入的 `auth.json` 副本可能与原客户端共用轮换中的 refresh token；若后续提示凭证失效，建议重新通过官方登录授权。
+
 CodexHub v0.4.28
 
 本次版本新增 Kimi K3 原生 Responses 接入。
