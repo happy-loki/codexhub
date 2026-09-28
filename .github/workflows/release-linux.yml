@@ -80,7 +80,7 @@ jobs:
             cp config.example.toml "$PACKAGE_DIR/"
           fi
 
-          tar -C "$DIST_ROOT" -czf "$DIST_ROOT/CodexHub Linux x86_64.tar.gz" "CodexHub Linux x86_64"
+          tar -C "$DIST_ROOT" -czf "$DIST_ROOT/CodexHub.Linux.x86_64.tar.gz" "CodexHub Linux x86_64"
 
       - name: Build AppImage
         env:
@@ -116,7 +116,7 @@ jobs:
           rm -f linuxdeploy-x86_64.AppImage linuxdeploy-plugin-gtk.sh
           APPIMAGE="$(find . -maxdepth 1 -name '*.AppImage' -print -quit)"
           test -n "$APPIMAGE"
-          mv "$APPIMAGE" "$DIST_ROOT/CodexHub Linux x86_64.AppImage"
+          mv "$APPIMAGE" "$DIST_ROOT/CodexHub.Linux.x86_64.AppImage"
 
       - name: Write Linux Update Metadata
         if: startsWith(github.ref, 'refs/tags/')
@@ -133,8 +133,8 @@ jobs:
           from urllib.parse import quote
 
           dist = Path("target/dist")
-          appimage = dist / "CodexHub Linux x86_64.AppImage"
-          tarball = dist / "CodexHub Linux x86_64.tar.gz"
+          appimage = dist / "CodexHub.Linux.x86_64.AppImage"
+          tarball = dist / "CodexHub.Linux.x86_64.tar.gz"
           release_tag = os.environ["RELEASE_TAG"]
           repository = os.environ["RELEASE_REPOSITORY"]
           release_url = f"https://github.com/{repository}/releases/tag/{release_tag}"
@@ -178,8 +178,8 @@ jobs:
         with:
           name: CodexHub-Linux
           path: |
-            target/dist/CodexHub Linux x86_64.AppImage
-            target/dist/CodexHub Linux x86_64.tar.gz
+            target/dist/CodexHub.Linux.x86_64.AppImage
+            target/dist/CodexHub.Linux.x86_64.tar.gz
             target/dist/latest-linux.json
 
       - name: Publish GitHub Release
@@ -193,6 +193,6 @@ jobs:
           # platform-specific update manifest is available.
           make_latest: false
           files: |
-            target/dist/CodexHub Linux x86_64.AppImage
-            target/dist/CodexHub Linux x86_64.tar.gz
+            target/dist/CodexHub.Linux.x86_64.AppImage
+            target/dist/CodexHub.Linux.x86_64.tar.gz
             target/dist/latest-linux.json

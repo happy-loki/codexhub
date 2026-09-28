@@ -835,6 +835,14 @@ mod update_tests {
         assert!(macos.contains("\"notes\": update_notes"));
         assert!(linux.contains("Path(\"UPDATE_NOTES.md\").read_text"));
         assert!(linux.contains("target/dist/latest-linux.json"));
+        for name in [
+            "CodexHub.Linux.x86_64.AppImage",
+            "CodexHub.Linux.x86_64.tar.gz",
+        ] {
+            assert!(linux.contains(&format!("dist / \"{name}\"")));
+            assert!(linux.contains(&format!("target/dist/{name}")));
+            assert!(!linux.contains(&name.replace("CodexHub.Linux.", "CodexHub Linux ")));
+        }
         assert!(windows.contains("make_latest: false"));
         assert!(linux.contains("make_latest: false"));
         assert!(macos.contains("make_latest: ${{ contains(github.ref_name, '-')"));
