@@ -26,7 +26,7 @@ ChatGPT 订阅登录使用 OAuth access token、refresh token 和 ChatGPT accoun
 `model-provider-info/src/lib.rs`（2026-09-20）。
 
 1. 使用 Codex 公共 OAuth client ID，生成独立随机 state 和 PKCE S256。
-2. 在 loopback 监听登录回调，优先 1455，端口占用时使用随机端口；
+2. 在 loopback 监听登录回调，优先 1455，端口占用时仅使用官方已登记的备用端口 1457；两个端口均不可用时在本地提示，不生成随机端口的授权 URL；
    不结束已有 Codex 登录进程。state 不匹配的回调不能完成登录。
 3. 浏览器访问 `https://auth.openai.com/oauth/authorize`，用户自行完成授权；
    回调 code 通过 `/oauth/token` 换取凭证，不记录 code/token 到日志。
@@ -91,6 +91,29 @@ state、originator 等参数均已具备，但 CodexHub 的 Windows 通用打开
 浏览器启动到官方授权页面的完整链路已经验证，后续需分别检查这两个层次。
 
 ### 自动检查
+
+2026-09-30：修正浏览器登录 `invalid_authorize_request` 的回调端口问题。
+对运行中的 CodexHub 调用登录入口，实际生成的 `redirect_uri` 使用了随机端口
+60301；该诊断会话随即取消，未操作用户已有登录会话。
+本机最新 Codex `login/src/server.rs` 明确规定默认端口 1455、登记的备用端口
+1457。原先的随机端口回退与其不一致，现改为仅尝试这两个端口。
+不取消或关闭其他程序的监听；两个端口均不可用时返回
+`login_callback_port_unavailable`，提示完成或取消其他登录，或导入 auth.json。
+测试覆盖备用 URL、首选监听、占用时回退以及两个端口占用时拒绝随机回退。
+完整账号授权仍需在使用修复版本后通过浏览器验证。
+
+同日使用新生成的 PKCE/state，对官方授权入口做未登录对照请求（不发送账号凭证）：
+
+| 回调端口 | 跟随重定向后的页面 |
+| --- | --- |
+| 1455 | HTTP 200，`auth.openai.com/log-in` |
+| 1457 | HTTP 200，`auth.openai.com/log-in` |
+| 60301 | HTTP 200，`auth.openai.com/error` |
+
+首次未跟随重定向的探测部分返回 HTML 403，不将其作为授权参数有效性的依据。
+后续对照确认了登录页与错误页的分流；尚未提交登录表单或完成账号授权。
+`cargo test --locked --bin codexhub ai_gateway::chatgpt_auth::tests:: --quiet`：
+18 项通过；`cargo check --locked --features gui --bin codexhub` 通过（存在已有警告）。
 
 使用本地模拟 OAuth/Responses 服务器验证 PKCE/state、凭证存储、并发刷新、
 401 重试、账号头覆盖、模型列表、Lite 字段保留及配置序列化；补充官方及旧版

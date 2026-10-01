@@ -71,10 +71,10 @@ fn authorization_uses_pkce_and_independent_state() {
 }
 
 #[test]
-fn authorization_keeps_the_actual_callback_port_when_default_port_is_busy() {
+fn authorization_uses_the_registered_fallback_callback_port() {
+    assert_eq!(LOGIN_CALLBACK_PORTS, [1455, 1457]);
     let mut session = session();
-    Arc::get_mut(&mut session).unwrap().redirect_uri =
-        "http://localhost:49152/auth/callback".into();
+    Arc::get_mut(&mut session).unwrap().redirect_uri = "http://localhost:1457/auth/callback".into();
     let url = url::Url::parse(&authorize_url(ISSUER, &session)).unwrap();
     let query: HashMap<_, _> = url.query_pairs().into_owned().collect();
     assert_eq!(query["redirect_uri"], session.redirect_uri);
@@ -174,6 +174,52 @@ async fn code_exchange_uses_form_and_only_returns_account_metadata() {
     }
     task.abort();
     let _ = task.await;
+}
+
+#[tokio::test]
+async fn login_callback_prefers_the_first_available_registered_port() {
+    // Isolated test ports avoid interfering with real browser login sessions.
+    let preferred = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = preferred.local_addr().unwrap().port();
+    drop(preferred);
+    let listener = bind_login_callback(&[port]).await.unwrap();
+    assert_eq!(listener.local_addr().unwrap().port(), port);
+    assert!(listener.local_addr().unwrap().ip().is_loopback());
+}
+
+#[tokio::test]
+async fn login_callback_uses_fallback_without_stopping_the_existing_listener() {
+    let preferred = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fallback = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ports = [
+        preferred.local_addr().unwrap().port(),
+        fallback.local_addr().unwrap().port(),
+    ];
+    drop(fallback);
+    let listener = bind_login_callback(&ports).await.unwrap();
+    assert_eq!(listener.local_addr().unwrap().port(), ports[1]);
+    let client = tokio::net::TcpStream::connect(preferred.local_addr().unwrap())
+        .await
+        .unwrap();
+    let (_, peer) = tokio::time::timeout(Duration::from_secs(2), preferred.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(peer, client.local_addr().unwrap());
+}
+
+#[tokio::test]
+async fn login_callback_refuses_random_port_when_both_registered_ports_are_busy() {
+    let preferred = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fallback = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let ports = [
+        preferred.local_addr().unwrap().port(),
+        fallback.local_addr().unwrap().port(),
+    ];
+    let error = bind_login_callback(&ports).await.unwrap_err();
+    assert_eq!(error.status, StatusCode::CONFLICT);
+    assert_eq!(error.code, "login_callback_port_unavailable");
+    assert!(error.message.contains("import auth.json"));
 }
 
 #[tokio::test]

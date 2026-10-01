@@ -32,6 +32,8 @@ pub use account::{
 pub const BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
 const ISSUER: &str = "https://auth.openai.com";
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+// Keep aligned with the redirect URI allow-list in Codex login/src/server.rs.
+const LOGIN_CALLBACK_PORTS: [u16; 2] = [1455, 1457];
 const LOGIN_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 static MANAGER: LazyLock<AuthManager> =
     LazyLock::new(|| AuthManager::new(auth_directory(), ISSUER.into()));
@@ -401,13 +403,7 @@ impl AuthManager {
     }
 
     pub async fn start(&'static self) -> Result<LoginStart, GatewayError> {
-        let listener =
-            match tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 1455)).await {
-                Ok(listener) => listener,
-                Err(_) => tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
-                    .await
-                    .map_err(|_| auth_error("Cannot start ChatGPT login callback"))?,
-            };
+        let listener = bind_login_callback(&LOGIN_CALLBACK_PORTS).await?;
         let port = listener
             .local_addr()
             .map_err(|_| auth_error("Cannot read login callback port"))?
@@ -541,6 +537,28 @@ fn write_private_json(path: &Path, credential: &Credential) -> std::io::Result<(
     temp.as_file().sync_all()?;
     temp.persist(path).map_err(|e| e.error)?;
     Ok(())
+}
+
+async fn bind_login_callback(ports: &[u16]) -> Result<tokio::net::TcpListener, GatewayError> {
+    for &port in ports {
+        match tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, port)).await {
+            Ok(listener) => return Ok(listener),
+            Err(error) => {
+                tracing::warn!(port, kind = ?error.kind(), "ChatGPT login callback port unavailable");
+            }
+        }
+    }
+    let mut error = GatewayError::bad_request(format!(
+        "Cannot start ChatGPT sign-in: local callback ports {} are unavailable. Finish or cancel other ChatGPT sign-ins and try again, or import auth.json.",
+        ports
+            .iter()
+            .map(u16::to_string)
+            .collect::<Vec<_>>()
+            .join(" and ")
+    ));
+    error.status = StatusCode::CONFLICT;
+    error.code = "login_callback_port_unavailable".into();
+    Err(error)
 }
 
 fn authorize_url(issuer: &str, session: &LoginSession) -> String {
