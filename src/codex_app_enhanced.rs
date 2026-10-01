@@ -2411,6 +2411,9 @@ async fn launch_codex_app(port: u16) -> Result<()> {
 #[cfg(target_os = "windows")]
 const CODEX_APP_USER_MODEL_ID: &str = "OpenAI.Codex_2p2nqsd0c76g0!App";
 
+#[cfg(any(target_os = "windows", test))]
+const CODEX_APP_PACKAGE_FAMILY_NAME: &str = "OpenAI.Codex_2p2nqsd0c76g0";
+
 #[cfg(target_os = "windows")]
 const IID_IAPPLICATION_ACTIVATION_MANAGER: windows_sys::core::GUID =
     windows_sys::core::GUID::from_u128(0x2e941141_7f97_4756_ba1d_9decde894a3d);
@@ -2578,7 +2581,7 @@ fn launch_codex_app_blocking(_port: u16) -> Result<()> {
 #[cfg(target_os = "windows")]
 fn codex_app_is_running() -> Result<bool> {
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE},
+        Foundation::{CloseHandle, ERROR_NO_MORE_FILES, GetLastError, INVALID_HANDLE_VALUE},
         System::Diagnostics::ToolHelp::{
             CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
             TH32CS_SNAPPROCESS,
@@ -2598,6 +2601,9 @@ fn codex_app_is_running() -> Result<bool> {
         entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
         if unsafe { Process32FirstW(snapshot, &mut entry) } == 0 {
             let error = unsafe { GetLastError() };
+            if error == ERROR_NO_MORE_FILES {
+                return Ok(false);
+            }
             bail!("Process32FirstW failed with Windows error {error}");
         }
         loop {
@@ -2607,10 +2613,16 @@ fn codex_app_is_running() -> Result<bool> {
                 .position(|value| *value == 0)
                 .unwrap_or(entry.szExeFile.len());
             let name = String::from_utf16_lossy(&entry.szExeFile[..end]);
-            if name.eq_ignore_ascii_case("ChatGPT.exe") || name.eq_ignore_ascii_case("Codex.exe") {
+            if is_windows_codex_desktop_executable_name(&name)
+                && windows_process_is_official_codex_desktop(entry.th32ProcessID)?
+            {
                 return Ok(true);
             }
             if unsafe { Process32NextW(snapshot, &mut entry) } == 0 {
+                let error = unsafe { GetLastError() };
+                if error != ERROR_NO_MORE_FILES {
+                    bail!("Process32NextW failed with Windows error {error}");
+                }
                 break;
             }
         }
@@ -2622,6 +2634,121 @@ fn codex_app_is_running() -> Result<bool> {
         Ok(running) => Ok(running),
         Err(err) => tasklist_codex_app_is_running(&err.to_string()),
     }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn is_windows_codex_desktop_executable_name(name: &str) -> bool {
+    name.eq_ignore_ascii_case("ChatGPT.exe") || name.eq_ignore_ascii_case("Codex.exe")
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn is_windows_codex_desktop_image_path(image_path: &str) -> bool {
+    let mut parts = image_path.rsplit(['/', '\\']);
+    parts
+        .next()
+        .is_some_and(is_windows_codex_desktop_executable_name)
+        && parts
+            .next()
+            .is_some_and(|parent| parent.eq_ignore_ascii_case("app"))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn is_official_windows_codex_desktop(image_path: &str, package_family: Option<&str>) -> bool {
+    // The launcher activates this MSIX package. CLI/app-server binaries (including
+    // the one in the package's resources folder) are not the desktop application.
+    is_windows_codex_desktop_image_path(image_path)
+        && package_family
+            .is_some_and(|family| family.eq_ignore_ascii_case(CODEX_APP_PACKAGE_FAMILY_NAME))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_process_is_official_codex_desktop(process_id: u32) -> Result<bool> {
+    use windows_sys::Win32::{
+        Foundation::{
+            APPMODEL_ERROR_NO_PACKAGE, CloseHandle, ERROR_INSUFFICIENT_BUFFER,
+            ERROR_INVALID_PARAMETER, ERROR_SUCCESS, GetLastError,
+        },
+        Storage::Packaging::Appx::GetPackageFamilyName,
+        System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
+        },
+    };
+
+    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, process_id) };
+    if process.is_null() {
+        let error = unsafe { GetLastError() };
+        // A process may exit between the snapshot and opening its handle.
+        if error == ERROR_INVALID_PARAMETER {
+            return Ok(false);
+        }
+        bail!("OpenProcess({process_id}) failed with Windows error {error}");
+    }
+    let result = (|| {
+        let mut image = vec![0_u16; 32_768];
+        let mut image_len = image.len() as u32;
+        if unsafe { QueryFullProcessImageNameW(process, 0, image.as_mut_ptr(), &mut image_len) }
+            == 0
+        {
+            let error = unsafe { GetLastError() };
+            if error == ERROR_INVALID_PARAMETER {
+                return Ok(false);
+            }
+            bail!("QueryFullProcessImageNameW({process_id}) failed with Windows error {error}");
+        }
+        let image_path = String::from_utf16_lossy(&image[..image_len as usize]);
+        if !is_windows_codex_desktop_image_path(&image_path) {
+            return Ok(false);
+        }
+
+        let mut family_len = 0_u32;
+        let error = unsafe { GetPackageFamilyName(process, &mut family_len, std::ptr::null_mut()) };
+        if error == APPMODEL_ERROR_NO_PACKAGE {
+            return Ok(false);
+        }
+        if error != ERROR_INSUFFICIENT_BUFFER {
+            bail!("GetPackageFamilyName({process_id}) failed with Windows error {error}");
+        }
+        let mut family = vec![0_u16; family_len as usize];
+        let error = unsafe { GetPackageFamilyName(process, &mut family_len, family.as_mut_ptr()) };
+        if error != ERROR_SUCCESS {
+            bail!("GetPackageFamilyName({process_id}) failed with Windows error {error}");
+        }
+        let end = family
+            .iter()
+            .position(|value| *value == 0)
+            .unwrap_or(family.len());
+        let family = String::from_utf16_lossy(&family[..end]);
+        Ok(is_official_windows_codex_desktop(
+            &image_path,
+            Some(&family),
+        ))
+    })();
+    unsafe { CloseHandle(process) };
+    result
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn tasklist_codex_candidate_pids(output: &str) -> Result<Vec<u32>> {
+    output
+        .lines()
+        .filter_map(|line| {
+            // Only these exact quoted image names are accepted from tasklist /FO CSV.
+            // Their names cannot contain a comma, so the second field is always PID.
+            let mut fields = line.trim().splitn(3, ',');
+            let name = fields.next()?.strip_prefix('"')?.strip_suffix('"')?;
+            if !is_windows_codex_desktop_executable_name(name) {
+                return None;
+            }
+            Some(
+                fields
+                    .next()
+                    .unwrap_or("")
+                    .trim_matches('"')
+                    .parse::<u32>()
+                    .context("tasklist returned an invalid Codex candidate process ID"),
+            )
+        })
+        .collect()
 }
 
 #[cfg(target_os = "windows")]
@@ -2648,12 +2775,12 @@ fn tasklist_codex_app_is_running(native_error: &str) -> Result<bool> {
             output.status.code().unwrap_or(-1)
         );
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .any(|line| line.to_ascii_lowercase().contains("chatgpt.exe"))
-        || String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .any(|line| line.to_ascii_lowercase().contains("codex.exe")))
+    for process_id in tasklist_codex_candidate_pids(&String::from_utf8_lossy(&output.stdout))? {
+        if windows_process_is_official_codex_desktop(process_id)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(target_os = "macos")]
@@ -2674,6 +2801,100 @@ fn codex_app_is_running() -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_desktop_detection_accepts_official_desktop_names_and_versions() {
+        for image_path in [
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_26.801.1.0_x64__2p2nqsd0c76g0\app\Codex.exe",
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_26.928.2636.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe",
+            "D:/WindowsApps/OpenAI.Codex_26.928.2636.0_arm64__2p2nqsd0c76g0/APP/CHATGPT.EXE",
+        ] {
+            assert!(
+                is_official_windows_codex_desktop(image_path, Some(CODEX_APP_PACKAGE_FAMILY_NAME)),
+                "official desktop was not recognized: {image_path}"
+            );
+        }
+        assert!(is_official_windows_codex_desktop(
+            r"C:\WindowsApps\OpenAI.Codex\app\Codex.exe",
+            Some("openai.codex_2P2NQSD0C76G0")
+        ));
+    }
+
+    #[test]
+    fn windows_desktop_detection_excludes_cli_app_servers_and_third_party_apps() {
+        for image_path in [
+            r"C:\Users\tester\.nvm\versions\node\v22.18.0\bin\node_modules\@openai\codex\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe",
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_26.928.2636.0_x64__2p2nqsd0c76g0\app\resources\codex.exe",
+            r"C:\Program Files\codey\codey.exe",
+            r"C:\Program Files\codey\app\codey.exe",
+        ] {
+            for package_family in [None, Some(CODEX_APP_PACKAGE_FAMILY_NAME)] {
+                assert!(
+                    !is_official_windows_codex_desktop(image_path, package_family),
+                    "non-desktop process was recognized: {image_path}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn windows_desktop_detection_requires_official_package_identity() {
+        for package_family in [
+            None,
+            Some(""),
+            Some("Codey.Desktop_2p2nqsd0c76g0"),
+            Some("OpenAI.Codex_otherpublisher"),
+        ] {
+            for image_path in [
+                r"C:\Program Files\Codey\app\Codex.exe",
+                r"C:\Program Files\WindowsApps\OpenAI.Codex_26.928.2636.0_x64__2p2nqsd0c76g0\app\ChatGPT.exe",
+            ] {
+                assert!(!is_official_windows_codex_desktop(
+                    image_path,
+                    package_family
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn tasklist_candidates_require_exact_executable_names_and_parse_only_pids() {
+        let output = concat!(
+            "\"Image Name\",\"PID\",\"Session Name\",\"Session#\",\"Mem Usage\"\r\n",
+            "\"codey.exe\",\"10\",\"Console\",\"1\",\"20,000 K\"\r\n",
+            "\"my-codex.exe\",\"11\",\"Console\",\"1\",\"20,000 K\"\r\n",
+            "\"ChatGPT.exe.helper\",\"12\",\"Console\",\"1\",\"20,000 K\"\r\n",
+            "\"CODEX.EXE\",\"1234\",\"Console\",\"1\",\"20,000 K\"\r\n",
+            "\"ChatGPT.exe\",\"5678\",\"Console\",\"1\",\"40,000 K\"\r\n",
+        );
+        assert_eq!(
+            tasklist_codex_candidate_pids(output).unwrap(),
+            vec![1234, 5678]
+        );
+        assert!(tasklist_codex_candidate_pids("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn tasklist_candidates_reject_invalid_or_missing_pids() {
+        for output in [
+            "\"Codex.exe\",\"invalid\"",
+            "\"ChatGPT.exe\"",
+            "\"Codex.exe\",\"\"",
+        ] {
+            assert!(tasklist_codex_candidate_pids(output).is_err());
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    #[ignore = "read-only check of the current desktop process state"]
+    fn live_windows_desktop_detection_agrees_with_tasklist() {
+        let native = codex_app_is_running().expect("native process detection");
+        let fallback = tasklist_codex_app_is_running("read-only diagnostic")
+            .expect("tasklist process detection");
+        eprintln!("official Codex desktop running: native={native}, tasklist={fallback}");
+        assert_eq!(native, fallback);
+    }
 
     #[test]
     fn enhanced_script_embeds_models_and_only_patches_selected_statsig_sections() {

@@ -870,3 +870,49 @@ window message:
 4. 仍只修改 renderer 内存中的市场展示名，不修改插件 ID、安装身份、磁盘路径或远端 `openai-curated-remote`。
 
 启动日志新增 `plugin_catalog_dispatch_patched`、`plugin_catalog_cache_refresh_attempted`、`plugin_catalog_cache_refreshed` 和 `plugin_catalog_cache_refresh_error`，用于区分“响应没有被适配”和“旧查询缓存没有刷新”。
+
+## 2026-10-01 ChatGPT 改版后的插件页核查
+
+### What：当前确认的范围
+
+核查的 Windows 安装包版本为 `OpenAI.Codex_26.928.2636.0`，其 `app.asar/package.json` 版本为 `26.928.21956`，桌面主进程名为 `ChatGPT.exe`。本次只读检查安装包、配置和现有进程，没有关闭或重启桌面应用，没有改写 `app.asar`、登录状态或用户配置。
+
+“公开”插件页只显示 LaTeX，不能直接证明插件被卸载或某个 Statsig gate 失效：
+
+- 本机注册的 `openai-curated` manifest 仍有 27 个插件，`openai-primary-runtime` 有 5 个，`openai-bundled` 有 8 个，三个来源路径及 manifest 均存在。
+- 当前桌面进程没有 `--remote-debugging-port` 参数，也没有监听 CDP 端口，因此不能假定 CodexHub 的增强脚本已经注入。本次无法直接读取活跃 renderer 的查询缓存。
+- 新版前端仍认可 `codex-official` 为内置市场；现有展示别名并没有因本次改版被取消。
+
+### Why：新版目录的筛选条件
+
+新版 `app-initial` 中的本地插件查询使用：
+
+```text
+plugin/list { marketplaceKinds: ["local"], cwds: ... }
+queryKey: ["plugins", "local", hostId, roots]
+```
+
+当 `isOpenAICuratedRemoteMarketplaceEnabled` 为真时，该查询的 `select` 会移除 `marketplaceName === "openai-curated"` 的本地条目。远端开关由 `experimentalFeature/list` 中的 `remote_plugin` 决定；缺少该条目时才退回 Statsig gate `4218407052`。这一层不再是早期文档描述的单纯 `authMethod` 白名单。
+
+与此同时，新版远端目录查询仍检查认证方式，非 `chatgpt` 时可直接返回空列表。CodexHub 的 `/backend-api/ps/plugins/list` 也刻意返回空远端目录，避免生成不能安装的重复远端插件。因此可能出现“本地 curated 被隐藏，远端又没有替代条目”的组合。
+
+新版公开目录仍接受 `codex-official`，并按内置插件的 `hidden`、`installWhenMissing` 及具体工具可用性进一步筛选。某个内置工具能被会话调用，不代表它必须作为可安装条目出现在公开市场。不能为了恢复图标而强行打开全部门控或伪造登录状态。
+
+### How：验证结果与后续处理
+
+已从上述已安装 `app.asar` 提取实际的本地查询 `select`、内置市场分类函数及公开目录筛选函数，在隔离的 JavaScript 环境中执行，并使用当前仓库的 `adaptLocalCuratedPluginCatalog` 及本机 curated manifest 回放：
+
+| 条件 | 通过本地查询与公开市场分类的 curated 条目 |
+| --- | --- |
+| 远端市场启用，未做展示适配 | 0 / 27 |
+| 应用现有 `openai-curated` → `codex-official` 展示适配 | 27 / 27 |
+
+同时验证路径、插件 ID、安装/启用状态原样保留，`openai-curated-remote` 和 `openai-bundled` 均未修改。新版查询键仍以 `plugins` 开头，现有缓存失效前缀仍能覆盖它，暂不需要添加猜测性的查询键适配。
+
+这是源码函数的隔离回放，**不是当前活跃窗口已恢复的实机验收**。下一次由用户正常退出后，通过 CodexHub 的增强模式启动，首先核验 CDP 端口、`pluginCatalogResponsesAdapted` 和查询缓存刷新状态，再查看公开插件页。若确认脚本已安装、条目已适配而页面仍缺失，再针对新页面的运行时筛选继续定位。
+
+本轮不修改功能 gate，不新增远端插件商店 mock，不把 `features.remote_plugin=false` 作为未经实机验证的默认修复。也不把旧进程退出前的日志错误当作当前进程的失败原因；当前进程日志尚为空，不能据此推断新窗口的握手结果。
+
+### 后续实机确认
+
+同日修复 Windows 增强启动预检把 npm Codex CLI 误认作官方桌面进程的问题后，用户通过增强模式重新启动，并明确确认插件列表已恢复。该确认仅覆盖增强启动和插件可见性；Chrome 授权仍是独立的未解决事项，见 `auth-notes.zh-CN.md`。
