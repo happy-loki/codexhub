@@ -2,6 +2,11 @@
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Existing release tag to rebuild and publish (leave empty for a build only)"
+        required: false
+        type: string
   push:
     tags:
       - "v*"
@@ -23,6 +28,7 @@ jobs:
             manifest_name: latest-macos.json
             intel_manifest_name: latest-macos-intel.json
     env:
+      RELEASE_TAG: ${{ inputs.release_tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name) || '' }}
       MACOS_FILE_SLUG: ${{ matrix.file_slug }}
       MACOS_ASSET_KEY: ${{ matrix.asset_key }}
       MACOS_SPARKLE_KEY: ${{ matrix.sparkle_key }}
@@ -31,6 +37,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -95,8 +103,12 @@ jobs:
             echo "Could not read package version from Cargo.toml" >&2
             exit 1
           fi
-          if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
-            APP_VERSION="$GITHUB_REF_NAME"
+          if [ -n "$RELEASE_TAG" ]; then
+            if [ "$RELEASE_TAG" != "v$CARGO_VERSION" ]; then
+              echo "Release tag does not match Cargo.toml: $RELEASE_TAG != v$CARGO_VERSION" >&2
+              exit 1
+            fi
+            APP_VERSION="$RELEASE_TAG"
           else
             APP_VERSION="v$CARGO_VERSION"
           fi
@@ -241,7 +253,25 @@ jobs:
           ditto "$APP" "$DMG_STAGING/CodexHub.app"
           ln -s /Applications "$DMG_STAGING/Applications"
 
-          hdiutil create -volname "CodexHub" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG"
+          # hdiutil can underestimate the destination filesystem size even
+          # when the runner has plenty of free space. Count logical file sizes
+          # and reserve room for metadata and filesystem allocation rounding.
+          DMG_SIZE_MB="$(python3 - "$DMG_STAGING" <<'PY'
+          import os
+          import sys
+
+          payload_bytes = sum(
+              os.lstat(os.path.join(root, name)).st_size
+              for root, directories, files in os.walk(sys.argv[1], followlinks=False)
+              for name in directories + files
+          )
+          mib = 1024 * 1024
+          print(max(128, (payload_bytes * 2 + 64 * mib + mib - 1) // mib))
+          PY
+          )"
+          echo "Creating HFS+ DMG with ${DMG_SIZE_MB} MiB capacity."
+          hdiutil create -volname "CodexHub" -fs HFS+ -size "${DMG_SIZE_MB}m" \
+            -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG"
           codesign --force --timestamp --sign "$APPLE_CODESIGN_IDENTITY" "$DMG"
           notary_submit "$DMG"
           xcrun stapler staple "$DMG"
@@ -254,9 +284,8 @@ jobs:
           spctl --assess --type open --context context:primary-signature --verbose=4 "$DMG"
 
       - name: Write macOS Update Metadata
-        if: startsWith(github.ref, 'refs/tags/')
+        if: env.RELEASE_TAG != ''
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
@@ -341,10 +370,9 @@ jobs:
             target/dist/${{ matrix.intel_manifest_name }}
 
       - name: Verify Companion Update Manifests
-        if: startsWith(github.ref, 'refs/tags/')
+        if: env.RELEASE_TAG != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           required=(latest-windows.json latest-linux.json)
@@ -367,13 +395,14 @@ jobs:
           exit 1
 
       - name: Publish GitHub Release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: env.RELEASE_TAG != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.RELEASE_TAG }}
           overwrite_files: true
           body_path: RELEASE_NOTES.md
-          prerelease: ${{ contains(github.ref_name, '-') }}
-          make_latest: ${{ contains(github.ref_name, '-') && 'false' || 'true' }}
+          prerelease: ${{ contains(env.RELEASE_TAG, '-') }}
+          make_latest: ${{ contains(env.RELEASE_TAG, '-') && 'false' || 'true' }}
           files: |
             target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.dmg
             target/dist/CodexHub-*-macos-${{ matrix.file_slug }}.app.zip
