@@ -1,6 +1,7 @@
 use std::{
     cell::RefCell,
     collections::BTreeMap,
+    error::Error,
     fs,
     io::{Read, Write},
     path::PathBuf,
@@ -11,6 +12,7 @@ use std::{
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     thread,
+    time::Instant,
 };
 
 use reqwest::blocking::Client;
@@ -159,7 +161,11 @@ fn check_for_updates_async_impl(
     {
         let result = result.clone();
         thread::spawn(move || {
+            let started = Instant::now();
             let update = check_for_updates(text);
+            if let Err(error) = &update {
+                write_update_check_diagnostics(started.elapsed(), error);
+            }
             if let Ok(mut slot) = result.lock() {
                 slot.replace(update);
             }
@@ -206,7 +212,7 @@ fn check_for_updates(text: GuiText) -> Result<UpdateCheckOutcome, String> {
             .timeout(UPDATE_CHECK_TIMEOUT),
     )?
     .build()
-    .map_err(|err| text.update_client_failed(&err.to_string()))?;
+    .map_err(|err| text.update_client_failed(&update_error_details(&err)))?;
 
     let release = fetch_update_manifest(text, &client, UPDATE_MANIFEST_URL).or_else(
         |platform_manifest_err| {
@@ -218,6 +224,57 @@ fn check_for_updates(text: GuiText) -> Result<UpdateCheckOutcome, String> {
         },
     )?;
     build_update_check_outcome(text, release)
+}
+
+fn write_update_check_diagnostics(elapsed: std::time::Duration, error: &str) {
+    let config_path = super::daemon_config_path().unwrap_or_else(super::app_support_config_path);
+    let Ok(mut config) = crate::config::AppConfig::load_or_default(&config_path) else {
+        return;
+    };
+    super::normalize_gui_config_paths(&mut config, &config_path);
+    let Some(state_dir) = config.state_path.parent() else {
+        return;
+    };
+    let log_dir = state_dir.join("logs");
+    if fs::create_dir_all(&log_dir).is_err() {
+        return;
+    }
+    // Keep only the latest failure; the existing diagnostic export includes this log.
+    let _ = fs::write(
+        log_dir.join("codexhub-update.log"),
+        format!(
+            "[ts_ms={}] [update] event=check_failed version={} elapsed_ms={} proxy_mode={:?} proxy={}\n{}\n",
+            crate::types::now_ms(),
+            env!("CARGO_PKG_VERSION"),
+            elapsed.as_millis(),
+            config.outbound_proxy.mode,
+            crate::outbound_http::masked_proxy_url(&config.outbound_proxy),
+            error,
+        ),
+    );
+}
+
+fn update_error_details(error: &(dyn Error + 'static)) -> String {
+    let mut parts = Vec::new();
+    let mut source = Some(error);
+    while let Some(error) = source {
+        let mut message = error.to_string();
+        if let Some(request_error) = error.downcast_ref::<reqwest::Error>()
+            && let Some(url) = request_error.url()
+        {
+            let mut safe_url = url.clone();
+            let _ = safe_url.set_username("");
+            let _ = safe_url.set_password(None);
+            safe_url.set_query(None);
+            safe_url.set_fragment(None);
+            message = message.replace(url.as_str(), safe_url.as_str());
+        }
+        if parts.last() != Some(&message) {
+            parts.push(message);
+        }
+        source = error.source();
+    }
+    parts.join("; caused by: ")
 }
 
 fn fetch_update_manifest(
@@ -251,7 +308,7 @@ fn fetch_update_text(text: GuiText, client: &Client, url: &str) -> Result<String
         .send()
         .map_err(|err| {
             let is_timeout = err.is_timeout();
-            let err = err.to_string();
+            let err = update_error_details(&err);
             if is_timeout {
                 text.url_request_timeout(url, &err)
             } else {
@@ -259,9 +316,14 @@ fn fetch_update_text(text: GuiText, client: &Client, url: &str) -> Result<String
             }
         })?;
     let status = response.status();
-    let body = response
-        .text()
-        .map_err(|err| text.url_request_failed(url, &err.to_string()))?;
+    let body = response.text().map_err(|err| {
+        let details = update_error_details(&err);
+        if err.is_timeout() {
+            text.url_request_timeout(url, &details)
+        } else {
+            text.url_request_failed(url, &details)
+        }
+    })?;
     if status.is_success() {
         Ok(body)
     } else {
@@ -549,12 +611,12 @@ fn download_update(
             .timeout(None),
     )?
     .build()
-    .map_err(|err| text.update_client_failed(&err.to_string()))?;
+    .map_err(|err| text.update_client_failed(&update_error_details(&err)))?;
     let mut response = client
         .get(url)
         .header("User-Agent", "codexhub")
         .send()
-        .map_err(|err| text.update_download_failed(url, &err.to_string()))?;
+        .map_err(|err| text.update_download_failed(url, &update_error_details(&err)))?;
     let status = response.status();
     if !status.is_success() {
         return Err(text.update_download_http_failed(url, &status.to_string()));
@@ -585,7 +647,7 @@ fn download_update(
         }
         let read = response
             .read(&mut buffer)
-            .map_err(|err| text.update_download_failed(url, &err.to_string()))?;
+            .map_err(|err| text.update_download_failed(url, &update_error_details(&err)))?;
         if read == 0 {
             break;
         }
@@ -800,6 +862,122 @@ fn parse_version_segments(text: GuiText, version: &str) -> Result<Vec<u64>, Stri
 mod update_tests {
     use super::super::text::{GuiLocale, GuiText};
     use super::*;
+
+    #[test]
+    fn update_transport_errors_preserve_direct_and_proxy_causes() {
+        for use_proxy in [false, true] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}/latest.json", listener.local_addr().unwrap());
+            let server = thread::spawn(move || {
+                let (mut socket, _) = listener.accept().unwrap();
+                socket
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = [0u8; 4096];
+                socket.read(&mut request).unwrap();
+                // Fail during the HTTP/proxy handshake, before any usable response.
+                socket.write_all(b"not-http\r\n\r\n").unwrap();
+            });
+            let builder = Client::builder()
+                .no_proxy()
+                .timeout(std::time::Duration::from_secs(2));
+            let (client, target) = if use_proxy {
+                (
+                    builder
+                        .proxy(reqwest::Proxy::all(&url).unwrap())
+                        .build()
+                        .unwrap(),
+                    "https://example.invalid/latest-windows.json",
+                )
+            } else {
+                (builder.build().unwrap(), url.as_str())
+            };
+            let result = fetch_update_text(GuiText::new(GuiLocale::EnUs), &client, target);
+            server.join().unwrap();
+            let error = result.unwrap_err();
+
+            assert!(error.contains(target), "{error}");
+            assert!(error.contains("caused by:"), "{error}");
+            assert!(!error.contains("timed out"), "{error}");
+        }
+    }
+
+    #[test]
+    fn update_error_details_remove_url_credentials_and_signed_query() {
+        let client = Client::builder().no_proxy().build().unwrap();
+        let error = client
+            .get("https://test-user:test-password@example.invalid/update?token=test-secret#private")
+            .timeout(std::time::Duration::ZERO)
+            .send()
+            .unwrap_err();
+
+        let details = update_error_details(&error);
+        assert!(
+            details.contains("https://example.invalid/update"),
+            "{details}"
+        );
+        for secret in ["test-user", "test-password", "test-secret", "private"] {
+            assert!(!details.contains(secret), "{details}");
+        }
+    }
+
+    #[test]
+    fn update_body_timeouts_keep_timeout_classification_and_cause() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/latest.json", listener.local_addr().unwrap());
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0u8; 4096];
+            socket.read(&mut request).unwrap();
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
+                .unwrap();
+            let _ = wait.recv_timeout(std::time::Duration::from_secs(2));
+        });
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_millis(500))
+            .build()
+            .unwrap();
+        let result = fetch_update_text(GuiText::new(GuiLocale::EnUs), &client, &url);
+        let _ = release.send(());
+        server.join().unwrap();
+
+        let error = result.unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        assert!(error.contains("caused by:"), "{error}");
+    }
+
+    #[test]
+    fn update_http_errors_remain_distinct_from_transport_errors() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/latest.json", listener.local_addr().unwrap());
+        let server = thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .unwrap();
+            let mut request = [0u8; 4096];
+            socket.read(&mut request).unwrap();
+            socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 7\r\nConnection: close\r\n\r\nmissing").unwrap();
+        });
+        let client = Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let result = fetch_update_text(GuiText::new(GuiLocale::EnUs), &client, &url);
+        server.join().unwrap();
+
+        let error = result.unwrap_err();
+        assert!(error.contains("HTTP 404 Not Found"), "{error}");
+        assert!(error.contains("missing"), "{error}");
+        assert!(!error.contains("request failed"), "{error}");
+    }
 
     #[test]
     fn compares_release_versions() {

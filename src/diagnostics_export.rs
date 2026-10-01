@@ -634,6 +634,11 @@ mod tests {
             "daemon failed before chain log\napi_key=sk-secret\n",
         )
         .expect("write daemon startup log");
+        std::fs::write(
+            logs.join("codexhub-update.log"),
+            "[update] event=check_failed proxy_mode=System; caused by: connection refused\n",
+        )
+        .expect("write update log");
         std::fs::write(logs.join("ai-gateway-request-log.sqlite"), "do not include")
             .expect("write request log db");
         std::fs::write(logs.join("codexhub-ai-gateway.log"), "do not include")
@@ -673,6 +678,7 @@ mod tests {
         assert!(names.contains(&"codex-app-status.json".to_string()));
         assert!(names.contains(&"logs/codexhub-chain.log".to_string()));
         assert!(names.contains(&"logs/codexhub-daemon-startup.log".to_string()));
+        assert!(names.contains(&"logs/codexhub-update.log".to_string()));
         assert!(!names.iter().any(|name| name.contains("ai-gateway")));
 
         let mut remote = String::new();

@@ -1995,10 +1995,10 @@ impl GuiText {
     ) -> String {
         match self.locale {
             GuiLocale::ZhCn => format!(
-                "暂时无法检查更新，请稍后重试或打开发布页面。\n\n详细信息：{platform_manifest_err}; {legacy_manifest_err}"
+                "暂时无法获取更新信息。请检查网络和 CodexHub 的代理设置，稍后重试或打开发布页面。\n\n详细信息：\n{platform_manifest_err}\n{legacy_manifest_err}"
             ),
             GuiLocale::EnUs => format!(
-                "Unable to check for updates right now. Try again later or open the Releases page.\n\nDetails: {platform_manifest_err}; {legacy_manifest_err}"
+                "Unable to retrieve update information. Check your network and CodexHub proxy settings, then try again or open the Releases page.\n\nDetails:\n{platform_manifest_err}\n{legacy_manifest_err}"
             ),
         }
     }
