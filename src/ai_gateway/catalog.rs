@@ -199,6 +199,7 @@ mod tests {
             "GLM-5.3-Flash",
             "gpt-6-sol",
             "gpt-6-luna",
+            "gpt-6.1-sol",
             "custom-model",
             "codex-auto-review",
         ]);
@@ -224,7 +225,8 @@ mod tests {
                 "GLM-5.3",
                 "GLM-5.3-Flash",
                 "gpt-6-sol",
-                "gpt-6-luna"
+                "gpt-6-luna",
+                "gpt-6.1-sol"
             ]
         );
         assert_eq!(response["models"][3]["display_name"], "Grok-4.6");
@@ -535,12 +537,13 @@ mod tests {
     #[test]
     fn gpt_lite_models_use_current_official_capabilities() {
         for (slug, priority) in [
-            ("gpt-6-astra", 1),
-            ("gpt-6-sol", 2),
-            ("gpt-6-luna", 3),
-            ("gpt-5.6-sol", 4),
-            ("gpt-5.6-terra", 7),
-            ("gpt-5.6-luna", 8),
+            ("gpt-6.1-sol", 1),
+            ("gpt-6-astra", 2),
+            ("gpt-6-sol", 3),
+            ("gpt-6-luna", 4),
+            ("gpt-5.6-sol", 5),
+            ("gpt-5.6-terra", 8),
+            ("gpt-5.6-luna", 9),
         ] {
             let model = catalog_models()
                 .iter()
@@ -558,6 +561,44 @@ mod tests {
             assert_eq!(model["visibility"], "list", "model {slug}");
             assert_eq!(model["priority"], priority, "model {slug}");
         }
+    }
+
+    #[test]
+    fn gpt_6_1_sol_preserves_official_capabilities_in_configured_response() {
+        let catalog_model = catalog_models()
+            .iter()
+            .find(|model| model_slug(model) == Some("gpt-6.1-sol"))
+            .expect("gpt-6.1-sol should exist");
+        let response = configured_models_response(&config(&["gpt-6.1-sol"]));
+        assert_eq!(response["models"].as_array().unwrap().len(), 1);
+        let model = &response["models"][0];
+
+        // User selection determines output priority; all official fields stay intact.
+        let mut expected = catalog_model.clone();
+        expected["priority"] = json!(0);
+        assert_eq!(model, &expected);
+
+        assert_eq!(model["display_name"], "GPT-6.1-Sol");
+        assert_eq!(model["default_reasoning_level"], "low");
+        let efforts = model["supported_reasoning_levels"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|level| level["effort"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(efforts, ["low", "medium", "high", "xhigh", "max", "ultra"]);
+        assert_eq!(model["minimal_client_version"], "0.153.0");
+        assert_eq!(model["comp_hash"], "3000");
+        assert_eq!(model["prefer_websockets"], true);
+        assert_eq!(model["tool_mode"], "code_mode_only");
+        assert_eq!(model["apply_patch_tool_type"], "freeform");
+        assert_eq!(model["supports_search_tool"], true);
+        assert_eq!(model["web_search_tool_type"], "text_and_image");
+        assert_eq!(model["input_modalities"], json!(["text", "image"]));
+        assert_eq!(model["supports_image_detail_original"], true);
+        assert_eq!(model["multi_agent_version"], "v2");
+        assert_eq!(model["multi_agent_reasoning_effort"], "xhigh");
+        assert!(model["model_messages"].is_object());
     }
 
     #[test]
@@ -594,6 +635,7 @@ mod tests {
             "grok-4.6",
             "gpt-5.5",
             "gpt-6-astra",
+            "gpt-6.1-sol",
             "gpt-6-sol",
             "gpt-6-luna",
             "GLM-5.3",
