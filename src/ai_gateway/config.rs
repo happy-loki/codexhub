@@ -159,14 +159,37 @@ pub fn provider_api_root(base_url: &str) -> String {
 
 /// 将 provider Base URL 规范成 UI/配置展示用地址。
 ///
-/// 目前支持的上游协议都使用 `/v1`，所以保存时统一展示为带 `/v1`。
+/// 保留显式 API 版本路径；没有版本后缀时使用默认的 `/v1`。
 pub fn provider_display_base_url(base_url: &str) -> String {
-    let root = provider_api_root(base_url);
-    if root.is_empty() {
-        String::new()
+    let base = base_url.trim().trim_end_matches('/');
+    if base.is_empty() || has_api_version_suffix(base) {
+        base.to_string()
     } else {
-        format!("{root}/v1")
+        format!("{}/v1", provider_api_root(base))
     }
+}
+
+pub(crate) fn has_api_version_suffix(value: &str) -> bool {
+    let Ok(url) = url::Url::parse(value) else {
+        return false;
+    };
+    url.path()
+        .trim_end_matches('/')
+        .rsplit('/')
+        .next()
+        .is_some_and(|segment| {
+            segment.len() > 1
+                && segment.starts_with('v')
+                && segment[1..].chars().all(|ch| ch.is_ascii_digit())
+        })
+}
+
+pub(crate) fn provider_endpoint_url(base_url: &str, endpoint: &str) -> String {
+    format!(
+        "{}/{}",
+        provider_display_base_url(base_url),
+        endpoint.trim_start_matches('/')
+    )
 }
 
 /// 智谱 Anthropic 渠道使用的服务类型。
@@ -273,6 +296,16 @@ impl ProviderConfig {
             .find(|(codex_model, _)| codex_model.eq_ignore_ascii_case(model))
         {
             return Some(mapped.as_str());
+        }
+        // Codex still requests this legacy image name; API channels use Sunburst by default.
+        if self.provider_type == ProviderType::OpenAiResponses
+            && model.eq_ignore_ascii_case("gpt-image-2")
+            && self.models.iter().any(|configured| {
+                configured.eq_ignore_ascii_case("gpt-image-2")
+                    || configured.eq_ignore_ascii_case("gpt-image-2.6-sunburst")
+            })
+        {
+            return Some("gpt-image-2.6-sunburst");
         }
         if let Some(configured) = self
             .models
@@ -473,6 +506,68 @@ mod tests {
             provider.resolve_upstream_model("glm-5.3"),
             Some("xx-GLM-5-3")
         );
+    }
+
+    #[test]
+    fn image_api_routes_codex_model_to_sunburst() {
+        for configured_model in ["gpt-image-2", "gpt-image-2.6-sunburst"] {
+            let config = make_config(vec![make_provider(
+                "images",
+                ProviderType::OpenAiResponses,
+                vec![configured_model],
+            )]);
+
+            for request_model in ["gpt-image-2", "GPT-IMAGE-2"] {
+                let provider = config.select_provider(request_model).unwrap();
+                assert_eq!(
+                    provider.resolve_upstream_model(request_model),
+                    Some("gpt-image-2.6-sunburst")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn image_api_explicit_alias_overrides_sunburst_default() {
+        for upstream_model in ["gpt-image-2.6-flare", "gpt-image-2", "custom-image-model"] {
+            let mut provider = make_provider(
+                "images",
+                ProviderType::OpenAiResponses,
+                vec!["gpt-image-2.6-sunburst"],
+            );
+            provider
+                .model_aliases
+                .insert("gpt-image-2".to_string(), upstream_model.to_string());
+
+            for request_model in ["gpt-image-2", "GPT-IMAGE-2"] {
+                assert_eq!(
+                    provider.resolve_upstream_model(request_model),
+                    Some(upstream_model)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn image_default_preserves_other_providers_and_models() {
+        for provider_type in [ProviderType::ChatGptResponses, ProviderType::GrokResponses] {
+            let provider = make_provider("images", provider_type, vec!["gpt-image-2"]);
+            assert_eq!(
+                provider.resolve_upstream_model("gpt-image-2"),
+                Some("gpt-image-2")
+            );
+        }
+
+        let config = make_config(vec![make_provider(
+            "api",
+            ProviderType::OpenAiResponses,
+            vec!["gpt-6.2-sol", "gpt-image-2.6-flare"],
+        )]);
+        assert!(config.select_provider("gpt-image-2").is_none());
+        for model in ["gpt-6.2-sol", "gpt-image-2.6-flare"] {
+            let provider = config.select_provider(model).unwrap();
+            assert_eq!(provider.resolve_upstream_model(model), Some(model));
+        }
     }
 
     #[test]
@@ -848,5 +943,36 @@ mod tests {
             "https://api.deepseek.com/v1"
         );
         assert_eq!(provider_display_base_url(""), "");
+    }
+
+    #[test]
+    fn explicit_api_versions_survive_save_and_endpoint_construction() {
+        for base in [
+            "https://ark.cn-beijing.volces.com/api/v3",
+            "https://open.bigmodel.cn/api/paas/v4",
+            "https://proxy.example.com/custom/v2",
+        ] {
+            let normalized = provider_display_base_url(&format!(" {base}/ "));
+            assert_eq!(normalized, base);
+            assert_eq!(provider_display_base_url(&normalized), base);
+            for endpoint in [
+                "models",
+                "responses",
+                "responses/compact",
+                "images/generations",
+                "images/edits",
+                "messages",
+                "chat/completions",
+            ] {
+                assert_eq!(
+                    provider_endpoint_url(base, endpoint),
+                    format!("{base}/{endpoint}")
+                );
+            }
+        }
+        assert_eq!(
+            provider_endpoint_url("https://proxy.example.com/openai", "responses"),
+            "https://proxy.example.com/openai/v1/responses"
+        );
     }
 }

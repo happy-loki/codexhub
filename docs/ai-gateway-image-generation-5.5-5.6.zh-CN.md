@@ -219,8 +219,8 @@ AI Gateway 需要提供：
 
 CodexHub 使用现有模型路由规则：
 
-1. 查找已启用且声明支持 `gpt-image-2` 的 Provider。
-2. 支持通过 `modelAliases` 把 `gpt-image-2` 映射成上游实际图片模型。
+1. 查找已启用且声明支持 `gpt-image-2` 的 Provider；OpenAI API 渠道只声明 `gpt-image-2.6-sunburst` 也可接收 Codex 的 `gpt-image-2` 请求。
+2. 自 2026-11-20 起，OpenAI API 渠道（`open_ai_responses`）默认将 `gpt-image-2` 映射成 `gpt-image-2.6-sunburst`。显式 `modelAliases` 优先于默认映射；ChatGPT 登录渠道不应用此默认映射，继续使用请求中的模型名。
 3. 多个 Provider 同时支持时，继续使用现有权重和稳定路由规则。
 4. 没有 Provider 声明该模型时，返回明确的 `invalid_model`，不静默选择任意对话渠道。
 
@@ -243,6 +243,10 @@ models = ["gpt-image-2"]
 "gpt-image-2" = "upstream-image-model"
 ```
 
+默认映射同时适用于生图和编辑图片，只修改请求体中的 `model`。上游需要支持 `gpt-image-2.6-sunburst`；不支持时会返回上游错误，不自动换回旧模型。如需保留旧模型，可显式设置 `"gpt-image-2" = "gpt-image-2"`。
+
+请求日志列表仍显示 Codex 传入的 `gpt-image-2`，日志详情中的上游请求体显示实际发送的 `gpt-image-2.6-sunburst`。
+
 `gpt-image-2` 只用于 AI Gateway 路由，不需要加入 `codexVisibleModels`，否则会错误地出现在 Codex App 的对话模型选择器里。
 
 ### 7.3 透明转发
@@ -250,7 +254,7 @@ models = ["gpt-image-2"]
 网关应当：
 
 - 保留 Codex 请求的 JSON 结构。
-- 只按照 `modelAliases` 替换上游模型名。
+- 按照显式 `modelAliases` 或上述 API 渠道默认映射替换上游模型名。
 - 使用 Provider 的 API Key 和 base URL。
 - 复用 Provider 超时、传输重试和错误映射逻辑。
 - 原样返回成功响应中的 `data[].b64_json`。

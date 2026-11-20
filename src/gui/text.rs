@@ -3049,12 +3049,12 @@ impl GuiText {
         match self.locale {
             GuiLocale::ZhCn => {
                 format!(
-                    "获取模型列表失败：{err}\n如果自动查找失败，请手动填写完整的模型列表接口，例如 https://api.example.com/v1/models。"
+                    "获取模型列表失败：{err}\n请检查网络、代理和 API Key。若服务商提供了单独的模型列表地址，请在渠道中填写。"
                 )
             }
             GuiLocale::EnUs => {
                 format!(
-                    "Failed to fetch model list: {err}\nIf automatic discovery fails, enter the full models URL, for example https://api.example.com/v1/models."
+                    "Failed to fetch model list: {err}\nCheck your network, proxy, and API key. If your provider has a separate models URL, enter it in the channel settings."
                 )
             }
         }

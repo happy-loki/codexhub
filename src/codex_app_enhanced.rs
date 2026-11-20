@@ -3365,8 +3365,8 @@ mod tests {
             "deepseek-v4-flash",
             "GLM-5.3",
             "GLM-5.3-Flash",
-            "Opus-4.8",
-            "Sonnet-4.6",
+            "Opus-5.5",
+            "Sonnet-5",
         ]
         .into_iter()
         .map(str::to_string)

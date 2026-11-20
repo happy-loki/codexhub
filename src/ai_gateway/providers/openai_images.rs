@@ -575,6 +575,9 @@ mod tests {
         let provider = provider(base_url);
         let client = reqwest::Client::new();
         let context = GatewayContext::extract(&HeaderMap::new(), None);
+        let upstream_model = provider
+            .resolve_upstream_model("gpt-image-2")
+            .expect("resolve Codex image model");
 
         for (endpoint, expected_path, body) in [
             (
@@ -597,7 +600,7 @@ mod tests {
                 &context,
                 Bytes::from(serde_json::to_vec(&body).expect("encode image request")),
                 "gpt-image-2",
-                "upstream-image-model",
+                upstream_model,
                 &provider,
                 endpoint,
                 None,
@@ -609,7 +612,9 @@ mod tests {
 
             let captured = requests.recv().await.expect("captured image request");
             assert_eq!(captured.path, expected_path);
-            assert_eq!(captured.body["model"], "upstream-image-model");
+            let mut expected_body = body;
+            expected_body["model"] = json!("gpt-image-2.6-sunburst");
+            assert_eq!(captured.body, expected_body);
             assert_eq!(
                 captured.headers.get("authorization").unwrap(),
                 "Bearer image-secret"

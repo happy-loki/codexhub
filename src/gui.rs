@@ -26,8 +26,8 @@ use windows_sys::Win32::{
 };
 
 use crate::ai_gateway::config::{
-    DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderConfig, ProviderType, ZaiAccessMode, provider_api_root,
-    provider_display_base_url,
+    DEFAULT_PROVIDER_TIMEOUT_SECS, ProviderConfig, ProviderType, ZaiAccessMode,
+    has_api_version_suffix, provider_display_base_url,
 };
 use crate::config::{AppConfig, LocalConnectionMode, OutboundProxyConfig, OutboundProxyMode};
 use crate::diagnostics_export::{
@@ -3818,8 +3818,8 @@ fn normalize_provider_models_url(mut provider: ProviderConfig) -> ProviderConfig
 fn is_default_models_url_for_base(base_url: &str, models_url: &str) -> bool {
     let normalized = models_url.trim().trim_end_matches('/');
     let raw = base_url.trim().trim_end_matches('/');
-    let root = provider_api_root(raw);
-    normalized == format!("{raw}/models") || normalized == format!("{root}/v1/models")
+    normalized == format!("{raw}/models")
+        || normalized == format!("{}/models", provider_display_base_url(raw))
 }
 
 fn known_models_urls_for_provider(provider: &ProviderConfig) -> Vec<String> {
@@ -3879,21 +3879,6 @@ fn normalize_optional_url(value: Option<&str>) -> Option<String> {
 fn is_http_url(value: &str) -> bool {
     Url::parse(value)
         .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
-}
-
-fn has_api_version_suffix(value: &str) -> bool {
-    let Ok(url) = Url::parse(value) else {
-        return false;
-    };
-    url.path()
-        .trim_end_matches('/')
-        .rsplit('/')
-        .next()
-        .is_some_and(|segment| {
-            segment.len() > 1
-                && segment.starts_with('v')
-                && segment[1..].chars().all(|ch| ch.is_ascii_digit())
-        })
 }
 
 fn set_ai_gw_dialog_provider_type(
@@ -4252,8 +4237,8 @@ fn inferred_model_aliases(models: &[String]) -> BTreeMap<String, String> {
 
 fn inferred_model_alias_key(model: &str) -> Option<String> {
     match model.trim().to_ascii_lowercase().as_str() {
-        "claude-opus-4-8" => Some("opus-4.8".to_string()),
-        "claude-sonnet-4-6" => Some("sonnet-4.6".to_string()),
+        "claude-opus-5-5" => Some("opus-5.5".to_string()),
+        "claude-sonnet-5" => Some("sonnet-5".to_string()),
         _ => None,
     }
 }
@@ -4262,6 +4247,139 @@ fn inferred_model_alias_key(model: &str) -> Option<String> {
 mod model_mapping_tests {
     use super::api::RemoteControlConnectionStatus;
     use super::*;
+
+    #[test]
+    fn model_discovery_preserves_explicit_api_versions() {
+        let base = "https://ark.cn-beijing.volces.com/api/v3";
+        for configured in [None, Some(base), Some("https://catalog.example.com/v4")] {
+            let candidates = model_list_candidates(base, configured, &[]);
+            assert!(
+                candidates
+                    .iter()
+                    .all(|candidate| !candidate.url.contains("/v1/"))
+            );
+            assert!(
+                candidates
+                    .iter()
+                    .all(|candidate| candidate.normalized_base_url == base)
+            );
+        }
+        let candidates = model_list_candidates(base, None, &[]);
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].url, format!("{base}/models"));
+        let configured = "https://catalog.example.com/v4/models?region=cn";
+        let candidates = model_list_candidates(base, Some(configured), &[]);
+        assert_eq!(candidates[0].url, configured);
+    }
+
+    async fn serve_model_list_responses(
+        responses: Vec<String>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}/api/v3", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for response in responses {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 1024];
+                while !request.windows(4).any(|value| value == b"\r\n\r\n") {
+                    let count = socket.read(&mut buffer).await.unwrap();
+                    assert!(count > 0 && request.len() < 8192);
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                requests.push(String::from_utf8(request).unwrap());
+                socket.write_all(response.as_bytes()).await.unwrap();
+                socket.shutdown().await.unwrap();
+            }
+            requests
+        });
+        (base, server)
+    }
+
+    #[tokio::test]
+    async fn model_fetch_recovers_from_disconnect_truncated_body_and_temporary_service_errors() {
+        for first_response in [
+            "",
+            "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{",
+            "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        ] {
+            let body = r#"{"data":[{"id":"test-model"}]}"#;
+            let success = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let (base, server) =
+                serve_model_list_responses(vec![first_response.into(), success]).await;
+            let expected_base = base.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                let client = reqwest::blocking::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .unwrap();
+                fetch_remote_models_with_client(
+                    &client,
+                    model_list_candidates(&base, None, &[]),
+                    "test-model-key",
+                    Duration::from_secs(3),
+                )
+            })
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(result, (vec!["test-model".to_string()], expected_base));
+            let requests = tokio::time::timeout(Duration::from_secs(3), server)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(
+                requests
+                    .iter()
+                    .all(|request| request.starts_with("GET /api/v3/models HTTP/1.1"))
+            );
+            assert!(requests.iter().all(|request| {
+                request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer test-model-key")
+            }));
+        }
+    }
+
+    #[tokio::test]
+    async fn model_fetch_does_not_retry_permanent_errors_or_exceed_retry_after_budget() {
+        for (status, extra_headers) in [
+            ("401 Unauthorized", ""),
+            ("403 Forbidden", ""),
+            ("404 Not Found", ""),
+            ("429 Too Many Requests", "Retry-After: 60\r\n"),
+        ] {
+            let response = format!(
+                "HTTP/1.1 {status}\r\n{extra_headers}Content-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let (base, server) = serve_model_list_responses(vec![response]).await;
+            let error = tokio::task::spawn_blocking(move || {
+                let client = reqwest::blocking::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .unwrap();
+                fetch_remote_models_with_client(
+                    &client,
+                    model_list_candidates(&base, None, &[]),
+                    "",
+                    Duration::from_secs(2),
+                )
+                .unwrap_err()
+            })
+            .await
+            .unwrap();
+            assert!(error.contains(status), "{error}");
+            assert_eq!(error.matches("HTTP ").count(), 1, "{error}");
+            assert_eq!(server.await.unwrap().len(), 1);
+        }
+    }
 
     #[test]
     fn kimi_defaults_to_responses_with_editable_endpoint_and_custom_models() {
@@ -4322,35 +4440,29 @@ mod model_mapping_tests {
 
     #[test]
     fn infers_anthropic_claude_model_aliases() {
-        let models = vec![
-            "claude-opus-4-8".to_string(),
-            "claude-sonnet-4-6".to_string(),
-        ];
+        let models = vec!["claude-opus-5-5".to_string(), "claude-sonnet-5".to_string()];
 
         let aliases = inferred_model_aliases(&models);
 
         assert_eq!(
-            aliases.get("opus-4.8").map(String::as_str),
-            Some("claude-opus-4-8")
+            aliases.get("opus-5.5").map(String::as_str),
+            Some("claude-opus-5-5")
         );
         assert_eq!(
-            aliases.get("sonnet-4.6").map(String::as_str),
-            Some("claude-sonnet-4-6")
+            aliases.get("sonnet-5").map(String::as_str),
+            Some("claude-sonnet-5")
         );
     }
 
     #[test]
     fn shows_inferred_anthropic_aliases_in_mapping_rows() {
-        let models = vec![
-            "claude-opus-4-8".to_string(),
-            "claude-sonnet-4-6".to_string(),
-        ];
+        let models = vec!["claude-opus-5-5".to_string(), "claude-sonnet-5".to_string()];
         let rows = model_mapping_rows_from_config(&models, &BTreeMap::new());
 
-        assert_eq!(rows[0].upstream_model, "claude-opus-4-8");
-        assert_eq!(rows[0].codex_models, vec!["opus-4.8"]);
-        assert_eq!(rows[1].upstream_model, "claude-sonnet-4-6");
-        assert_eq!(rows[1].codex_models, vec!["sonnet-4.6"]);
+        assert_eq!(rows[0].upstream_model, "claude-opus-5-5");
+        assert_eq!(rows[0].codex_models, vec!["opus-5.5"]);
+        assert_eq!(rows[1].upstream_model, "claude-sonnet-5");
+        assert_eq!(rows[1].codex_models, vec!["sonnet-5"]);
     }
 
     #[test]
@@ -4747,55 +4859,107 @@ fn fetch_remote_models(
     let client = apply_outbound_blocking_proxy(
         reqwest::blocking::Client::builder()
             .timeout(timeout)
-            .connect_timeout(Duration::from_secs(5)),
+            .connect_timeout(Duration::from_secs(10)),
     )?
     .build()
-    .map_err(|err| err.to_string())?;
+    .map_err(|err| update::update_error_details(&err))?;
+    fetch_remote_models_with_client(
+        &client,
+        model_list_candidates(base_url, models_url, fallback_models_urls),
+        api_key,
+        timeout,
+    )
+}
+
+fn fetch_remote_models_with_client(
+    client: &reqwest::blocking::Client,
+    candidates: Vec<ModelListCandidate>,
+    api_key: &str,
+    timeout: Duration,
+) -> Result<(Vec<String>, String), String> {
+    if candidates.is_empty() {
+        return Err("Please enter a valid HTTP or HTTPS Base URL".to_string());
+    }
+    let started = std::time::Instant::now();
+    let api_key = api_key.trim();
     let mut errors = Vec::new();
-    for candidate in model_list_candidates(base_url, models_url, fallback_models_urls) {
-        let mut request = client.get(&candidate.url);
-        if !api_key.trim().is_empty() {
-            request = request.header("authorization", format!("Bearer {}", api_key.trim()));
-        }
-
-        let response = match request.send() {
-            Ok(response) => response,
-            Err(err) => {
-                errors.push(format!("{}: {}", candidate.url, err));
-                continue;
+    'candidates: for candidate in candidates {
+        let mut safe_url = Url::parse(&candidate.url).map_err(|err| err.to_string())?;
+        let _ = safe_url.set_username("");
+        let _ = safe_url.set_password(None);
+        safe_url.set_query(None);
+        safe_url.set_fragment(None);
+        for attempt in 0..2 {
+            let remaining = timeout.saturating_sub(started.elapsed());
+            if remaining.is_zero() {
+                errors.push("Model list request timed out".to_string());
+                break 'candidates;
             }
-        };
-        let status = response.status();
-        let body = match response.text() {
-            Ok(body) => body,
-            Err(err) => {
-                errors.push(format!("{}: {}", candidate.url, err));
-                continue;
+            let mut request = client.get(&candidate.url).timeout(remaining);
+            if !api_key.is_empty() {
+                request = request.bearer_auth(api_key);
             }
-        };
-        if !status.is_success() {
-            errors.push(format!(
-                "{}: HTTP {status}: {}",
-                candidate.url,
-                response_preview(&body)
-            ));
-            continue;
-        }
-
-        match serde_json::from_str::<serde_json::Value>(&body) {
-            Ok(json) => {
-                let models = extract_model_ids(&json);
-                if models.is_empty() {
-                    errors.push(format!("{}: response contains no models", candidate.url));
-                    continue;
+            let response = request.send().and_then(|response| {
+                let status = response.status();
+                let retry_delay = if matches!(status.as_u16(), 408 | 429 | 500 | 502 | 503 | 504) {
+                    match response.headers().get(reqwest::header::RETRY_AFTER) {
+                        Some(value) => value
+                            .to_str()
+                            .ok()
+                            .and_then(|value| value.parse::<u64>().ok())
+                            .map(Duration::from_secs),
+                        None => Some(Duration::from_millis(250)),
+                    }
+                } else {
+                    None
+                };
+                response.text().map(|body| (status, body, retry_delay))
+            });
+            let (message, retry_delay) = match response {
+                Ok((status, body, retry_delay)) if !status.is_success() => (
+                    format!("HTTP {status}: {}", response_preview(&body)),
+                    retry_delay,
+                ),
+                Ok((_, body, _)) => match serde_json::from_str::<serde_json::Value>(&body) {
+                    Ok(json) => {
+                        let models = extract_model_ids(&json);
+                        if !models.is_empty() {
+                            return Ok((models, candidate.normalized_base_url));
+                        }
+                        ("response contains no models".to_string(), None)
+                    }
+                    Err(err) => (
+                        format!("response is not JSON ({err}): {}", response_preview(&body)),
+                        None,
+                    ),
+                },
+                Err(err) => {
+                    let retryable = err.is_connect()
+                        || err.is_timeout()
+                        || err.is_request()
+                        || err.is_body()
+                        || err.is_decode();
+                    (
+                        update::update_error_details(&err),
+                        retryable.then_some(Duration::from_millis(250)),
+                    )
                 }
-                return Ok((models, candidate.normalized_base_url));
+            };
+            let message = if api_key.is_empty() {
+                message
+            } else {
+                message.replace(api_key, "<redacted>")
+            };
+            tracing::warn!(target: "codexhub::network", url = %safe_url, attempt = attempt + 1,
+                error = %message, "model list request failed");
+            errors.push(format!("{safe_url}: {message}"));
+            let Some(delay) = retry_delay.filter(|_| attempt == 0) else {
+                break;
+            };
+            if delay >= timeout.saturating_sub(started.elapsed()) {
+                break;
             }
-            Err(err) => errors.push(format!(
-                "{}: response is not JSON ({err}): {}",
-                candidate.url,
-                response_preview(&body)
-            )),
+            thread::sleep(delay);
         }
     }
     Err(errors.join("; "))
@@ -4843,13 +5007,12 @@ fn model_list_candidates(
         return candidates;
     }
 
-    let root = provider_api_root(raw);
     push_model_list_candidate(&mut candidates, format!("{raw}/models"), raw.to_string());
     if !has_api_version_suffix(raw) {
         push_model_list_candidate(
             &mut candidates,
-            format!("{root}/v1/models"),
-            provider_display_base_url(&root),
+            format!("{}/models", provider_display_base_url(raw)),
+            provider_display_base_url(raw),
         );
     }
     candidates
@@ -4865,7 +5028,8 @@ fn push_configured_model_list_candidates(
         return;
     }
 
-    if configured.to_ascii_lowercase().ends_with("/models") {
+    if Url::parse(configured).is_ok_and(|url| url.path().trim_end_matches('/').ends_with("/models"))
+    {
         push_model_list_candidate(candidates, configured.to_string(), normalized_base_url);
         return;
     }
@@ -4875,8 +5039,13 @@ fn push_configured_model_list_candidates(
         format!("{configured}/models"),
         normalized_base_url.clone(),
     );
-    let root = provider_api_root(configured);
-    push_model_list_candidate(candidates, format!("{root}/v1/models"), normalized_base_url);
+    if !has_api_version_suffix(configured) {
+        push_model_list_candidate(
+            candidates,
+            format!("{}/models", provider_display_base_url(configured)),
+            normalized_base_url,
+        );
+    }
 }
 
 fn push_model_list_candidate(

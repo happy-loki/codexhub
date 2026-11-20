@@ -254,7 +254,7 @@ fn write_update_check_diagnostics(elapsed: std::time::Duration, error: &str) {
     );
 }
 
-fn update_error_details(error: &(dyn Error + 'static)) -> String {
+pub(super) fn update_error_details(error: &(dyn Error + 'static)) -> String {
     let mut parts = Vec::new();
     let mut source = Some(error);
     while let Some(error) = source {
@@ -1023,7 +1023,7 @@ mod update_tests {
         }
         assert!(windows.contains("make_latest: false"));
         assert!(linux.contains("make_latest: false"));
-        assert!(macos.contains("make_latest: ${{ contains(github.ref_name, '-')"));
+        assert!(macos.contains("make_latest: ${{ contains(env.RELEASE_TAG, '-')"));
         assert!(macos.contains("required=(latest-windows.json latest-linux.json)"));
         assert!(macos.contains("refusing to promote it to Latest"));
     }

@@ -265,7 +265,7 @@ mod tests {
             &[
                 "gpt-5.6-sol".to_string(),
                 "grok-4.6".to_string(),
-                "Opus-4.8".to_string(),
+                "Opus-5.5".to_string(),
             ],
         );
 
@@ -309,7 +309,7 @@ mod tests {
         assert!(response["dynamic_configs"]["107580212"].is_object());
         assert_eq!(
             response["values"]["codexhub_model_list_config"]["available_models"],
-            json!(["gpt-5.6-sol", "grok-4.6", "Opus-4.8"])
+            json!(["gpt-5.6-sol", "grok-4.6", "Opus-5.5"])
         );
         assert_eq!(
             response["values"]["codexhub_model_list_config"]["default_model"],

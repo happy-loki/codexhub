@@ -200,6 +200,9 @@ mod tests {
             "gpt-6-sol",
             "gpt-6-luna",
             "gpt-6.1-sol",
+            "gpt-6.2-sol",
+            "gpt-6.2-astra",
+            "Opus-5.5",
             "custom-model",
             "codex-auto-review",
         ]);
@@ -226,7 +229,10 @@ mod tests {
                 "GLM-5.3-Flash",
                 "gpt-6-sol",
                 "gpt-6-luna",
-                "gpt-6.1-sol"
+                "gpt-6.1-sol",
+                "gpt-6.2-sol",
+                "gpt-6.2-astra",
+                "Opus-5.5"
             ]
         );
         assert_eq!(response["models"][3]["display_name"], "Grok-4.6");
@@ -388,12 +394,12 @@ mod tests {
                 "model {slug}"
             );
         }
-        assert_eq!(comp_hash("Opus-4.8"), "codexhub-anthropic-summary-v1");
-        assert_eq!(comp_hash("Sonnet-4.6"), "codexhub-anthropic-summary-v1");
+        assert_eq!(comp_hash("Opus-5.5"), "codexhub-anthropic-summary-v1");
+        assert_eq!(comp_hash("Sonnet-5"), "codexhub-anthropic-summary-v1");
 
         assert_ne!(comp_hash("grok-4.6"), comp_hash("gpt-5.6-sol"));
         assert_ne!(comp_hash("deepseek-v4-pro"), comp_hash("gpt-5.5"));
-        assert_ne!(comp_hash("Opus-4.8"), comp_hash("deepseek-v4-pro"));
+        assert_ne!(comp_hash("Opus-5.5"), comp_hash("deepseek-v4-pro"));
     }
 
     #[test]
@@ -403,8 +409,8 @@ mod tests {
             "grok-4.6",
             "GLM-5.3",
             "GLM-5.3-Flash",
-            "Opus-4.8",
-            "Sonnet-4.6",
+            "Opus-5.5",
+            "Sonnet-5",
         ] {
             let model = catalog_models()
                 .iter()
@@ -536,21 +542,23 @@ mod tests {
 
     #[test]
     fn gpt_lite_models_use_current_official_capabilities() {
-        for (slug, priority) in [
-            ("gpt-6.1-sol", 1),
-            ("gpt-6-astra", 2),
-            ("gpt-6-sol", 3),
-            ("gpt-6-luna", 4),
-            ("gpt-5.6-sol", 5),
-            ("gpt-5.6-terra", 8),
-            ("gpt-5.6-luna", 9),
+        for (slug, priority, context_window) in [
+            ("gpt-6.2-sol", 1, 500_000),
+            ("gpt-6.2-astra", 2, 272_000),
+            ("gpt-6.1-sol", 1, 272_000),
+            ("gpt-6-astra", 2, 272_000),
+            ("gpt-6-sol", 3, 272_000),
+            ("gpt-6-luna", 4, 272_000),
+            ("gpt-5.6-sol", 5, 272_000),
+            ("gpt-5.6-terra", 8, 272_000),
+            ("gpt-5.6-luna", 9, 272_000),
         ] {
             let model = catalog_models()
                 .iter()
                 .find(|model| model_slug(model) == Some(slug))
                 .expect("catalog model should exist");
 
-            assert_eq!(model["context_window"], 272_000, "model {slug}");
+            assert_eq!(model["context_window"], context_window, "model {slug}");
             assert_eq!(model["max_context_window"], 872_000, "model {slug}");
             assert_eq!(model["use_responses_lite"], true, "model {slug}");
             assert_eq!(model["shell_type"], "shell_command", "model {slug}");
@@ -564,41 +572,47 @@ mod tests {
     }
 
     #[test]
-    fn gpt_6_1_sol_preserves_official_capabilities_in_configured_response() {
-        let catalog_model = catalog_models()
-            .iter()
-            .find(|model| model_slug(model) == Some("gpt-6.1-sol"))
-            .expect("gpt-6.1-sol should exist");
-        let response = configured_models_response(&config(&["gpt-6.1-sol"]));
-        assert_eq!(response["models"].as_array().unwrap().len(), 1);
-        let model = &response["models"][0];
+    fn recent_gpt_models_preserve_official_capabilities_in_configured_response() {
+        for (slug, display_name, minimum_version) in [
+            ("gpt-6.1-sol", "GPT-6.1-Sol", "0.153.0"),
+            ("gpt-6.2-sol", "GPT-6.2-Sol", "0.166.0"),
+            ("gpt-6.2-astra", "GPT-6.2-Astra", "0.166.0"),
+        ] {
+            let catalog_model = catalog_models()
+                .iter()
+                .find(|model| model_slug(model) == Some(slug))
+                .expect("catalog model should exist");
+            let response = configured_models_response(&config(&[slug]));
+            assert_eq!(response["models"].as_array().unwrap().len(), 1);
+            let model = &response["models"][0];
 
-        // User selection determines output priority; all official fields stay intact.
-        let mut expected = catalog_model.clone();
-        expected["priority"] = json!(0);
-        assert_eq!(model, &expected);
+            // User selection determines output priority; all official fields stay intact.
+            let mut expected = catalog_model.clone();
+            expected["priority"] = json!(0);
+            assert_eq!(model, &expected, "model {slug}");
 
-        assert_eq!(model["display_name"], "GPT-6.1-Sol");
-        assert_eq!(model["default_reasoning_level"], "low");
-        let efforts = model["supported_reasoning_levels"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|level| level["effort"].as_str().unwrap())
-            .collect::<Vec<_>>();
-        assert_eq!(efforts, ["low", "medium", "high", "xhigh", "max", "ultra"]);
-        assert_eq!(model["minimal_client_version"], "0.153.0");
-        assert_eq!(model["comp_hash"], "3000");
-        assert_eq!(model["prefer_websockets"], true);
-        assert_eq!(model["tool_mode"], "code_mode_only");
-        assert_eq!(model["apply_patch_tool_type"], "freeform");
-        assert_eq!(model["supports_search_tool"], true);
-        assert_eq!(model["web_search_tool_type"], "text_and_image");
-        assert_eq!(model["input_modalities"], json!(["text", "image"]));
-        assert_eq!(model["supports_image_detail_original"], true);
-        assert_eq!(model["multi_agent_version"], "v2");
-        assert_eq!(model["multi_agent_reasoning_effort"], "xhigh");
-        assert!(model["model_messages"].is_object());
+            assert_eq!(model["display_name"], display_name);
+            assert_eq!(model["default_reasoning_level"], "low");
+            let efforts = model["supported_reasoning_levels"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|level| level["effort"].as_str().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(efforts, ["low", "medium", "high", "xhigh", "max", "ultra"]);
+            assert_eq!(model["minimal_client_version"], minimum_version);
+            assert_eq!(model["comp_hash"], "3000");
+            assert_eq!(model["prefer_websockets"], true);
+            assert_eq!(model["tool_mode"], "code_mode_only");
+            assert_eq!(model["apply_patch_tool_type"], "freeform");
+            assert_eq!(model["supports_search_tool"], true);
+            assert_eq!(model["web_search_tool_type"], "text_and_image");
+            assert_eq!(model["input_modalities"], json!(["text", "image"]));
+            assert_eq!(model["supports_image_detail_original"], true);
+            assert_eq!(model["multi_agent_version"], "v2");
+            assert_eq!(model["multi_agent_reasoning_effort"], "xhigh");
+            assert!(model["model_messages"].is_object());
+        }
     }
 
     #[test]
@@ -636,6 +650,10 @@ mod tests {
             "gpt-5.5",
             "gpt-6-astra",
             "gpt-6.1-sol",
+            "gpt-6.2-sol",
+            "gpt-6.2-astra",
+            "Opus-5.5",
+            "Sonnet-5",
             "gpt-6-sol",
             "gpt-6-luna",
             "GLM-5.3",
@@ -647,6 +665,8 @@ mod tests {
             );
         }
         assert!(!slugs.contains(&"gpt-5.2"));
+        assert!(!slugs.contains(&"Opus-4.8"));
+        assert!(!slugs.contains(&"Sonnet-4.6"));
         assert!(
             options
                 .iter()

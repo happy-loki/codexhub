@@ -1,4 +1,4 @@
-use crate::ai_gateway::config::{ProviderConfig, provider_api_root};
+use crate::ai_gateway::config::{ProviderConfig, provider_endpoint_url};
 use crate::ai_gateway::error::GatewayError;
 
 use super::types::ANTHROPIC_VERSION;
@@ -121,7 +121,7 @@ impl AnthropicProviderOptions {
     pub(super) fn messages_url(&self, provider: &ProviderConfig) -> String {
         match self.endpoint {
             AnthropicEndpointStyle::V1Messages => {
-                format!("{}/v1/messages", provider_api_root(&provider.base_url))
+                provider_endpoint_url(&provider.base_url, "messages")
             }
         }
     }

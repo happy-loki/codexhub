@@ -2,6 +2,26 @@ use super::*;
 use axum::{extract::Form, http::HeaderMap, routing::post};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+#[test]
+fn api_endpoints_preserve_configured_version_prefix() {
+    let provider = ProviderConfig {
+        base_url: "https://ark.cn-beijing.volces.com/api/v3".into(),
+        ..Default::default()
+    };
+    for endpoint_name in [
+        "responses",
+        "responses/compact",
+        "models",
+        "images/generations",
+        "images/edits",
+    ] {
+        assert_eq!(
+            endpoint(&provider, &format!("/v1/{endpoint_name}")),
+            format!("https://ark.cn-beijing.volces.com/api/v3/{endpoint_name}")
+        );
+    }
+}
+
 pub(super) fn jwt(account: &str, expires: u64) -> String {
     format!("e30.{}.signature", URL_SAFE_NO_PAD.encode(serde_json::to_vec(&json!({
         "exp": expires, "email":"test@example.invalid",
